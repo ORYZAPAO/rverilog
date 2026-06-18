@@ -156,7 +156,7 @@ fn lower_ansi_port(
             };
             let name = get_id(tree, RefNode::PortIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
-            Ok(PortDecl { name, direction: dir, width: 1 })
+            Ok(PortDecl { name, direction: dir, width: 1, width_expr: Expr::Const(lv(1, 32)) })
         }
     }
 }
@@ -175,10 +175,10 @@ fn lower_ansi_port_net(
     } else {
         PortDirection::Input
     };
-    let width = packed_width(tree, RefNode::AnsiPortDeclarationNet(x));
+    let (width, width_expr) = packed_width_expr(tree, RefNode::AnsiPortDeclarationNet(x));
     let name = get_id(tree, RefNode::PortIdentifier(&x.nodes.1))
         .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
-    Ok(PortDecl { name, direction: dir, width })
+    Ok(PortDecl { name, direction: dir, width, width_expr })
 }
 
 fn lower_ansi_port_variable(
@@ -190,10 +190,10 @@ fn lower_ansi_port_variable(
     } else {
         PortDirection::Output
     };
-    let width = packed_width(tree, RefNode::AnsiPortDeclarationVariable(x));
+    let (width, width_expr) = packed_width_expr(tree, RefNode::AnsiPortDeclarationVariable(x));
     let name = get_id(tree, RefNode::PortIdentifier(&x.nodes.1))
         .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
-    Ok(PortDecl { name, direction: dir, width })
+    Ok(PortDecl { name, direction: dir, width, width_expr })
 }
 
 fn lower_port_direction(d: &sv_parser::PortDirection) -> PortDirection {
@@ -353,11 +353,11 @@ fn lower_decl(
 fn lower_net_decl(tree: &SyntaxTree, nd: &sv_parser::NetDeclaration) -> Result<Vec<NetDecl>, FrontendError> {
     let mut out = Vec::new();
     if let sv_parser::NetDeclaration::NetType(nt) = nd {
-        let width = packed_width(tree, RefNode::NetDeclarationNetType(nt));
+        let (width, width_expr) = packed_width_expr(tree, RefNode::NetDeclarationNetType(nt));
         // ListOfNetDeclAssignments → NetDeclAssignment → NetIdentifier
         for name_node in unwrap_all_net_identifiers(RefNode::NetDeclarationNetType(nt)) {
             if let Some(name) = get_id(tree, name_node) {
-                out.push(NetDecl { name, width, kind: NetKind::Wire });
+                out.push(NetDecl { name, width, kind: NetKind::Wire, width_expr: width_expr.clone() });
             }
         }
     }
@@ -370,11 +370,10 @@ fn lower_data_decl(tree: &SyntaxTree, dd: &sv_parser::DataDeclaration) -> Result
     if let sv_parser::DataDeclaration::Variable(dv) = dd {
         // Check if this is an integer type (keyword "integer")
         let is_integer = has_integer_type(tree, RefNode::DataDeclarationVariable(dv));
-        let width = if is_integer { 32 } else { packed_width_expr(tree, RefNode::DataDeclarationVariable(dv)).0 };
-        let elem_width_expr = if is_integer {
-            Expr::Const(lv(32, 32))
+        let (width, width_expr) = if is_integer {
+            (32u32, Expr::Const(lv(32, 32)))
         } else {
-            packed_width_expr(tree, RefNode::DataDeclarationVariable(dv)).1
+            packed_width_expr(tree, RefNode::DataDeclarationVariable(dv))
         };
 
         // Check for unpacked dimension (indicates memory array)
@@ -385,9 +384,9 @@ fn lower_data_decl(tree: &SyntaxTree, dd: &sv_parser::DataDeclaration) -> Result
             };
             let depth_expr = extract_unpacked_dim_depth(tree, vda_node);
             if let Some(depth) = depth_expr {
-                mems.push(MemDecl { name, elem_width: elem_width_expr.clone(), depth });
+                mems.push(MemDecl { name, elem_width: width_expr.clone(), depth });
             } else {
-                regs.push(RegDecl { name, width });
+                regs.push(RegDecl { name, width, width_expr: width_expr.clone() });
             }
         }
     }

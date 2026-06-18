@@ -205,20 +205,26 @@ fn elab_module(
             PortDirection::Output => NetKind::Reg,
             _ => NetKind::Wire,
         };
-        let net_id = ctx.alloc_net(NetInfo { width: port.width, kind, scope, name: port.name.clone() });
+        let width = eval_const_hir(ctx, scope, &port.width_expr)
+            .map(|v| v as u32).unwrap_or(port.width).max(1);
+        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: port.name.clone() });
         ctx.register_net(scope, port.name.clone(), net_id);
     }
 
     // Register wire nets
     for net in &hir.nets {
         let kind = lower_netkind(net.kind);
-        let net_id = ctx.alloc_net(NetInfo { width: net.width, kind, scope, name: net.name.clone() });
+        let width = eval_const_hir(ctx, scope, &net.width_expr)
+            .map(|v| v as u32).unwrap_or(net.width).max(1);
+        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: net.name.clone() });
         ctx.register_net(scope, net.name.clone(), net_id);
     }
 
     // Register reg declarations
     for reg in &hir.regs {
-        let net_id = ctx.alloc_net(NetInfo { width: reg.width, kind: NetKind::Reg, scope, name: reg.name.clone() });
+        let width = eval_const_hir(ctx, scope, &reg.width_expr)
+            .map(|v| v as u32).unwrap_or(reg.width).max(1);
+        let net_id = ctx.alloc_net(NetInfo { width, kind: NetKind::Reg, scope, name: reg.name.clone() });
         ctx.register_net(scope, reg.name.clone(), net_id);
     }
 

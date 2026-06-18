@@ -37,7 +37,8 @@ pub struct HirModule {
 pub struct PortDecl {
     pub name: SmolStr,
     pub direction: PortDirection,
-    pub width: u32,
+    pub width: u32,        // static fallback (1 if param-dependent)
+    pub width_expr: Expr,  // authoritative width expression
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,12 +65,14 @@ pub struct NetDecl {
     pub name: SmolStr,
     pub width: u32,
     pub kind: NetKind,
+    pub width_expr: Expr,
 }
 
 #[derive(Debug, Clone)]
 pub struct RegDecl {
     pub name: SmolStr,
     pub width: u32,
+    pub width_expr: Expr,
 }
 
 #[derive(Debug, Clone)]
