@@ -36,6 +36,7 @@ pub struct Interpreter {
     vcd: Option<VcdWriter>,
     vcd_path: Option<PathBuf>,   // set by $dumpfile
     vcd_active: bool,            // enabled by $dumpvars
+    output_buf: String,
 }
 
 impl Interpreter {
@@ -64,6 +65,7 @@ impl Interpreter {
             vcd: None,
             vcd_path: None,
             vcd_active: false,
+            output_buf: String::new(),
         }
     }
 
@@ -187,7 +189,10 @@ impl Interpreter {
                     return;
                 }
                 StepResult::Finish => {
-                    println!("$finish at time {}", self.now);
+                    let msg = format!("$finish at time {}", self.now);
+                    println!("{}", msg);
+                    self.output_buf.push_str(&msg);
+                    self.output_buf.push('\n');
                     self.finished = true;
                     return;
                 }
@@ -314,14 +319,19 @@ impl Interpreter {
             SysTask::Display => {
                 let s = self.format_args(args);
                 println!("{}", s);
+                self.output_buf.push_str(&s);
+                self.output_buf.push('\n');
             }
             SysTask::Write => {
                 let s = self.format_args(args);
                 print!("{}", s);
+                self.output_buf.push_str(&s);
             }
             SysTask::Monitor => {
                 let s = self.format_args(args);
                 println!("{}", s);
+                self.output_buf.push_str(&s);
+                self.output_buf.push('\n');
             }
             SysTask::Finish => {
                 self.finished = true;
@@ -541,6 +551,11 @@ impl Interpreter {
 
     pub fn get_net(&self, net: NetId) -> Option<&LogicVal> {
         self.net_values.get(&net)
+    }
+
+    /// Returns the accumulated $display/$write/$finish output since construction.
+    pub fn output(&self) -> &str {
+        &self.output_buf
     }
 
     /// Enable VCD output to the given path.  Call before `run()`.
