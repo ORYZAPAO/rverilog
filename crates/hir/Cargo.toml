@@ -1,0 +1,12 @@
+[package]
+name = "rverilog-hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rverilog-mir = { path = "../mir" }
+indexmap = { version = "2.2", features = ["serde"] }
+smallvec = "1.11"
+smol_str = "0.2"
+thiserror = "1.0"

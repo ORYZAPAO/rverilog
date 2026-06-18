@@ -1,0 +1,9 @@
+[package]
+name = "rverilog-vcd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "1.0"
+chrono = "0.4"

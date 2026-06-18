@@ -1,0 +1,13 @@
+[package]
+name = "rverilog-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rverilog-mir = { path = "../mir" }
+rverilog-vcd = { path = "../vcd_out" }
+indexmap = "2.2"
+thiserror = "1.0"
+tracing = "0.1"
+id-arena = "2.3"
