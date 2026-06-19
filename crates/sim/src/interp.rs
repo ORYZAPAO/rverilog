@@ -500,6 +500,8 @@ impl Interpreter {
         match lval {
             LValue::Net(id) => {
                 let net_id = *id;
+                let w = self.design.get_net(net_id).width;
+                let val = if val.width() == w { val } else { val.resize(w) };
                 self.net_values.insert(net_id, val.clone());
                 self.vcd_record_net_change(net_id, &val);
             }

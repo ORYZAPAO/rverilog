@@ -765,10 +765,57 @@ after task r=7
 $finish at time 0
 ```
 
-feat/m1-milestone にプッシュ予定。
+feat/m1-milestone にプッシュ済み (e3d1b48)。
 
 ### Next
 
 - iverilog との出力比較 CI 導入
 - `generate`/`genvar` 対応
 - gate primitive (`and`/`or`/`not`/`buf` 等)
+
+---
+
+## 2026-06-19 (2)
+
+### Task
+
+gate primitive (`and`/`or`/`nand`/`nor`/`xor`/`xnor`/`buf`/`not`) 対応の実装。
+
+### 設計
+
+- **Frontend** (`crates/frontend/src/lower.rs`): `ModuleOrGenerateItem::Gate` を新規ハンドリング。`lower_gate_inst` で `GateInstantiation::NInput`（and/nand/or/nor/xor/xnor、可変入力数）と `NOutput`（buf/not、複数出力対応）をそれぞれ `ContinuousAssign` に展開。ゲートは組合せ論理そのものなので、専用の HIR/MIR ノードを増やさずに既存の `assign` 機構へ直接変換するだけで済む。
+- 否定系ゲート（nand/nor/xnor/not）は `Expr::Un(UnOp::BitNot, ...)` でラップ。
+- switch/cmos/pass/pullup/pulldown 系プリミティブは本サブセットでは未対応（黙ってスキップ）。
+
+### バグ修正: net 代入時の幅切り詰め漏れ
+
+ゲート実装の検証中に、`nand`/`nor`/`xnor`/`not` の出力が 1bit のはずなのに 32bit 幅で表示される不具合を発見。
+
+原因: `crates/sim/src/interp.rs` の `write_lvalue` の `LValue::Net` 分岐が、代入値を **net の宣言幅に切り詰めずにそのまま格納**していた。たとえば `reg a; ... a = 1;` の `1` は無符号化なし32bit定数のため、`a`（1bit net）に 32bit 幅の値がそのまま保存され、以後 `~a` などの演算で上位ビットのゴミがそのまま伝播していた（and/or/xor は結果が偶然0で見た目上問題が出ていなかった）。
+
+修正: `LogicVal` に `resize(width)` メソッドを追加（`from_chunks` 経由でチャンク単位に切り詰め/ゼロ拡張）し、`write_lvalue` の `LValue::Net` 分岐で代入前に net の宣言幅へ `resize` するよう変更。`crates/mir/src/logicval.rs` / `crates/sim/src/interp.rs` を修正。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok
+test test_gates ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+手動確認:
+```
+a=0 b=0 and=0 or=0 nand=1 nor=1 xor=0 xnor=1 buf=0 not=1
+a=1 b=0 and=0 or=1 nand=1 nor=0 xor=1 xnor=0 buf=1 not=0
+a=1 b=1 and=1 or=1 nand=0 nor=0 xor=0 xnor=1 buf=1 not=0
+$finish at time 3
+```
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `generate`/`genvar` 対応
+- `disable`/`fork`-`join` 対応

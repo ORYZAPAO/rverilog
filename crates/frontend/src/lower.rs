@@ -314,6 +314,9 @@ fn process_mogi(
         MOGI::Module(m) => {
             instances.push(lower_module_inst(tree, &m.nodes.1)?);
         }
+        MOGI::Gate(g) => {
+            assigns.extend(lower_gate_inst(tree, &g.nodes.1));
+        }
         MOGI::ModuleItem(mi) => {
             use sv_parser::ModuleCommonItem as MCI;
             match &mi.nodes.1 {
@@ -700,6 +703,72 @@ fn lower_continuous_assign(
         }
     }
     Ok(out)
+}
+
+// ── gate primitives (and/or/nand/nor/xor/xnor/buf/not) ─────────────────────────
+// Lowered directly into continuous assigns: a gate is just combinational logic.
+
+fn gate_keyword_text<'a>(tree: &'a SyntaxTree, kw: &sv_parser::Keyword) -> &'a str {
+    tree.get_str(kw).unwrap_or("").trim()
+}
+
+fn lower_gate_inst(tree: &SyntaxTree, gi: &sv_parser::GateInstantiation) -> Vec<ContinuousAssign> {
+    use sv_parser::GateInstantiation as GI;
+    let mut out = Vec::new();
+    match gi {
+        GI::NInput(n) => {
+            let (op, negate) = match gate_keyword_text(tree, &n.nodes.0.nodes.0) {
+                "and" => (BinOp::BitAnd, false),
+                "nand" => (BinOp::BitAnd, true),
+                "or" => (BinOp::BitOr, false),
+                "nor" => (BinOp::BitOr, true),
+                "xor" => (BinOp::BitXor, false),
+                "xnor" => (BinOp::BitXor, true),
+                _ => return out,
+            };
+            for inst in n.nodes.3.contents() {
+                let (out_term, _, in_terms) = &inst.nodes.1.nodes.1;
+                let lval = match lower_net_lvalue(tree, RefNode::NetLvalue(&out_term.nodes.0)) {
+                    Ok(lv) => lv,
+                    Err(_) => continue,
+                };
+                let inputs: Vec<Expr> = in_terms.contents().into_iter()
+                    .filter_map(|it| lower_expression(tree, &it.nodes.0).ok())
+                    .collect();
+                if inputs.is_empty() { continue; }
+                let mut expr = inputs[0].clone();
+                for rhs in &inputs[1..] {
+                    expr = Expr::Bin(op, Box::new(expr), Box::new(rhs.clone()));
+                }
+                if negate {
+                    expr = Expr::Un(UnOp::BitNot, Box::new(expr));
+                }
+                out.push(ContinuousAssign { lval, expr });
+            }
+        }
+        GI::NOutput(n) => {
+            let negate = match gate_keyword_text(tree, &n.nodes.0.nodes.0) {
+                "buf" => false,
+                "not" => true,
+                _ => return out,
+            };
+            for inst in n.nodes.3.contents() {
+                let (out_terms, _, in_term) = &inst.nodes.1.nodes.1;
+                let in_expr = match lower_expression(tree, &in_term.nodes.0) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let in_expr = if negate { Expr::Un(UnOp::BitNot, Box::new(in_expr)) } else { in_expr };
+                for ot in out_terms.contents() {
+                    if let Ok(lval) = lower_net_lvalue(tree, RefNode::NetLvalue(&ot.nodes.0)) {
+                        out.push(ContinuousAssign { lval, expr: in_expr.clone() });
+                    }
+                }
+            }
+        }
+        _ => {} // switch/cmos/pass/pullup/pulldown gates: unsupported subset
+    }
+    out
 }
 
 fn unwrap_all_net_assignments(node: RefNode) -> Vec<RefNode> {
