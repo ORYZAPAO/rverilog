@@ -15,6 +15,19 @@ use indexmap::IndexMap;
 use smol_str::SmolStr;
 use crate::ElabError;
 
+#[derive(Clone)]
+struct FunctionInfo {
+    args: Vec<NetId>,
+    ret: NetId,
+    body: StmtId,
+}
+
+#[derive(Clone)]
+struct TaskInfo {
+    params: Vec<(NetId, PortDirection)>,
+    body: StmtId,
+}
+
 struct ElabCtx<'a> {
     modules: &'a IndexMap<SmolStr, HirModule>,
     nets: Vec<NetInfo>,
@@ -28,6 +41,8 @@ struct ElabCtx<'a> {
     scope_nets: IndexMap<u32, IndexMap<SmolStr, NetId>>,
     scope_mems: IndexMap<u32, IndexMap<SmolStr, MemId>>,
     scope_params: IndexMap<u32, IndexMap<SmolStr, u64>>,
+    scope_funcs: IndexMap<u32, IndexMap<SmolStr, FunctionInfo>>,
+    scope_tasks: IndexMap<u32, IndexMap<SmolStr, TaskInfo>>,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -45,6 +60,8 @@ impl<'a> ElabCtx<'a> {
             scope_nets: IndexMap::new(),
             scope_mems: IndexMap::new(),
             scope_params: IndexMap::new(),
+            scope_funcs: IndexMap::new(),
+            scope_tasks: IndexMap::new(),
         }
     }
 
@@ -105,6 +122,40 @@ impl<'a> ElabCtx<'a> {
             if let Some(map) = self.scope_params.get(&s.0) {
                 if let Some(&v) = map.get(name) {
                     return Some(v);
+                }
+            }
+            cur = self.scopes.get(s.0 as usize).and_then(|sc| sc.parent);
+        }
+        None
+    }
+
+    fn register_func(&mut self, scope: ScopeId, name: SmolStr, info: FunctionInfo) {
+        self.scope_funcs.entry(scope.0).or_default().insert(name, info);
+    }
+
+    fn resolve_func(&self, scope: ScopeId, name: &str) -> Option<FunctionInfo> {
+        let mut cur = Some(scope);
+        while let Some(s) = cur {
+            if let Some(map) = self.scope_funcs.get(&s.0) {
+                if let Some(f) = map.get(name) {
+                    return Some(f.clone());
+                }
+            }
+            cur = self.scopes.get(s.0 as usize).and_then(|sc| sc.parent);
+        }
+        None
+    }
+
+    fn register_task(&mut self, scope: ScopeId, name: SmolStr, info: TaskInfo) {
+        self.scope_tasks.entry(scope.0).or_default().insert(name, info);
+    }
+
+    fn resolve_task(&self, scope: ScopeId, name: &str) -> Option<TaskInfo> {
+        let mut cur = Some(scope);
+        while let Some(s) = cur {
+            if let Some(map) = self.scope_tasks.get(&s.0) {
+                if let Some(t) = map.get(name) {
+                    return Some(t.clone());
                 }
             }
             cur = self.scopes.get(s.0 as usize).and_then(|sc| sc.parent);
@@ -234,6 +285,61 @@ fn elab_module(
         let depth = eval_const_hir(ctx, scope, &mem.depth).unwrap_or(1) as u32;
         let mem_id = ctx.alloc_mem(MemInfo { depth, elem_width, scope, name: mem.name.clone() });
         ctx.register_mem(scope, mem.name.clone(), mem_id);
+    }
+
+    // Function declarations
+    for func in &hir.functions {
+        let func_scope = ctx.alloc_scope(Scope {
+            parent: Some(scope),
+            name: SmolStr::from(format!("$func_{}", func.name)),
+            module_name: hir.name.clone(),
+        });
+        let ret_w = eval_const_hir(ctx, scope, &func.width_expr)
+            .map(|v| v as u32).unwrap_or(func.width).max(1);
+        let ret_net = ctx.alloc_net(NetInfo { width: ret_w, kind: NetKind::Reg, scope: func_scope, name: func.name.clone() });
+        ctx.register_net(func_scope, func.name.clone(), ret_net);
+
+        let mut arg_nets = Vec::new();
+        for arg in &func.args {
+            let w = eval_const_hir(ctx, scope, &arg.width_expr).unwrap_or(1).max(1) as u32;
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: func_scope, name: arg.name.clone() });
+            ctx.register_net(func_scope, arg.name.clone(), net_id);
+            arg_nets.push(net_id);
+        }
+        for local in &func.locals {
+            let w = eval_const_hir(ctx, func_scope, &local.width_expr)
+                .map(|v| v as u32).unwrap_or(local.width).max(1);
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: func_scope, name: local.name.clone() });
+            ctx.register_net(func_scope, local.name.clone(), net_id);
+        }
+
+        let body_id = lower_stmt(ctx, func_scope, &func.body)?;
+        ctx.register_func(scope, func.name.clone(), FunctionInfo { args: arg_nets, ret: ret_net, body: body_id });
+    }
+
+    // Task declarations
+    for task in &hir.tasks {
+        let task_scope = ctx.alloc_scope(Scope {
+            parent: Some(scope),
+            name: SmolStr::from(format!("$task_{}", task.name)),
+            module_name: hir.name.clone(),
+        });
+        let mut params = Vec::new();
+        for arg in &task.args {
+            let w = eval_const_hir(ctx, scope, &arg.width_expr).unwrap_or(1).max(1) as u32;
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: task_scope, name: arg.name.clone() });
+            ctx.register_net(task_scope, arg.name.clone(), net_id);
+            params.push((net_id, arg.direction));
+        }
+        for local in &task.locals {
+            let w = eval_const_hir(ctx, task_scope, &local.width_expr)
+                .map(|v| v as u32).unwrap_or(local.width).max(1);
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: task_scope, name: local.name.clone() });
+            ctx.register_net(task_scope, local.name.clone(), net_id);
+        }
+
+        let body_id = lower_stmt(ctx, task_scope, &task.body)?;
+        ctx.register_task(scope, task.name.clone(), TaskInfo { params, body: body_id });
     }
 
     // Continuous assigns
@@ -418,6 +524,17 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
             };
             Expr::Const(LogicVal::new(32, clog2(v), 0))
         }
+        HirExpr::Call(name, args) => {
+            let info = ctx.resolve_func(scope, name.as_str())
+                .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))?;
+            let mut setup = Vec::new();
+            for (&arg_net, arg_e) in info.args.iter().zip(args.iter()) {
+                let val_id = lower_expr(ctx, scope, arg_e)?;
+                setup.push(ctx.alloc_stmt(Stmt::BlockingAssign(LValue::Net(arg_net), val_id)));
+            }
+            setup.push(info.body);
+            Expr::CallResult(setup, info.ret)
+        }
     };
     Ok(ctx.alloc_expr(mir))
 }
@@ -537,6 +654,31 @@ fn lower_stmt(ctx: &mut ElabCtx, scope: ScopeId, s: &HirStmt) -> Result<StmtId, 
             let while_body = ctx.alloc_stmt(Stmt::Block(vec![body_id, step_id]));
             let while_stmt = ctx.alloc_stmt(Stmt::While(cond_id, while_body));
             Stmt::Block(vec![init_id, while_stmt])
+        }
+        HirStmt::TaskCall(name, args) => {
+            let info = ctx.resolve_task(scope, name.as_str())
+                .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))?;
+            let mut block = Vec::new();
+            for (i, (param_net, dir)) in info.params.iter().enumerate() {
+                if *dir != PortDirection::Output {
+                    if let Some(arg_e) = args.get(i) {
+                        let val_id = lower_expr(ctx, scope, arg_e)?;
+                        block.push(ctx.alloc_stmt(Stmt::BlockingAssign(LValue::Net(*param_net), val_id)));
+                    }
+                }
+            }
+            block.push(info.body);
+            for (i, (param_net, dir)) in info.params.iter().enumerate() {
+                if *dir != PortDirection::Input {
+                    if let Some(HirExpr::Net(n)) = args.get(i) {
+                        if let Some(target_net) = ctx.resolve_net(scope, n.as_str()) {
+                            let ret_expr = ctx.alloc_expr(Expr::Net(*param_net));
+                            block.push(ctx.alloc_stmt(Stmt::BlockingAssign(LValue::Net(target_net), ret_expr)));
+                        }
+                    }
+                }
+            }
+            Stmt::Block(block)
         }
     };
     Ok(ctx.alloc_stmt(mir))

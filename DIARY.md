@@ -723,3 +723,52 @@ feat/m1-milestone にプッシュ済み。
 
 - iverilog との出力比較 CI 導入
 - `function`/`task` 対応
+
+---
+
+## 2026-06-19
+
+### Task
+
+`function`/`task` 対応の実装。
+
+### 設計
+
+- **HIR** (`crates/hir/src/design.rs`): `FunctionDecl`/`TaskDecl`/`TfArg` を追加。`HirModule.functions`/`tasks` フィールド追加。`Expr::Call(name, args)`（関数呼び出し式）、`Stmt::TaskCall(name, args)`（タスク呼び出し文）を追加。
+- **Frontend** (`crates/frontend/src/lower.rs`): ANSI形式 (`function [W] f(input a, ...);`) と旧式 (`function [W] f; input a; ...; endfunction`) の両方をパース。`Primary::FunctionSubroutineCall` → `Expr::Call`、`SubroutineCall::TfCall` → `Stmt::TaskCall`。
+- **Elab** (`crates/elab/src/elaborate.rs`): 関数/タスクごとに専用スコープ (`$func_*`/`$task_*`、親は宣言元モジュールスコープ) を確保し、引数・ローカル変数を reg として確保（呼び出し毎に再エントラントではない、非再帰モデル）。`Expr::Call` は呼び出し元スコープで引数を評価して引数regへ代入する `Stmt::BlockingAssign` 列 + 本体 `StmtId` を `Expr::CallResult(setup_stmts, ret_net)` にまとめる。`Stmt::TaskCall` は入力代入→本体→出力書き戻し（`output`/`inout` 引数は単純な net 名のみ対応）をまとめた `Stmt::Block` に展開。
+- **MIR** (`crates/mir/src/ir.rs`): `Expr::CallResult(Vec<StmtId>, NetId)` を追加。
+- **Interpreter** (`crates/sim/src/interp.rs`): `eval_expr`/`get_lval_val`/`format_args`/`format_string` を `&mut self` 化（式評価中に呼び出しのセットアップ文を実行できるようにするため）。`exec_sync_stmt` を新設し、`Expr::CallResult` 評価時にセットアップ文（引数代入＋関数本体）をスケジューラを介さず即時実行してから戻り値 net を読む（Verilog の関数はゼロタイムで実行される仕様に対応）。タスク呼び出しは通常の `Stmt::Block` として既存のプロセススケジューラ経由で実行されるため、本体内の `#delay`/`@event` も動作する。
+
+### 制約
+
+- 関数本体内の `#delay`/`@event` は無視して即時実行（仕様上関数では使用不可のため許容範囲）。
+- 関数/タスクは非再帰（呼び出し毎に専用regを再利用、再入不可）。
+- `output`/`inout` 引数は単純な net 名のみ書き戻し対応（部分選択や式は不可）。
+- 連続代入 (`assign`) 内での関数呼び出しは未対応。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+手動確認 (`/tmp/test_func_task.v`):
+```
+add8(3,4) = 7
+show_sum: 3 + 4 = 7
+after task r=7
+$finish at time 0
+```
+
+feat/m1-milestone にプッシュ予定。
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `generate`/`genvar` 対応
+- gate primitive (`and`/`or`/`not`/`buf` 等)

@@ -2,10 +2,10 @@ use sv_parser::{parse_sv, unwrap_node, Define, DefineText, RefNode, SyntaxTree};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use rverilog_hir::{
-    AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, EdgeType, Expr, HirModule,
-    InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind,
-    ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, RegDecl, Sensitivity,
-    SensitivityItem, Stmt, SysTask, SysFuncKind, UnOp,
+    AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, EdgeType, Expr, FunctionDecl,
+    HirModule, InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl,
+    NetKind, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, RegDecl,
+    Sensitivity, SensitivityItem, Stmt, SysTask, SysFuncKind, TaskDecl, TfArg, UnOp,
 };
 use rverilog_mir::LogicVal;
 use smol_str::SmolStr;
@@ -102,9 +102,9 @@ fn lower_module_ansi(
 
     let ports = lower_ansi_ports(tree, &header.nodes.6)?;
     let params = lower_param_port_list(tree, &header.nodes.5)?;
-    let (nets, regs, mems, locals, assigns, initials, alwayses, instances) = lower_nonport_items(tree, &x.nodes.2)?;
+    let (nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks) = lower_nonport_items(tree, &x.nodes.2)?;
 
-    Ok(HirModule { name, ports, params, locals, nets, regs, mems, assigns, initials, alwayses, instances })
+    Ok(HirModule { name, ports, params, locals, nets, regs, mems, assigns, initials, alwayses, instances, functions, tasks })
 }
 
 fn lower_module_nonansi(
@@ -115,9 +115,9 @@ fn lower_module_nonansi(
     let name = get_id(tree, RefNode::ModuleIdentifier(&header.nodes.3))
         .ok_or_else(|| FrontendError::ParseError("missing module name".into()))?;
 
-    let (nets, regs, mems, locals, assigns, initials, alwayses, instances) = lower_module_items(tree, &x.nodes.2)?;
+    let (nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks) = lower_module_items(tree, &x.nodes.2)?;
 
-    Ok(HirModule { name, ports: vec![], params: vec![], locals, nets, regs, mems, assigns, initials, alwayses, instances })
+    Ok(HirModule { name, ports: vec![], params: vec![], locals, nets, regs, mems, assigns, initials, alwayses, instances, functions, tasks })
 }
 
 // ── ports ─────────────────────────────────────────────────────────────────────
@@ -244,7 +244,7 @@ fn lower_param_port_list(
 
 // ── module items ──────────────────────────────────────────────────────────────
 
-type Items = (Vec<NetDecl>, Vec<RegDecl>, Vec<MemDecl>, Vec<LocalParamDecl>, Vec<ContinuousAssign>, Vec<InitialConstruct>, Vec<AlwaysConstruct>, Vec<ModuleInstance>);
+type Items = (Vec<NetDecl>, Vec<RegDecl>, Vec<MemDecl>, Vec<LocalParamDecl>, Vec<ContinuousAssign>, Vec<InitialConstruct>, Vec<AlwaysConstruct>, Vec<ModuleInstance>, Vec<FunctionDecl>, Vec<TaskDecl>);
 
 fn lower_nonport_items(
     tree: &SyntaxTree,
@@ -258,13 +258,15 @@ fn lower_nonport_items(
     let mut initials = Vec::new();
     let mut alwayses = Vec::new();
     let mut instances = Vec::new();
+    let mut functions = Vec::new();
+    let mut tasks = Vec::new();
 
     for item in items {
         if let sv_parser::NonPortModuleItem::ModuleOrGenerateItem(mogi) = item {
-            process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances)?;
+            process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances, &mut functions, &mut tasks)?;
         }
     }
-    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances))
+    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks))
 }
 
 fn lower_module_items(
@@ -279,15 +281,17 @@ fn lower_module_items(
     let mut initials = Vec::new();
     let mut alwayses = Vec::new();
     let mut instances = Vec::new();
+    let mut functions = Vec::new();
+    let mut tasks = Vec::new();
 
     for item in items {
         if let sv_parser::ModuleItem::NonPortModuleItem(npmi) = item {
             if let sv_parser::NonPortModuleItem::ModuleOrGenerateItem(mogi) = npmi.as_ref() {
-                process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances)?;
+                process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances, &mut functions, &mut tasks)?;
             }
         }
     }
-    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances))
+    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -302,6 +306,8 @@ fn process_mogi(
     initials: &mut Vec<InitialConstruct>,
     alwayses: &mut Vec<AlwaysConstruct>,
     instances: &mut Vec<ModuleInstance>,
+    functions: &mut Vec<FunctionDecl>,
+    tasks: &mut Vec<TaskDecl>,
 ) -> Result<(), FrontendError> {
     use sv_parser::ModuleOrGenerateItem as MOGI;
     match mogi {
@@ -314,7 +320,7 @@ fn process_mogi(
                 MCI::AlwaysConstruct(ac) => alwayses.push(lower_always(tree, ac)?),
                 MCI::InitialConstruct(ic) => initials.push(lower_initial(tree, ic)?),
                 MCI::ContinuousAssign(ca) => assigns.extend(lower_continuous_assign(tree, ca)?),
-                MCI::ModuleOrGenerateItemDeclaration(d) => lower_decl(tree, d, nets, regs, mems, locals)?,
+                MCI::ModuleOrGenerateItemDeclaration(d) => lower_decl(tree, d, nets, regs, mems, locals, functions, tasks)?,
                 _ => {}
             }
         }
@@ -325,6 +331,7 @@ fn process_mogi(
 
 // ── declarations ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn lower_decl(
     tree: &SyntaxTree,
     d: &sv_parser::ModuleOrGenerateItemDeclaration,
@@ -332,6 +339,8 @@ fn lower_decl(
     regs: &mut Vec<RegDecl>,
     mems: &mut Vec<MemDecl>,
     locals: &mut Vec<LocalParamDecl>,
+    functions: &mut Vec<FunctionDecl>,
+    tasks: &mut Vec<TaskDecl>,
 ) -> Result<(), FrontendError> {
     use sv_parser::ModuleOrGenerateItemDeclaration as D;
     if let D::PackageOrGenerateItemDeclaration(p) = d {
@@ -344,10 +353,153 @@ fn lower_decl(
                 mems.extend(new_mems);
             }
             PD::LocalParameterDeclaration(lp) => locals.extend(lower_localparam(tree, lp)?),
+            PD::FunctionDeclaration(fd) => {
+                if let Some(f) = lower_function_decl(tree, fd)? {
+                    functions.push(f);
+                }
+            }
+            PD::TaskDeclaration(td) => {
+                if let Some(t) = lower_task_decl(tree, td)? {
+                    tasks.push(t);
+                }
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+// ── function / task declarations ──────────────────────────────────────────────
+
+fn lower_tf_port_item(tree: &SyntaxTree, item: &sv_parser::TfPortItem, default_dir: PortDirection) -> Option<TfArg> {
+    use sv_parser::TfPortDirection as TD;
+    let dir = match &item.nodes.1 {
+        Some(TD::PortDirection(d)) => lower_port_direction(d),
+        Some(TD::ConstRef(_)) => PortDirection::Input,
+        None => default_dir,
+    };
+    let (_, width_expr) = packed_width_expr(tree, RefNode::TfPortItem(item));
+    let (name, _, _) = item.nodes.4.as_ref()?;
+    let name = get_id(tree, RefNode::PortIdentifier(name))?;
+    Some(TfArg { name, width_expr, direction: dir })
+}
+
+/// `function/task ...; input a; output b; ...` style (no parenthesized port list):
+/// each `TfItemDeclaration::TfPortDeclaration` declares one or more args.
+fn lower_tf_item_decls(tree: &SyntaxTree, items: &[sv_parser::TfItemDeclaration]) -> (Vec<TfArg>, Vec<RegDecl>) {
+    let mut args = Vec::new();
+    let mut locals = Vec::new();
+    for item in items {
+        match item {
+            sv_parser::TfItemDeclaration::TfPortDeclaration(d) => {
+                use sv_parser::TfPortDirection as TD;
+                let dir = match &d.nodes.1 {
+                    TD::PortDirection(pd) => lower_port_direction(pd),
+                    TD::ConstRef(_) => PortDirection::Input,
+                };
+                let (_, width_expr) = packed_width_expr(tree, RefNode::TfPortDeclaration(d));
+                for (name_node, _, _) in d.nodes.4.nodes.0.contents() {
+                    if let Some(name) = get_id(tree, RefNode::PortIdentifier(name_node)) {
+                        args.push(TfArg { name, width_expr: width_expr.clone(), direction: dir });
+                    }
+                }
+            }
+            sv_parser::TfItemDeclaration::BlockItemDeclaration(bid) => {
+                if let sv_parser::BlockItemDeclaration::Data(d) = bid.as_ref() {
+                    if let Ok((new_regs, _)) = lower_data_decl(tree, &d.nodes.1) {
+                        locals.extend(new_regs);
+                    }
+                }
+            }
+        }
+    }
+    (args, locals)
+}
+
+fn lower_function_decl(tree: &SyntaxTree, fd: &sv_parser::FunctionDeclaration) -> Result<Option<FunctionDecl>, FrontendError> {
+    use sv_parser::FunctionBodyDeclaration as FB;
+    match &fd.nodes.2 {
+        FB::WithPort(p) => {
+            let name = get_id(tree, RefNode::FunctionIdentifier(&p.nodes.2))
+                .ok_or_else(|| FrontendError::ParseError("function name missing".into()))?;
+            let (width, width_expr) = packed_width_expr(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
+            let mut args = Vec::new();
+            if let Some(list) = &p.nodes.3.nodes.1 {
+                for item in list.nodes.0.contents() {
+                    if let Some(a) = lower_tf_port_item(tree, item, PortDirection::Input) {
+                        args.push(a);
+                    }
+                }
+            }
+            let mut locals = Vec::new();
+            for bid in &p.nodes.5 {
+                if let sv_parser::BlockItemDeclaration::Data(d) = bid {
+                    let (new_regs, _) = lower_data_decl(tree, &d.nodes.1)?;
+                    locals.extend(new_regs);
+                }
+            }
+            let mut stmts = Vec::new();
+            for fs in &p.nodes.6 {
+                if let sv_parser::FunctionStatementOrNull::Statement(s) = fs {
+                    stmts.push(lower_statement(tree, &s.nodes.0)?);
+                }
+            }
+            Ok(Some(FunctionDecl { name, width, width_expr, args, locals, body: Stmt::Block(stmts) }))
+        }
+        FB::WithoutPort(p) => {
+            let name = get_id(tree, RefNode::FunctionIdentifier(&p.nodes.2))
+                .ok_or_else(|| FrontendError::ParseError("function name missing".into()))?;
+            let (width, width_expr) = packed_width_expr(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
+            let (args, locals) = lower_tf_item_decls(tree, &p.nodes.4);
+            let mut stmts = Vec::new();
+            for fs in &p.nodes.5 {
+                if let sv_parser::FunctionStatementOrNull::Statement(s) = fs {
+                    stmts.push(lower_statement(tree, &s.nodes.0)?);
+                }
+            }
+            Ok(Some(FunctionDecl { name, width, width_expr, args, locals, body: Stmt::Block(stmts) }))
+        }
+    }
+}
+
+fn lower_task_decl(tree: &SyntaxTree, td: &sv_parser::TaskDeclaration) -> Result<Option<TaskDecl>, FrontendError> {
+    use sv_parser::TaskBodyDeclaration as TB;
+    match &td.nodes.2 {
+        TB::WithPort(p) => {
+            let name = get_id(tree, RefNode::TaskIdentifier(&p.nodes.1))
+                .ok_or_else(|| FrontendError::ParseError("task name missing".into()))?;
+            let mut args = Vec::new();
+            if let Some(list) = &p.nodes.2.nodes.1 {
+                for item in list.nodes.0.contents() {
+                    if let Some(a) = lower_tf_port_item(tree, item, PortDirection::Input) {
+                        args.push(a);
+                    }
+                }
+            }
+            let mut locals = Vec::new();
+            for bid in &p.nodes.4 {
+                if let sv_parser::BlockItemDeclaration::Data(d) = bid {
+                    let (new_regs, _) = lower_data_decl(tree, &d.nodes.1)?;
+                    locals.extend(new_regs);
+                }
+            }
+            let mut stmts = Vec::new();
+            for s in &p.nodes.5 {
+                stmts.push(lower_stmt_or_null(tree, s)?);
+            }
+            Ok(Some(TaskDecl { name, args, locals, body: Stmt::Block(stmts) }))
+        }
+        TB::WithoutPort(p) => {
+            let name = get_id(tree, RefNode::TaskIdentifier(&p.nodes.1))
+                .ok_or_else(|| FrontendError::ParseError("task name missing".into()))?;
+            let (args, locals) = lower_tf_item_decls(tree, &p.nodes.3);
+            let mut stmts = Vec::new();
+            for s in &p.nodes.4 {
+                stmts.push(lower_stmt_or_null(tree, s)?);
+            }
+            Ok(Some(TaskDecl { name, args, locals, body: Stmt::Block(stmts) }))
+        }
+    }
 }
 
 fn lower_net_decl(tree: &SyntaxTree, nd: &sv_parser::NetDeclaration) -> Result<Vec<NetDecl>, FrontendError> {
@@ -848,10 +1000,32 @@ fn lower_syscall_stmt(tree: &SyntaxTree, sc: &sv_parser::SubroutineCallStatement
 }
 
 fn lower_subcall(tree: &SyntaxTree, sc: &sv_parser::SubroutineCall) -> Result<Stmt, FrontendError> {
-    if let sv_parser::SubroutineCall::SystemTfCall(sys) = sc {
-        return lower_system_task(tree, sys);
+    match sc {
+        sv_parser::SubroutineCall::SystemTfCall(sys) => lower_system_task(tree, sys),
+        sv_parser::SubroutineCall::TfCall(tf) => {
+            let name = get_id(tree, RefNode::PsOrHierarchicalTfIdentifier(&tf.nodes.0))
+                .ok_or_else(|| FrontendError::ParseError("task call name missing".into()))?;
+            let args = collect_tf_call_args(tree, tf);
+            Ok(Stmt::TaskCall(name, args))
+        }
+        _ => Err(unsupported("non-tf subroutine call")),
     }
-    Err(unsupported("non-system subroutine call"))
+}
+
+fn collect_tf_call_args(tree: &SyntaxTree, tf: &sv_parser::TfCall) -> Vec<Expr> {
+    let mut args = Vec::new();
+    if let Some(paren) = &tf.nodes.2 {
+        if let sv_parser::ListOfArguments::Ordered(o) = &paren.nodes.1 {
+            for opt_expr in o.nodes.0.contents() {
+                if let Some(e) = opt_expr {
+                    if let Ok(expr) = lower_expression(tree, e) {
+                        args.push(expr);
+                    }
+                }
+            }
+        }
+    }
+    args
 }
 
 fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result<Stmt, FrontendError> {
@@ -1056,6 +1230,15 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
                 Expr::Const(lv(0, 1))
             };
             Ok(Expr::Repeat(Box::new(count_expr), vec![inner]))
+        }
+        P::FunctionSubroutineCall(fsc) => {
+            if let sv_parser::SubroutineCall::TfCall(tf) = &fsc.nodes.0 {
+                let name = get_id(tree, RefNode::PsOrHierarchicalTfIdentifier(&tf.nodes.0))
+                    .ok_or_else(|| FrontendError::ParseError("function call name missing".into()))?;
+                let args = collect_tf_call_args(tree, tf);
+                return Ok(Expr::Call(name, args));
+            }
+            Err(unsupported("non-tf subroutine call in expression"))
         }
         P::MintypmaxExpression(m) => {
             let ma = m.as_ref();

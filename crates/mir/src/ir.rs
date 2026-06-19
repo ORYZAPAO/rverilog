@@ -160,6 +160,8 @@ pub enum Expr {
     Cond(ExprId, ExprId, ExprId),
     StringLit(SmolStr),
     MemRead(MemId, ExprId),
+    /// Statements that must run before reading the net (function-call setup), then the net holds the result.
+    CallResult(Vec<StmtId>, NetId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

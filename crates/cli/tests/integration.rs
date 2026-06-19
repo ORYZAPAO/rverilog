@@ -41,6 +41,16 @@ fn test_counter4() {
 }
 
 #[test]
+fn test_func_task() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/func_task/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("func_task");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![
