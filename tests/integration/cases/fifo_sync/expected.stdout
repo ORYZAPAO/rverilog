@@ -1,0 +1,21 @@
+Starting FIFO test
+Write done, full=1 empty=0
+read[0] = 0
+read[1] = 1
+read[2] = 2
+read[3] = 3
+read[4] = 4
+read[5] = 5
+read[6] = 6
+read[7] = 7
+read[8] = 8
+read[9] = 9
+read[10] = 10
+read[11] = 11
+read[12] = 12
+read[13] = 13
+read[14] = 14
+read[15] = 15
+Read done, full=0 empty=1
+FIFO test completed
+$finish at time 370
