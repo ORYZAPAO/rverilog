@@ -354,7 +354,7 @@ impl Interpreter {
         }
     }
 
-    pub fn eval_expr(&self, id: ExprId) -> LogicVal {
+    pub fn eval_expr(&mut self, id: ExprId) -> LogicVal {
         match self.design.get_expr(id).clone() {
             Expr::Const(v) => v,
             Expr::StringLit(_) => LogicVal::ZERO,
@@ -405,6 +405,73 @@ impl Interpreter {
                     .cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0))
             }
+            Expr::CallResult(setup, ret_net) => {
+                for sid in setup {
+                    self.exec_sync_stmt(sid);
+                }
+                self.read_net(ret_net)
+            }
+        }
+    }
+
+    /// Runs a statement to completion without going through the scheduler.
+    /// Used for function-call bodies, which Verilog requires to execute in zero time.
+    /// `Delay`/`EventCtl` inside such bodies are non-conformant but tolerated by
+    /// running their inner statement immediately.
+    fn exec_sync_stmt(&mut self, id: StmtId) {
+        match self.design.get_stmt(id).clone() {
+            Stmt::Null => {}
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.exec_sync_stmt(s);
+                }
+            }
+            Stmt::If(cond_id, then_id, else_id) => {
+                let cond = self.eval_expr(cond_id);
+                if cond.is_known() && cond.pad_to_width(cond.width()) != 0 {
+                    self.exec_sync_stmt(then_id);
+                } else if let Some(e) = else_id {
+                    self.exec_sync_stmt(e);
+                }
+            }
+            Stmt::Case { sel, arms, default, .. } => {
+                let sel_val = self.eval_expr(sel);
+                let mut matched = false;
+                'outer: for (pats, body) in &arms {
+                    for &pid in pats {
+                        let pv = self.eval_expr(pid);
+                        if sel_val.case_eq(&pv) == LogicVal::ONE {
+                            self.exec_sync_stmt(*body);
+                            matched = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                if !matched {
+                    if let Some(d) = default {
+                        self.exec_sync_stmt(d);
+                    }
+                }
+            }
+            Stmt::BlockingAssign(lval, expr_id) | Stmt::NbaAssign(lval, expr_id) => {
+                let val = self.eval_expr(expr_id);
+                let old = self.get_lval_val(&lval);
+                self.write_lvalue(&lval, val.clone());
+                self.trigger_sensitivity(&lval, old.as_ref(), &val);
+            }
+            Stmt::Delay(_, body) | Stmt::EventCtl(_, body) => {
+                self.exec_sync_stmt(body);
+            }
+            Stmt::SysCall(task, args) => {
+                self.exec_syscall(task, &args);
+            }
+            Stmt::While(cond_id, body_id) => {
+                for _ in 0..1_000_000 {
+                    let cond = self.eval_expr(cond_id);
+                    if !cond.is_known() || cond.pad_to_width(cond.width()) == 0 { break; }
+                    self.exec_sync_stmt(body_id);
+                }
+            }
         }
     }
 
@@ -416,7 +483,7 @@ impl Interpreter {
         })
     }
 
-    fn get_lval_val(&self, lval: &LValue) -> Option<LogicVal> {
+    fn get_lval_val(&mut self, lval: &LValue) -> Option<LogicVal> {
         match lval {
             LValue::Net(id) => self.net_values.get(id).cloned(),
             LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) => {
@@ -433,6 +500,8 @@ impl Interpreter {
         match lval {
             LValue::Net(id) => {
                 let net_id = *id;
+                let w = self.design.get_net(net_id).width;
+                let val = if val.width() == w { val } else { val.resize(w) };
                 self.net_values.insert(net_id, val.clone());
                 self.vcd_record_net_change(net_id, &val);
             }
@@ -534,11 +603,12 @@ impl Interpreter {
         }
     }
 
-    fn format_args(&self, args: &[ExprId]) -> String {
+    fn format_args(&mut self, args: &[ExprId]) -> String {
         if args.is_empty() { return String::new(); }
         let first = self.design.get_expr(args[0]).clone();
         if let Expr::StringLit(fmt) = first {
-            format_string(&fmt, &args[1..], self, self.now)
+            let now = self.now;
+            format_string(&fmt, &args[1..], self, now)
         } else {
             // No format string: space-separated values
             args.iter().map(|&id| self.eval_expr(id).to_string()).collect::<Vec<_>>().join(" ")
@@ -624,7 +694,7 @@ impl Interpreter {
     }
 }
 
-fn format_string(fmt: &str, args: &[ExprId], interp: &Interpreter, now: u64) -> String {
+fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64) -> String {
     let mut result = String::new();
     let mut arg_idx = 0;
     let mut chars = fmt.chars().peekable();

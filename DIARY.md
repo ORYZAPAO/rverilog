@@ -578,3 +578,244 @@ $finish at time 370
 - SystemVerilog 拡張（`logic`/`always_ff`/`always_comb`）
 - ビット幅推論の精度向上（context-determined 完全対応）
 - reg 幅のパラメータ依存解決（`[ADDR_WIDTH:0]` → 実幅の評価）
+
+---
+
+## 2026-06-18
+
+### Task
+
+統合テストハーネスの実装。
+
+### What was done
+
+#### GitHub リポジトリ作成・PR 作成
+
+- `ORYZAPAO/rverilog` として新規パブリックリポジトリを作成
+- master ブランチ: workspace スケルトン（Cargo.toml + .gitignore）のみ
+- `feat/m1-milestone` ブランチ: M1 全実装（39 ファイル、7440 行）
+- PR #1 を作成: https://github.com/ORYZAPAO/rverilog/pull/1
+
+#### 統合テストハーネス実装
+
+**変更方針**: `Interpreter` に出力バッファを持たせ、`$display`/`$write`/`$finish` の出力を通常の stdout 印刷と同時に内部バッファにも蓄積。テストは `interp.output()` で取得した文字列を `expected.stdout` ファイルと比較。
+
+**変更ファイル**:
+
+- `crates/sim/src/interp.rs`
+  - `output_buf: String` フィールド追加
+  - `exec_syscall` の Display/Write/Monitor で `output_buf` に追記
+  - `exec_proc` の `StepResult::Finish` で `$finish at time N` を `output_buf` に追記
+  - `pub fn output(&self) -> &str` メソッド追加
+
+- `crates/cli/tests/integration.rs`（新規）
+  - `workspace_root()`: `CARGO_MANIFEST_DIR` から workspace ルートを算出
+  - `run_sim(top, files)`: parse → elaborate → Interpreter::run → output() を返すヘルパ
+  - `expected_stdout(case)`: `tests/integration/cases/<case>/expected.stdout` を読み込む
+  - `test_counter4`, `test_fifo_sync` の 2 テスト
+
+- `tests/integration/cases/counter4/expected.stdout`（新規）
+- `tests/integration/cases/fifo_sync/expected.stdout`（新規）
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_fifo_sync ... ok
+test result: ok. 2 passed; 0 failed
+（他既存テストも全通過）
+```
+
+✅ 統合テストハーネス実装完了  
+✅ feat/m1-milestone ブランチにコミット・プッシュ済み
+
+### Next
+
+- `LogicVal::Large` バリアント（64bit 超ベクタ対応）
+- reg 幅のパラメータ依存解決（`[ADDR_WIDTH:0]` → 実幅の評価）
+- iverilog との出力比較 CI 導入
+
+---
+
+## 2026-06-18 (2)
+
+### Task
+
+パラメータ依存の reg/net/port 幅解決バグの修正。
+
+### 原因
+
+`RegDecl`/`NetDecl`/`PortDecl` の `width: u32` はフロントエンドでパース時にリテラル整数として評価していた。`ADDR_WIDTH-1` のようなパラメータ依存式は整数パースに失敗し `width = 0` になっていた。
+
+`MemDecl` はすでに `elem_width: Expr` と `depth: Expr` でエラボレーション時に `eval_const_hir` で評価する設計になっていたため、同じパターンを適用した。
+
+### 変更ファイル
+
+- `crates/hir/src/design.rs`: `PortDecl`/`NetDecl`/`RegDecl` に `width_expr: Expr` を追加
+- `crates/frontend/src/lower.rs`:
+  - `lower_ansi_port_net`/`lower_ansi_port_variable`: `packed_width` → `packed_width_expr` に変更
+  - `lower_net_decl`: `packed_width` → `packed_width_expr` に変更
+  - `lower_data_decl`: `width_expr` を `RegDecl` に渡すよう変更
+- `crates/elab/src/elaborate.rs`: ポート/ネット/レジスタ登録時に `eval_const_hir(ctx, scope, &*.width_expr).unwrap_or(static_width).max(1)` で幅を解決
+
+### Result
+
+```
+// reg [WIDTH-1:0] data; (WIDTH=8 でインスタンス化)
+data=171 width=8 addr=3
+data width bits: 10101011
+```
+
+全テスト通過 ✅。feat/m1-milestone にプッシュ済み。
+
+### Next
+
+- `LogicVal::Large` バリアント（64bit 超ベクタ対応）
+- iverilog との出力比較 CI 導入
+
+---
+
+## 2026-06-18 (3)
+
+### Task
+
+`LogicVal::Large` バリアント（64bit超ベクタ）の完全実装。
+
+### What was done
+
+`crates/mir/src/logicval.rs` を全面的に書き直し。チャンクベースのヘルパーを追加し、全演算を Large 対応に。
+
+**追加ヘルパー関数**:
+- `num_chunks(width)` — ビット幅に必要なu64チャンク数
+- `top_mask(width)` — 最上位チャンクのマスク
+- `chunk_mask(width, idx)` — チャンクiのマスク
+- `LogicVal::from_chunks(width, &[u64], &[u64])` — チャンク列からの構築
+
+**修正メソッド**:
+- `is_zero/is_known/is_one/is_x/is_z`: `pad_to_width`（チャンク0のみ）→ 全チャンクループに変更
+- `eq/ne/case_eq/case_ne`: 全チャンク比較
+- `lt/gt/le/ge`: MSBチャンクから降順の多倍長符号なし比較
+- `add/sub`: キャリー/ボロー伝播付き多倍長加減算
+- `shl/shr/ashl/ashr`: チャンクをまたぐシフト演算
+- `concat`: 任意幅のビット連結（チャンク境界またぎ対応）
+- `extend_zero`: Large対応
+- `part_select/bit_select`: チャンクインデックスで直接アクセス
+- `reduce_and/or/xor`: 全チャンク畳み込み
+- `Display`: 64bit超は16進表示
+- `Not/BitAnd/BitOr/BitXor`: 既存のチャンクループ実装を整理・統合
+- `mul/div/mod_`: >64bit は X のまま（RTL実用上まれ）
+
+**テスト追加**: Large専用7ケース（add/concat/is_zero/eq/shl/part_select）
+
+### Result
+
+```
+cargo test -p rverilog-mir
+test result: ok. 11 passed; 0 failed
+cargo test --workspace
+全テストパス ✅
+```
+
+feat/m1-milestone にプッシュ済み。
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `function`/`task` 対応
+
+---
+
+## 2026-06-19
+
+### Task
+
+`function`/`task` 対応の実装。
+
+### 設計
+
+- **HIR** (`crates/hir/src/design.rs`): `FunctionDecl`/`TaskDecl`/`TfArg` を追加。`HirModule.functions`/`tasks` フィールド追加。`Expr::Call(name, args)`（関数呼び出し式）、`Stmt::TaskCall(name, args)`（タスク呼び出し文）を追加。
+- **Frontend** (`crates/frontend/src/lower.rs`): ANSI形式 (`function [W] f(input a, ...);`) と旧式 (`function [W] f; input a; ...; endfunction`) の両方をパース。`Primary::FunctionSubroutineCall` → `Expr::Call`、`SubroutineCall::TfCall` → `Stmt::TaskCall`。
+- **Elab** (`crates/elab/src/elaborate.rs`): 関数/タスクごとに専用スコープ (`$func_*`/`$task_*`、親は宣言元モジュールスコープ) を確保し、引数・ローカル変数を reg として確保（呼び出し毎に再エントラントではない、非再帰モデル）。`Expr::Call` は呼び出し元スコープで引数を評価して引数regへ代入する `Stmt::BlockingAssign` 列 + 本体 `StmtId` を `Expr::CallResult(setup_stmts, ret_net)` にまとめる。`Stmt::TaskCall` は入力代入→本体→出力書き戻し（`output`/`inout` 引数は単純な net 名のみ対応）をまとめた `Stmt::Block` に展開。
+- **MIR** (`crates/mir/src/ir.rs`): `Expr::CallResult(Vec<StmtId>, NetId)` を追加。
+- **Interpreter** (`crates/sim/src/interp.rs`): `eval_expr`/`get_lval_val`/`format_args`/`format_string` を `&mut self` 化（式評価中に呼び出しのセットアップ文を実行できるようにするため）。`exec_sync_stmt` を新設し、`Expr::CallResult` 評価時にセットアップ文（引数代入＋関数本体）をスケジューラを介さず即時実行してから戻り値 net を読む（Verilog の関数はゼロタイムで実行される仕様に対応）。タスク呼び出しは通常の `Stmt::Block` として既存のプロセススケジューラ経由で実行されるため、本体内の `#delay`/`@event` も動作する。
+
+### 制約
+
+- 関数本体内の `#delay`/`@event` は無視して即時実行（仕様上関数では使用不可のため許容範囲）。
+- 関数/タスクは非再帰（呼び出し毎に専用regを再利用、再入不可）。
+- `output`/`inout` 引数は単純な net 名のみ書き戻し対応（部分選択や式は不可）。
+- 連続代入 (`assign`) 内での関数呼び出しは未対応。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+手動確認 (`/tmp/test_func_task.v`):
+```
+add8(3,4) = 7
+show_sum: 3 + 4 = 7
+after task r=7
+$finish at time 0
+```
+
+feat/m1-milestone にプッシュ済み (e3d1b48)。
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `generate`/`genvar` 対応
+- gate primitive (`and`/`or`/`not`/`buf` 等)
+
+---
+
+## 2026-06-19 (2)
+
+### Task
+
+gate primitive (`and`/`or`/`nand`/`nor`/`xor`/`xnor`/`buf`/`not`) 対応の実装。
+
+### 設計
+
+- **Frontend** (`crates/frontend/src/lower.rs`): `ModuleOrGenerateItem::Gate` を新規ハンドリング。`lower_gate_inst` で `GateInstantiation::NInput`（and/nand/or/nor/xor/xnor、可変入力数）と `NOutput`（buf/not、複数出力対応）をそれぞれ `ContinuousAssign` に展開。ゲートは組合せ論理そのものなので、専用の HIR/MIR ノードを増やさずに既存の `assign` 機構へ直接変換するだけで済む。
+- 否定系ゲート（nand/nor/xnor/not）は `Expr::Un(UnOp::BitNot, ...)` でラップ。
+- switch/cmos/pass/pullup/pulldown 系プリミティブは本サブセットでは未対応（黙ってスキップ）。
+
+### バグ修正: net 代入時の幅切り詰め漏れ
+
+ゲート実装の検証中に、`nand`/`nor`/`xnor`/`not` の出力が 1bit のはずなのに 32bit 幅で表示される不具合を発見。
+
+原因: `crates/sim/src/interp.rs` の `write_lvalue` の `LValue::Net` 分岐が、代入値を **net の宣言幅に切り詰めずにそのまま格納**していた。たとえば `reg a; ... a = 1;` の `1` は無符号化なし32bit定数のため、`a`（1bit net）に 32bit 幅の値がそのまま保存され、以後 `~a` などの演算で上位ビットのゴミがそのまま伝播していた（and/or/xor は結果が偶然0で見た目上問題が出ていなかった）。
+
+修正: `LogicVal` に `resize(width)` メソッドを追加（`from_chunks` 経由でチャンク単位に切り詰め/ゼロ拡張）し、`write_lvalue` の `LValue::Net` 分岐で代入前に net の宣言幅へ `resize` するよう変更。`crates/mir/src/logicval.rs` / `crates/sim/src/interp.rs` を修正。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok
+test test_gates ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+手動確認:
+```
+a=0 b=0 and=0 or=0 nand=1 nor=1 xor=0 xnor=1 buf=0 not=1
+a=1 b=0 and=0 or=1 nand=1 nor=0 xor=1 xnor=0 buf=1 not=0
+a=1 b=1 and=1 or=1 nand=0 nor=0 xor=0 xnor=1 buf=1 not=0
+$finish at time 3
+```
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `generate`/`genvar` 対応
+- `disable`/`fork`-`join` 対応

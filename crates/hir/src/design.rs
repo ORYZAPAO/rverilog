@@ -31,6 +31,33 @@ pub struct HirModule {
     pub initials: Vec<InitialConstruct>,
     pub alwayses: Vec<AlwaysConstruct>,
     pub instances: Vec<ModuleInstance>,
+    pub functions: Vec<FunctionDecl>,
+    pub tasks: Vec<TaskDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionDecl {
+    pub name: SmolStr,
+    pub width: u32,
+    pub width_expr: Expr,
+    pub args: Vec<TfArg>,
+    pub locals: Vec<RegDecl>,
+    pub body: Stmt,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskDecl {
+    pub name: SmolStr,
+    pub args: Vec<TfArg>,
+    pub locals: Vec<RegDecl>,
+    pub body: Stmt,
+}
+
+#[derive(Debug, Clone)]
+pub struct TfArg {
+    pub name: SmolStr,
+    pub width_expr: Expr,
+    pub direction: PortDirection,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +170,7 @@ pub enum Stmt {
     Delay(u64, Box<Stmt>),
     EventCtl(Sensitivity, Box<Stmt>),
     SysCall(SysTask, Vec<Expr>),
+    TaskCall(SmolStr, Vec<Expr>),
     For {
         var: SmolStr,
         init: Box<Stmt>,
@@ -173,6 +201,7 @@ pub enum Expr {
     Cond(Box<Expr>, Box<Expr>, Box<Expr>),
     IndexSel(SmolStr, Box<Expr>),
     SysFunc(SysFuncKind, Vec<Expr>),
+    Call(SmolStr, Vec<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
