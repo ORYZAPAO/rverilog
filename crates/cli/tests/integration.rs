@@ -61,6 +61,26 @@ fn test_gates() {
 }
 
 #[test]
+fn test_generate() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/generate/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("generate");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
+fn test_disable_fork() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/disable_fork/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("disable_fork");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![

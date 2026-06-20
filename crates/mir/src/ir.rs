@@ -122,6 +122,8 @@ pub struct ContAssign {
 pub enum LValue {
     Net(NetId),
     BitSelect(NetId, u32),
+    /// 動的インデックスでのビット選択（genvar 等、実行時に決まるインデックス）
+    DynBitSelect(NetId, ExprId),
     PartSelect(NetId, u32, u32), // net, hi, lo
     MemWrite(MemId, ExprId),
 }
@@ -138,6 +140,12 @@ pub enum Stmt {
     SysCall(SysTask, Vec<ExprId>),
     While(ExprId, StmtId),
     Null,
+    /// `begin : label ... end`。`u32` はelaboration時に割り振る一意なブロックID。
+    NamedBlock(u32, Vec<StmtId>),
+    /// `disable label;`。同一プロセスのフレームスタックを対象ブロックIDまで巻き戻す。
+    Disable(u32),
+    /// `fork ... join`。各分岐を並行プロセスとして起動し、全分岐の完了を待つ。
+    Fork(Vec<StmtId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
