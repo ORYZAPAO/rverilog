@@ -737,6 +737,10 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
             };
             Expr::Const(LogicVal::new(32, clog2(v), 0))
         }
+        HirExpr::SysFunc(SysFuncKind::Random, args) => {
+            let seed_id = args.first().map(|a| lower_expr(ctx, scope, a)).transpose()?;
+            Expr::Random(seed_id)
+        }
         HirExpr::Call(name, args) => {
             let info = ctx.resolve_func(scope, name.as_str())
                 .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))?;
@@ -867,6 +871,15 @@ fn lower_stmt(ctx: &mut ElabCtx, scope: ScopeId, s: &HirStmt) -> Result<StmtId, 
             let ms = lower_sensitivity(ctx, scope, sens)?;
             let body_id = lower_stmt(ctx, scope, body)?;
             Stmt::EventCtl(ms, body_id)
+        }
+        HirStmt::SysCall(task @ (HirSysTask::ReadMemH | HirSysTask::ReadMemB), args) => {
+            let path_id = lower_expr(ctx, scope, &args[0])?;
+            let mem_id = match args.get(1) {
+                Some(HirExpr::Net(name)) => ctx.resolve_mem(scope, name.as_str())
+                    .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))?,
+                _ => return Err(ElabError::UnsupportedConstruct("readmem target must be a plain memory identifier".into())),
+            };
+            Stmt::ReadMem(lower_systask(task), path_id, mem_id)
         }
         HirStmt::SysCall(task, args) => {
             let arg_ids: Result<Vec<_>, _> = args.iter().map(|a| lower_expr(ctx, scope, a)).collect();
@@ -1095,5 +1108,7 @@ fn lower_systask(t: &HirSysTask) -> SysTask {
         HirSysTask::Time => SysTask::Time,
         HirSysTask::DumpFile => SysTask::DumpFile,
         HirSysTask::DumpVars => SysTask::DumpVars,
+        HirSysTask::ReadMemH => SysTask::ReadMemH,
+        HirSysTask::ReadMemB => SysTask::ReadMemB,
     }
 }

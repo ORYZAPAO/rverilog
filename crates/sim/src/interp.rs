@@ -46,6 +46,8 @@ pub struct Interpreter {
     fork_remaining: HashMap<u32, u32>,
     /// fork ID → join待ちの親プロセス
     fork_waiters: HashMap<u32, ProcState>,
+    /// `$random` 用の固定シードPRNG状態（テストの決定性を保つため固定シード）。
+    rng_state: u64,
 }
 
 impl Interpreter {
@@ -78,6 +80,7 @@ impl Interpreter {
             fork_seq: 0,
             fork_remaining: HashMap::new(),
             fork_waiters: HashMap::new(),
+            rng_state: 0x2545_F491_4F6C_DD1D,
         }
     }
 
@@ -323,6 +326,11 @@ impl Interpreter {
                 StepResult::Continue
             }
 
+            Stmt::ReadMem(task, path_id, mem_id) => {
+                self.exec_readmem(task, path_id, mem_id);
+                StepResult::Continue
+            }
+
             Stmt::While(cond_id, body_id) => {
                 let cond = self.eval_expr(cond_id);
                 let nonzero = cond.pad_to_width(cond.width()) != 0;
@@ -419,6 +427,45 @@ impl Interpreter {
                     self.init_vcd_from_path(path);
                 }
             }
+            // ReadMemH/ReadMemB は elaboration時に Stmt::ReadMem へ変換されるため、
+            // ここには到達しない。
+            SysTask::ReadMemH | SysTask::ReadMemB => {}
+        }
+    }
+
+    /// `$readmemh`/`$readmemb` でファイルからメモリ配列を初期化する。
+    /// 制約: ファイルパスは文字列リテラルのみ、対象は単純なメモリ識別子のみ。
+    fn exec_readmem(&mut self, task: SysTask, path_id: ExprId, mem_id: MemId) {
+        let path = match self.design.get_expr(path_id).clone() {
+            Expr::StringLit(s) => s,
+            _ => {
+                eprintln!("$readmem: file path must be a string literal");
+                return;
+            }
+        };
+        let content = match std::fs::read_to_string(path.as_str()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("$readmem: failed to read '{}': {}", path, e);
+                return;
+            }
+        };
+        let elem_width = self.design.get_mem(mem_id).elem_width;
+        let radix = match task {
+            SysTask::ReadMemB => 2,
+            _ => 16,
+        };
+        let mut addr: u32 = 0;
+        for token in strip_readmem_comments(&content).split_whitespace() {
+            if let Some(addr_text) = token.strip_prefix('@') {
+                if let Ok(a) = u32::from_str_radix(addr_text, 16) {
+                    addr = a;
+                }
+                continue;
+            }
+            let val = parse_readmem_token(token, radix, elem_width);
+            self.mem_values.insert((mem_id.0, addr), val);
+            addr += 1;
         }
     }
 
@@ -479,7 +526,26 @@ impl Interpreter {
                 }
                 self.read_net(ret_net)
             }
+            Expr::Random(seed) => {
+                if let Some(seed_id) = seed {
+                    let s = self.eval_expr(seed_id).pad_to_width(64);
+                    self.rng_state = s;
+                }
+                let v = self.next_rand_u32();
+                LogicVal::new(32, v as u64, 0)
+            }
         }
+    }
+
+    /// xorshift64* による軽量PRNG。固定シードのため再現性がある
+    /// （iverilog等の `$random` とは数値が一致しない）。
+    fn next_rand_u32(&mut self) -> u32 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng_state = x;
+        (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32
     }
 
     /// Runs a statement to completion without going through the scheduler.
@@ -532,6 +598,9 @@ impl Interpreter {
             }
             Stmt::SysCall(task, args) => {
                 self.exec_syscall(task, &args);
+            }
+            Stmt::ReadMem(task, path_id, mem_id) => {
+                self.exec_readmem(task, path_id, mem_id);
             }
             Stmt::While(cond_id, body_id) => {
                 for _ in 0..1_000_000 {
@@ -882,5 +951,112 @@ fn apply_unop(op: UnOp, v: &LogicVal, _now: u64) -> LogicVal {
         UnOp::RedNor => v.reduce_nor(),
         UnOp::RedXor => v.reduce_xor(),
         UnOp::RedXnor => v.reduce_xnor(),
+    }
+}
+
+/// `//` 行コメントと `/* */` ブロックコメントを取り除く（`$readmemh`/`$readmemb` ファイル用）。
+fn strip_readmem_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '/' && chars.peek() == Some(&'/') {
+            while let Some(&n) = chars.peek() {
+                if n == '\n' { break; }
+                chars.next();
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(n) = chars.next() {
+                if n == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `$readmemh`/`$readmemb` の値トークンを `elem_width` ビットの `LogicVal` にパースする。
+/// `radix` は 16（hex）または 2（bin）。`x`/`X`/`z`/`Z` はその桁の全ビットをX/Zにし、
+/// `_` は読み飛ばす。
+fn parse_readmem_token(token: &str, radix: u32, elem_width: u32) -> LogicVal {
+    let bits_per_digit = if radix == 2 { 1 } else { 4 };
+    let n_chunks = ((elem_width as usize) + 63) / 64;
+    let mut a = vec![0u64; n_chunks];
+    let mut b = vec![0u64; n_chunks];
+    let mut bitpos: usize = 0;
+    for ch in token.chars().filter(|&c| c != '_').rev() {
+        if bitpos >= elem_width as usize {
+            break;
+        }
+        // digit_bit(bit) returns (aval, bval) for the given bit position within this digit.
+        let digit_bit: Box<dyn Fn(u32) -> (u64, u64)> = match ch {
+            'x' | 'X' => Box::new(|_| (1, 1)),
+            'z' | 'Z' => Box::new(|_| (0, 1)),
+            _ => match ch.to_digit(radix) {
+                Some(d) => Box::new(move |bit| (((d as u64) >> bit) & 1, 0)),
+                None => continue,
+            },
+        };
+        for bit in 0..bits_per_digit {
+            if bitpos >= elem_width as usize {
+                break;
+            }
+            let (av, bv) = digit_bit(bit);
+            let chunk = bitpos / 64;
+            let off = bitpos % 64;
+            if av != 0 {
+                a[chunk] |= 1u64 << off;
+            }
+            if bv != 0 {
+                b[chunk] |= 1u64 << off;
+            }
+            bitpos += 1;
+        }
+    }
+    LogicVal::from_chunks(elem_width, &a, &b)
+}
+
+#[cfg(test)]
+mod readmem_tests {
+    use super::*;
+
+    #[test]
+    fn strips_line_and_block_comments() {
+        let s = strip_readmem_comments("aa // line\nbb /* block */ cc");
+        assert_eq!(s, "aa \nbb  cc");
+    }
+
+    #[test]
+    fn parses_hex_digits() {
+        let v = parse_readmem_token("a5", 16, 8);
+        assert_eq!(v.pad_to_width(8), 0xa5);
+        assert!(v.is_known());
+    }
+
+    #[test]
+    fn parses_x_digit_marks_whole_nibble_unknown() {
+        let v = parse_readmem_token("x", 16, 4);
+        assert!(!v.is_known());
+        for bit in 0..4 {
+            assert_eq!(v.bit_select(bit).unwrap(), LogicVal::X);
+        }
+    }
+
+    #[test]
+    fn parses_z_digit_marks_whole_nibble_z() {
+        let v = parse_readmem_token("z", 16, 4);
+        for bit in 0..4 {
+            assert_eq!(v.bit_select(bit).unwrap(), LogicVal::Z);
+        }
+    }
+
+    #[test]
+    fn parses_binary_digits() {
+        let v = parse_readmem_token("101", 2, 3);
+        assert_eq!(v.pad_to_width(3), 0b101);
     }
 }

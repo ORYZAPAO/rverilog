@@ -1403,17 +1403,21 @@ fn collect_tf_call_args(tree: &SyntaxTree, tf: &sv_parser::TfCall) -> Vec<Expr> 
     args
 }
 
-fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result<Stmt, FrontendError> {
+fn system_tf_name<'a>(tree: &'a SyntaxTree, sys: &'a sv_parser::SystemTfCall) -> &'a str {
     let name_node = match sys {
         sv_parser::SystemTfCall::ArgOptionl(s) => RefNode::SystemTfIdentifier(&s.nodes.0),
         sv_parser::SystemTfCall::ArgExpression(s) => RefNode::SystemTfIdentifier(&s.nodes.0),
         sv_parser::SystemTfCall::ArgDataType(s) => RefNode::SystemTfIdentifier(&s.nodes.0),
     };
-    let name_text = if let Some(RefNode::SystemTfIdentifier(tf)) = Some(name_node) {
+    if let RefNode::SystemTfIdentifier(tf) = name_node {
         tree.get_str(&tf.nodes.0).unwrap_or("?")
     } else {
         "?"
-    };
+    }
+}
+
+fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result<Stmt, FrontendError> {
+    let name_text = system_tf_name(tree, sys);
 
     let task = match name_text {
         "$display" => SysTask::Display,
@@ -1423,6 +1427,8 @@ fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result
         "$time" => SysTask::Time,
         "$dumpfile" => SysTask::DumpFile,
         "$dumpvars" => SysTask::DumpVars,
+        "$readmemh" => SysTask::ReadMemH,
+        "$readmemb" => SysTask::ReadMemB,
         n => return Err(unsupported(&format!("system task {}", n))),
     };
 
@@ -1607,13 +1613,25 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
             Ok(Expr::Repeat(Box::new(count_expr), vec![inner]))
         }
         P::FunctionSubroutineCall(fsc) => {
-            if let sv_parser::SubroutineCall::TfCall(tf) = &fsc.nodes.0 {
-                let name = get_id(tree, RefNode::PsOrHierarchicalTfIdentifier(&tf.nodes.0))
-                    .ok_or_else(|| FrontendError::ParseError("function call name missing".into()))?;
-                let args = collect_tf_call_args(tree, tf);
-                return Ok(Expr::Call(name, args));
+            match &fsc.nodes.0 {
+                sv_parser::SubroutineCall::TfCall(tf) => {
+                    let name = get_id(tree, RefNode::PsOrHierarchicalTfIdentifier(&tf.nodes.0))
+                        .ok_or_else(|| FrontendError::ParseError("function call name missing".into()))?;
+                    let args = collect_tf_call_args(tree, tf);
+                    Ok(Expr::Call(name, args))
+                }
+                sv_parser::SubroutineCall::SystemTfCall(sys) => {
+                    let name_text = system_tf_name(tree, sys);
+                    match name_text {
+                        "$random" => {
+                            let args = collect_syscall_args(tree, sys);
+                            Ok(Expr::SysFunc(SysFuncKind::Random, args))
+                        }
+                        n => Err(unsupported(&format!("system function {} in expression", n))),
+                    }
+                }
+                _ => Err(unsupported("non-tf subroutine call in expression")),
             }
-            Err(unsupported("non-tf subroutine call in expression"))
         }
         P::MintypmaxExpression(m) => {
             let ma = m.as_ref();

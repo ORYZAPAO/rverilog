@@ -81,6 +81,16 @@ fn test_disable_fork() {
 }
 
 #[test]
+fn test_readmem_random() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/readmem_random/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("readmem_random");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![
