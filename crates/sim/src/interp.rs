@@ -4,13 +4,15 @@ use std::path::PathBuf;
 use rverilog_mir::*;
 use rverilog_vcd::VcdWriter;
 
-// Execution frame: (stmt_list, next_index)
-type Frame = (Vec<StmtId>, usize);
+// Execution frame: (stmt_list, next_index, block_id of NamedBlock this frame represents, for `disable`)
+type Frame = (Vec<StmtId>, usize, Option<u32>);
 
 struct ProcState {
     id: ProcessId,
     kind: ProcessKind,
     frames: Vec<Frame>,
+    /// `fork`の分岐として起動された場合のfork ID。完了時にjoinカウンタを減算する。
+    fork_ctx: Option<u32>,
 }
 
 enum StepResult {
@@ -19,6 +21,8 @@ enum StepResult {
     Delay(u64),
     Wait(Sensitivity),
     Finish,
+    /// `fork`文を実行した。引数はfork ID。全分岐の完了までこのプロセスを止める。
+    ForkJoin(u32),
 }
 
 pub struct Interpreter {
@@ -37,6 +41,11 @@ pub struct Interpreter {
     vcd_path: Option<PathBuf>,   // set by $dumpfile
     vcd_active: bool,            // enabled by $dumpvars
     output_buf: String,
+    fork_seq: u32,
+    /// fork ID → 未完了の分岐数
+    fork_remaining: HashMap<u32, u32>,
+    /// fork ID → join待ちの親プロセス
+    fork_waiters: HashMap<u32, ProcState>,
 }
 
 impl Interpreter {
@@ -66,6 +75,9 @@ impl Interpreter {
             vcd_path: None,
             vcd_active: false,
             output_buf: String::new(),
+            fork_seq: 0,
+            fork_remaining: HashMap::new(),
+            fork_waiters: HashMap::new(),
         }
     }
 
@@ -81,7 +93,8 @@ impl Interpreter {
             let state = ProcState {
                 id: ProcessId(i as u32),
                 kind: proc.kind,
-                frames: vec![(vec![proc.body], 0)],
+                frames: vec![(vec![proc.body], 0, None)],
+                fork_ctx: None,
             };
             // Always with non-empty sensitivity: wait for first event
             let sens = proc.sensitivity.clone();
@@ -161,11 +174,15 @@ impl Interpreter {
             match self.step(&mut state) {
                 StepResult::Continue => {}
                 StepResult::Done => {
+                    if let Some(fid) = state.fork_ctx {
+                        self.fork_branch_done(fid);
+                        return;
+                    }
                     if state.kind == ProcessKind::Always {
                         let proc = &self.design.processes[state.id.0 as usize];
                         let body = proc.body;
                         let sens = proc.sensitivity.clone();
-                        state.frames = vec![(vec![body], 0)];
+                        state.frames = vec![(vec![body], 0, None)];
                         if let Sensitivity::Items(ref items) = sens {
                             if !items.is_empty() {
                                 self.event_waiters.push((sens, state));
@@ -176,6 +193,10 @@ impl Interpreter {
                     } else {
                         return;
                     }
+                }
+                StepResult::ForkJoin(fid) => {
+                    self.fork_waiters.insert(fid, state);
+                    return;
                 }
                 StepResult::Delay(t) => {
                     self.seq += 1;
@@ -205,7 +226,7 @@ impl Interpreter {
         let stmt_id = loop {
             match state.frames.last_mut() {
                 None => return StepResult::Done,
-                Some((stmts, idx)) => {
+                Some((stmts, idx, _)) => {
                     if *idx < stmts.len() {
                         let id = stmts[*idx];
                         *idx += 1;
@@ -222,7 +243,7 @@ impl Interpreter {
 
             Stmt::Block(stmts) => {
                 if !stmts.is_empty() {
-                    state.frames.push((stmts, 0));
+                    state.frames.push((stmts, 0, None));
                 }
                 StepResult::Continue
             }
@@ -232,10 +253,10 @@ impl Interpreter {
                 let nonzero = cond.pad_to_width(cond.width()) != 0;
                 let known = cond.is_known();
                 if known && nonzero {
-                    state.frames.push((vec![then_id], 0));
+                    state.frames.push((vec![then_id], 0, None));
                 } else if known {
                     if let Some(e) = else_id {
-                        state.frames.push((vec![e], 0));
+                        state.frames.push((vec![e], 0, None));
                     }
                 }
                 StepResult::Continue
@@ -256,7 +277,7 @@ impl Interpreter {
                             }
                         };
                         if eq == LogicVal::ONE {
-                            state.frames.push((vec![*body], 0));
+                            state.frames.push((vec![*body], 0, None));
                             matched = true;
                             break 'outer;
                         }
@@ -264,7 +285,7 @@ impl Interpreter {
                 }
                 if !matched {
                     if let Some(d) = default {
-                        state.frames.push((vec![d], 0));
+                        state.frames.push((vec![d], 0, None));
                     }
                 }
                 StepResult::Continue
@@ -285,12 +306,12 @@ impl Interpreter {
             }
 
             Stmt::Delay(t, body) => {
-                state.frames.push((vec![body], 0));
+                state.frames.push((vec![body], 0, None));
                 StepResult::Delay(t)
             }
 
             Stmt::EventCtl(sens, body) => {
-                state.frames.push((vec![body], 0));
+                state.frames.push((vec![body], 0, None));
                 StepResult::Wait(sens)
             }
 
@@ -307,9 +328,56 @@ impl Interpreter {
                 let nonzero = cond.pad_to_width(cond.width()) != 0;
                 if cond.is_known() && nonzero {
                     // Push body followed by this while stmt again
-                    state.frames.push((vec![body_id, stmt_id], 0));
+                    state.frames.push((vec![body_id, stmt_id], 0, None));
                 }
                 StepResult::Continue
+            }
+
+            Stmt::NamedBlock(block_id, stmts) => {
+                if !stmts.is_empty() {
+                    state.frames.push((stmts, 0, Some(block_id)));
+                }
+                StepResult::Continue
+            }
+
+            Stmt::Disable(target) => {
+                // 同一プロセスのフレームスタックから対象ブロックを探し、それを含む上の階層を巻き戻す。
+                // 他プロセスで実行中のブロック/タスクの中断には対応しない（M2サブセット）。
+                if let Some(i) = state.frames.iter().rposition(|(_, _, id)| *id == Some(target)) {
+                    state.frames.truncate(i);
+                }
+                StepResult::Continue
+            }
+
+            Stmt::Fork(branches) => {
+                if branches.is_empty() {
+                    return StepResult::Continue;
+                }
+                self.fork_seq += 1;
+                let fid = self.fork_seq;
+                self.fork_remaining.insert(fid, branches.len() as u32);
+                for b in branches {
+                    self.active.push(ProcState {
+                        id: state.id,
+                        kind: state.kind,
+                        frames: vec![(vec![b], 0, None)],
+                        fork_ctx: Some(fid),
+                    });
+                }
+                StepResult::ForkJoin(fid)
+            }
+        }
+    }
+
+    /// fork分岐の完了を記録し、全分岐が終わったらjoin待ちの親プロセスを再開する。
+    fn fork_branch_done(&mut self, fid: u32) {
+        if let Some(remaining) = self.fork_remaining.get_mut(&fid) {
+            *remaining -= 1;
+            if *remaining == 0 {
+                self.fork_remaining.remove(&fid);
+                if let Some(parent) = self.fork_waiters.remove(&fid) {
+                    self.active.push(parent);
+                }
             }
         }
     }
@@ -472,6 +540,18 @@ impl Interpreter {
                     self.exec_sync_stmt(body_id);
                 }
             }
+            Stmt::NamedBlock(_, stmts) => {
+                for s in stmts {
+                    self.exec_sync_stmt(s);
+                }
+            }
+            // 関数本体内のdisable/forkは未対応のサブセット（zero-time実行のため意味を持たない）。
+            Stmt::Disable(_) => {}
+            Stmt::Fork(branches) => {
+                for b in branches {
+                    self.exec_sync_stmt(b);
+                }
+            }
         }
     }
 
@@ -486,7 +566,7 @@ impl Interpreter {
     fn get_lval_val(&mut self, lval: &LValue) -> Option<LogicVal> {
         match lval {
             LValue::Net(id) => self.net_values.get(id).cloned(),
-            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) => {
+            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => {
                 self.net_values.get(id).cloned()
             }
             LValue::MemWrite(mem_id, idx_id) => {
@@ -507,6 +587,23 @@ impl Interpreter {
             }
             LValue::BitSelect(id, bit) => {
                 let net_id = *id;
+                let w = self.design.get_net(net_id).width;
+                let old = self.net_values.get(&net_id).cloned()
+                    .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
+                let oa = old.pad_to_width(w);
+                let ob = old.pad_to_width_b(w);
+                let ba = val.pad_to_width(1);
+                let bb = val.pad_to_width_b(1);
+                let m = 1u64 << bit;
+                let na = (oa & !m) | (ba << bit);
+                let nb = (ob & !m) | (bb << bit);
+                let new_val = LogicVal::new(w as u16, na, nb);
+                self.net_values.insert(net_id, new_val.clone());
+                self.vcd_record_net_change(net_id, &new_val);
+            }
+            LValue::DynBitSelect(id, idx_id) => {
+                let net_id = *id;
+                let bit = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 let w = self.design.get_net(net_id).width;
                 let old = self.net_values.get(&net_id).cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
@@ -547,7 +644,7 @@ impl Interpreter {
 
     fn trigger_sensitivity(&mut self, lval: &LValue, old: Option<&LogicVal>, new: &LogicVal) {
         let net_id = match lval {
-            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) => *id,
+            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => *id,
             LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
         };
 

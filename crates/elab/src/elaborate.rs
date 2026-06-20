@@ -3,6 +3,7 @@ use rverilog_hir::{
     Sensitivity as HirSensitivity, SysTask as HirSysTask, CaseKind as HirCaseKind,
     BinOp as HirBinOp, UnOp as HirUnOp, EdgeType as HirEdgeType,
     NetKind as HirNetKind, PortDirection, SysFuncKind,
+    GenerateItems, GenerateConstruct,
 };
 use rverilog_mir::{
     ElaboratedDesign, NetId, ProcessId, ScopeId, StmtId, ExprId, MemId,
@@ -43,6 +44,8 @@ struct ElabCtx<'a> {
     scope_params: IndexMap<u32, IndexMap<SmolStr, u64>>,
     scope_funcs: IndexMap<u32, IndexMap<SmolStr, FunctionInfo>>,
     scope_tasks: IndexMap<u32, IndexMap<SmolStr, TaskInfo>>,
+    scope_blocks: IndexMap<u32, IndexMap<SmolStr, u32>>,
+    next_block_id: u32,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -62,6 +65,8 @@ impl<'a> ElabCtx<'a> {
             scope_params: IndexMap::new(),
             scope_funcs: IndexMap::new(),
             scope_tasks: IndexMap::new(),
+            scope_blocks: IndexMap::new(),
+            next_block_id: 0,
         }
     }
 
@@ -156,6 +161,26 @@ impl<'a> ElabCtx<'a> {
             if let Some(map) = self.scope_tasks.get(&s.0) {
                 if let Some(t) = map.get(name) {
                     return Some(t.clone());
+                }
+            }
+            cur = self.scopes.get(s.0 as usize).and_then(|sc| sc.parent);
+        }
+        None
+    }
+
+    fn register_block(&mut self, scope: ScopeId, name: SmolStr) -> u32 {
+        let id = self.next_block_id;
+        self.next_block_id += 1;
+        self.scope_blocks.entry(scope.0).or_default().insert(name, id);
+        id
+    }
+
+    fn resolve_block(&self, scope: ScopeId, name: &str) -> Option<u32> {
+        let mut cur = Some(scope);
+        while let Some(s) = cur {
+            if let Some(map) = self.scope_blocks.get(&s.0) {
+                if let Some(&id) = map.get(name) {
+                    return Some(id);
                 }
             }
             cur = self.scopes.get(s.0 as usize).and_then(|sc| sc.parent);
@@ -430,12 +455,12 @@ fn elab_module(
                 let parent_expr_id = lower_expr(ctx, scope, &conn.expr)?;
                 match port_dir {
                     Some(PortDirection::Output) => {
-                        // child drives parent: parent_net = child_port
-                        if let HirExpr::Net(pname) = &conn.expr {
-                            if let Some(parent_id) = ctx.resolve_net(scope, pname.as_str()) {
-                                let ce = ctx.alloc_expr(Expr::Net(child_id));
-                                ctx.conts.push(ContAssign { lval: LValue::Net(parent_id), expr: ce });
-                            }
+                        // child drives parent: parent_lvalue = child_port
+                        // (ビット選択 `.o(out[i])` も含め、ポート接続式を lvalue として解決する)
+                        if let Some(parent_lv) = expr_as_lvalue(&conn.expr) {
+                            let parent_lval = lower_lvalue(ctx, scope, &parent_lv)?;
+                            let ce = ctx.alloc_expr(Expr::Net(child_id));
+                            ctx.conts.push(ContAssign { lval: parent_lval, expr: ce });
                         }
                     }
                     _ => {
@@ -447,7 +472,195 @@ fn elab_module(
         }
     }
 
+    // generate / genvar constructs
+    elab_generate_items(ctx, scope, &hir.name, &hir.generates)?;
+
     Ok(scope)
+}
+
+/// `generate`/`genvar` 構築物の展開。`items` 内の宣言・assign・instance 等を
+/// 現在の `scope` へ直接登録し、`nested`（if/case/for）は再帰的に展開する。
+/// for ループは genvar の値ごとに専用の子スコープを割り当てる（名前衝突回避のため）。
+fn elab_generate_items(
+    ctx: &mut ElabCtx,
+    scope: ScopeId,
+    module_name: &SmolStr,
+    items: &GenerateItems,
+) -> Result<(), ElabError> {
+    for lp in &items.locals {
+        if let Ok(v) = eval_const_hir(ctx, scope, &lp.value) {
+            ctx.register_param(scope, lp.name.clone(), v);
+        }
+    }
+
+    for net in &items.nets {
+        let kind = lower_netkind(net.kind);
+        let width = eval_const_hir(ctx, scope, &net.width_expr)
+            .map(|v| v as u32).unwrap_or(net.width).max(1);
+        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: net.name.clone() });
+        ctx.register_net(scope, net.name.clone(), net_id);
+    }
+
+    for reg in &items.regs {
+        let width = eval_const_hir(ctx, scope, &reg.width_expr)
+            .map(|v| v as u32).unwrap_or(reg.width).max(1);
+        let net_id = ctx.alloc_net(NetInfo { width, kind: NetKind::Reg, scope, name: reg.name.clone() });
+        ctx.register_net(scope, reg.name.clone(), net_id);
+    }
+
+    for mem in &items.mems {
+        let elem_width = eval_const_hir(ctx, scope, &mem.elem_width).unwrap_or(8) as u32;
+        let depth = eval_const_hir(ctx, scope, &mem.depth).unwrap_or(1) as u32;
+        let mem_id = ctx.alloc_mem(MemInfo { depth, elem_width, scope, name: mem.name.clone() });
+        ctx.register_mem(scope, mem.name.clone(), mem_id);
+    }
+
+    for assign in &items.assigns {
+        let lval = lower_lvalue(ctx, scope, &assign.lval)?;
+        let expr_id = lower_expr(ctx, scope, &assign.expr)?;
+        ctx.conts.push(ContAssign { lval, expr: expr_id });
+    }
+
+    for init in &items.initials {
+        let body_id = lower_stmt(ctx, scope, &init.body)?;
+        ctx.processes.push(Process {
+            scope,
+            body: body_id,
+            kind: ProcessKind::Initial,
+            sensitivity: Sensitivity::Items(Vec::new()),
+        });
+    }
+
+    for always in &items.alwayses {
+        let body_id = lower_stmt(ctx, scope, &always.body)?;
+        let sens = if let Some(s) = &always.sensitivity {
+            lower_sensitivity(ctx, scope, s)?
+        } else {
+            Sensitivity::Items(Vec::new())
+        };
+
+        let proc_id = ProcessId(ctx.processes.len() as u32);
+        if let Sensitivity::Items(ref edges) = sens {
+            for edge in edges {
+                ctx.sensitivity_table
+                    .entry(edge.net.0)
+                    .or_default()
+                    .push(proc_id.0);
+            }
+        }
+
+        ctx.processes.push(Process {
+            scope,
+            body: body_id,
+            kind: ProcessKind::Always,
+            sensitivity: sens,
+        });
+    }
+
+    for inst in &items.instances {
+        let sub = ctx.modules.get(&inst.module)
+            .ok_or_else(|| ElabError::ModuleNotFound(inst.module.to_string()))?
+            .clone();
+
+        let mut sub_params: Vec<(SmolStr, u64)> = Vec::new();
+        for (i, po) in inst.params.iter().enumerate() {
+            let val = eval_const_hir(ctx, scope, &po.value).unwrap_or(0);
+            let name = if let Some(n) = &po.name {
+                n.clone()
+            } else {
+                sub.params.get(i).map(|p| p.name.clone())
+                    .unwrap_or_else(|| SmolStr::from(format!("__p{}", i)))
+            };
+            sub_params.push((name, val));
+        }
+
+        let child_scope = elab_module(ctx, &sub, Some(scope), inst.name.clone(), &sub_params)?;
+
+        for (port_idx, conn) in inst.ports.iter().enumerate() {
+            let port_name = if let Some(n) = &conn.name {
+                n.clone()
+            } else {
+                sub.ports.get(port_idx)
+                    .map(|p| p.name.clone())
+                    .ok_or_else(|| ElabError::UnsupportedConstruct("port index out of range".into()))?
+            };
+
+            let port_dir = sub.ports.iter().find(|p| p.name == port_name)
+                .or_else(|| sub.ports.get(port_idx))
+                .map(|p| p.direction);
+
+            let child_net = ctx.scope_nets.get(&child_scope.0)
+                .and_then(|m| m.get(&port_name))
+                .copied();
+
+            if let Some(child_id) = child_net {
+                let parent_expr_id = lower_expr(ctx, scope, &conn.expr)?;
+                match port_dir {
+                    Some(PortDirection::Output) => {
+                        if let Some(parent_lv) = expr_as_lvalue(&conn.expr) {
+                            let parent_lval = lower_lvalue(ctx, scope, &parent_lv)?;
+                            let ce = ctx.alloc_expr(Expr::Net(child_id));
+                            ctx.conts.push(ContAssign { lval: parent_lval, expr: ce });
+                        }
+                    }
+                    _ => {
+                        ctx.conts.push(ContAssign { lval: LValue::Net(child_id), expr: parent_expr_id });
+                    }
+                }
+            }
+        }
+    }
+
+    for construct in &items.nested {
+        match construct {
+            GenerateConstruct::If(gi) => {
+                let cond = eval_const_hir(ctx, scope, &gi.cond).unwrap_or(0);
+                let chosen = if cond != 0 { &gi.then_items } else { &gi.else_items };
+                elab_generate_items(ctx, scope, module_name, chosen)?;
+            }
+            GenerateConstruct::Case(gc) => {
+                let sel = eval_const_hir(ctx, scope, &gc.sel).unwrap_or(0);
+                let mut chosen = None;
+                'arms: for (pats, arm_items) in &gc.arms {
+                    for p in pats {
+                        if eval_const_hir(ctx, scope, p).unwrap_or(0) == sel {
+                            chosen = Some(arm_items);
+                            break 'arms;
+                        }
+                    }
+                }
+                let chosen = chosen.or(gc.default.as_ref());
+                if let Some(arm_items) = chosen {
+                    elab_generate_items(ctx, scope, module_name, arm_items)?;
+                }
+            }
+            GenerateConstruct::For(gf) => {
+                // genvar の値ごとに無限ループ防止の上限を設けつつ展開する
+                const MAX_GENERATE_ITERS: u32 = 4096;
+                let mut i = eval_const_hir(ctx, scope, &gf.init).unwrap_or(0);
+                let mut count = 0u32;
+                loop {
+                    let iter_scope = ctx.alloc_scope(Scope {
+                        parent: Some(scope),
+                        name: SmolStr::from(format!("$gen_{}_{}", gf.var, i)),
+                        module_name: module_name.clone(),
+                    });
+                    ctx.register_param(iter_scope, gf.var.clone(), i);
+                    if eval_const_hir(ctx, iter_scope, &gf.cond).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    elab_generate_items(ctx, iter_scope, module_name, &gf.body)?;
+                    i = eval_const_hir(ctx, iter_scope, &gf.step).unwrap_or(i);
+                    count += 1;
+                    if count > MAX_GENERATE_ITERS {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ── HIR → MIR lowering ───────────────────────────────────────────────────────
@@ -543,6 +756,23 @@ fn clog2(n: u64) -> u64 {
     if n <= 1 { 0 } else { (64 - (n - 1).leading_zeros()) as u64 }
 }
 
+/// インスタンスの出力ポート接続式（`.o(out)` / `.o(out[i])` 等）を代入先 lvalue に変換する。
+/// 任意式（連結・演算結果など）は出力ポート接続として不正なので非対応のまま `None` を返す。
+fn expr_as_lvalue(e: &HirExpr) -> Option<HirLValue> {
+    match e {
+        HirExpr::Net(name) => Some(HirLValue::Net(name.clone())),
+        HirExpr::IndexSel(name, idx) => Some(HirLValue::IndexSel(name.clone(), idx.clone())),
+        HirExpr::PartSel(base, range) => {
+            if let HirExpr::Net(name) = base.as_ref() {
+                Some(HirLValue::PartSelect(Box::new(HirLValue::Net(name.clone())), (**range).clone()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn extract_net_id(ctx: &ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<NetId, ElabError> {
     match e {
         HirExpr::Net(name) => ctx.resolve_net(scope, name.as_str())
@@ -581,7 +811,8 @@ fn lower_lvalue(ctx: &mut ElabCtx, scope: ScopeId, lval: &HirLValue) -> Result<L
             if let Some(mem_id) = ctx.resolve_mem(scope, name.as_str()) {
                 Ok(LValue::MemWrite(mem_id, idx_id))
             } else if let Some(net_id) = ctx.resolve_net(scope, name.as_str()) {
-                Ok(LValue::BitSelect(net_id, 0))  // fallback: static bit 0
+                // 実行時に決まる動的インデックスでのビット選択（genvar 由来の定数を含む）
+                Ok(LValue::DynBitSelect(net_id, idx_id))
             } else {
                 Err(ElabError::UnresolvedName(name.to_string()))
             }
@@ -679,6 +910,20 @@ fn lower_stmt(ctx: &mut ElabCtx, scope: ScopeId, s: &HirStmt) -> Result<StmtId, 
                 }
             }
             Stmt::Block(block)
+        }
+        HirStmt::NamedBlock(name, stmts) => {
+            let block_id = ctx.register_block(scope, name.clone());
+            let ids: Result<Vec<_>, _> = stmts.iter().map(|s| lower_stmt(ctx, scope, s)).collect();
+            Stmt::NamedBlock(block_id, ids?)
+        }
+        HirStmt::Disable(name) => {
+            let block_id = ctx.resolve_block(scope, name.as_str())
+                .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))?;
+            Stmt::Disable(block_id)
+        }
+        HirStmt::Fork(branches) => {
+            let ids: Result<Vec<_>, _> = branches.iter().map(|s| lower_stmt(ctx, scope, s)).collect();
+            Stmt::Fork(ids?)
         }
     };
     Ok(ctx.alloc_stmt(mir))

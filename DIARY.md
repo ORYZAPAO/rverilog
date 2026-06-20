@@ -819,3 +819,123 @@ $finish at time 3
 - iverilog との出力比較 CI 導入
 - `generate`/`genvar` 対応
 - `disable`/`fork`-`join` 対応
+
+---
+
+## 2026-06-20
+
+### Task
+
+`generate`/`genvar` 対応の実装。
+
+### 設計
+
+- **HIR** (`crates/hir/src/design.rs`): `GenerateItems`（nets/regs/mems/locals/assigns/initials/alwayses/instances/nested の集合）、`GenerateConstruct`（If/Case/For）、`GenerateIf`/`GenerateCase`/`GenerateFor` を追加。`HirModule.generates: GenerateItems` フィールドを追加（既存の `nets`/`assigns` 等とは別に、generate 由来の項目だけを保持）。
+- **Frontend** (`crates/frontend/src/lower.rs`):
+  - `NonPortModuleItem::GenerateRegion`（`generate`/`endgenerate` ブロック）と `ModuleCommonItem::LoopGenerateConstruct`/`ConditionalGenerateConstruct`（ブロックなしで直接書かれた for/if/case）の両方をハンドリング。
+  - `lower_generate_items`/`process_generate_mogi`/`lower_generate_block` で再帰的に `GenerateItems` を構築（ネストした generate も `nested` 経由で再帰）。
+  - genvar の境界式・ステップ式（`i < WIDTH`、`i = i + 1` 等）はテキストの場当たり的パースではなく、`ConstantExpression` 構文木を正しく辿る `lower_constant_expr`/`lower_constant_primary` を新設して二項/単項/三項演算・genvar 識別子・parameter 識別子を扱えるようにした。
+  - 副作用として見つけたバグ修正: `#(parameter WIDTH = 8, parameter DEPTH = 16)` 形式（`ParameterPortList::Declaration`）のデフォルト値が `Expr::Const(0)` に固定されていた（デフォルト値の式を読まずに捨てていた）。インスタンス化時に必ず override する既存サンプルでは問題が露見していなかった。`Assignment` 形式と同様にデフォルト式をパースするよう修正。
+- **Elab** (`crates/elab/src/elaborate.rs`): `elab_generate_items` を新設し、`elab_module` の最後で `hir.generates` を展開。
+  - if/case はその場で条件を `eval_const_hir` で評価し、選ばれた分岐の `GenerateItems` を**同じスコープ**に登録。
+  - for は genvar の値ごとに**専用の子スコープ**（`Scope { parent: Some(scope), name: "$gen_<var>_<i>", .. }`）を割り当て、genvar を `register_param` で登録。これにより本体内の幅式・instance パラメータ・assign/always の実行時式が genvar 値を `ctx.resolve_param` 経由で透過的に定数として解決できる（HIR 木を書き換える置換パスは不要）。無限ループ防止に `MAX_GENERATE_ITERS = 4096` の上限を設けた。
+- **MIR/Sim**: generate-for でビット配列を per-bit instance に展開する一般的な書き方（`gate #(...) u(.a(a[i]), .o(out[i]))`）を実際に動かす過程で、出力ポート接続が `HirExpr::Net` 以外（`out[i]` のような動的ビット選択）を一切サポートしていなかったことが判明。
+  - `LValue::DynBitSelect(NetId, ExprId)` を MIR に追加し、`sim/src/interp.rs` の `get_lval_val`/`write_lvalue`/`trigger_sensitivity` に実行時ビット位置での読み書きを実装。
+  - `elab/src/elaborate.rs::lower_lvalue` の `HirLValue::IndexSel` を、従来の「常にビット0にフォールバック」する誤った実装から `LValue::DynBitSelect` を使う正しい実装に修正。
+  - インスタンスの出力ポート接続を汎用化する `expr_as_lvalue` ヘルパーを追加し、`.o(out)` だけでなく `.o(out[i])` / `.o(out[hi:lo])` も lvalue として正しく解決できるようにした（従来は `HirExpr::Net` のみ対応で、ビット選択は黒く無視されていた）。
+
+### 制約
+
+- generate-for の本体は genvar ごとに新しい子スコープへフラットに展開する。Verilog 標準のような `genblk[i].foo` 階層パスは作らない（VCD 階層やデバッグ表示には影響するが、信号の参照解決自体には影響しない）。
+- `lower_constant_expr` は ConstantExpression の主要なバリアント（リテラル・genvar/parameter 識別子・単項/二項/三項演算・括弧）のみ対応。`inside` 式や function call 等は未対応（エラーまたはテキストパースへのフォールバック）。
+- generate ブロック内での `function`/`task` 宣言は非対応（無視）。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok
+test test_gates ... ok
+test test_generate ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+手動確認 (`tests/integration/cases/generate/dut.v`):
+```
+WIDTH>2 branch taken
+a=1010 b=110 and=10 or=1110
+$finish at time 1
+```
+genvar による for ループで4bit分の and/or ゲートインスタンスを生成し、各ビットが正しく a&b / a|b を計算していることを確認。generate-if / generate-case の分岐選択も正しく動作。
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `disable`/`fork`-`join` 対応
+- `$readmemh`/`$random` 対応
+
+---
+
+## 2026-06-20 (2)
+
+### Task
+
+`disable`/`fork`-`join` 対応の実装。
+
+### 設計
+
+- **HIR** (`crates/hir/src/design.rs`): `Stmt::NamedBlock(SmolStr, Vec<Stmt>)`（`begin : label ... end`）、`Stmt::Disable(SmolStr)`（`disable label;`）、`Stmt::Fork(Vec<Stmt>)`（`fork ... join`、各要素が並行実行する分岐）を追加。
+- **Frontend** (`crates/frontend/src/lower.rs`): `lower_seq_block` がブロックのラベル（`SeqBlock.nodes.1`）の有無で `Stmt::Block`/`Stmt::NamedBlock` を切り分けて生成。`StatementItem::DisableStatement`（`DisableStatement::Block`/`Task` の両方を同じ仕組みで処理。`disable fork;` は未対応としてエラー）と `StatementItem::ParBlock`（`fork`/`join`/`join_any`/`join_none` の区別なく全分岐を `Stmt::Fork` に詰める）を新規ハンドリング。
+- **Elab** (`crates/elab/src/elaborate.rs`): `ElabCtx` に `scope_blocks: IndexMap<u32, IndexMap<SmolStr, u32>>` と `next_block_id` を追加し、`register_block`/`resolve_block` で名前付きブロックに一意な `u32` ID を割り当て（他の `resolve_*` 系と同じ親スコープ遡上方式）。`lower_stmt` で `HirStmt::NamedBlock` を処理する際は **先にブロックIDを登録してから子文を lowering** することで、ブロック自身を対象とする内側の `disable label;` が解決できるようにした。`HirStmt::Disable` はこの ID を解決して `Stmt::Disable(id)` に変換、未解決ならエラー（他プロセスの名前解決は対象外）。`HirStmt::Fork` は分岐を再帰的に lowering するだけ（並行実行ロジックはsim側）。
+- **Sim** (`crates/sim/src/interp.rs`): プロセス実行のフレームスタック `Frame` に `Option<u32>`（このフレームが対応する `NamedBlock` のID）を追加。
+  - `Stmt::NamedBlock(id, stmts)`: フレームをラベルID付きでpush。
+  - `Stmt::Disable(target)`: 現在のプロセスのフレームスタックを**末尾（最内）から**探索し、対象IDを持つフレームが見つかった位置で `truncate`。これにより、そのブロックとそれより内側のフレームが全て破棄され、外側のフレーム（ループの増分文や次の文）から実行が継続する——IEEE仕様通り「そのブロックの残り部分をスキップする」動作（forループの**1イテレーションだけ**をスキップする「continue」的挙動になる。forループ全体を止めたい場合はfor文自体ではなくbodyではない外側のブロックをラベル付けする必要がある）。対象ブロックが現在のプロセス内に見つからない場合は no-op（他プロセスのタスク/ブロックの中断は未対応）。
+  - `Stmt::Fork(branches)`: 各分岐を新規 `ProcState`（`fork_ctx: Some(fork_id)`）として `self.active` に積み、現在のプロセスは `StepResult::ForkJoin(fork_id)` を返して `fork_waiters` に保存され停止。各分岐プロセスは通常のプロセスと同じスケジューラ（`#delay`/`@event` 含む）で独立に進行し、完了時 (`exec_proc` の `StepResult::Done` 処理) に `fork_ctx` を見て `fork_branch_done` を呼び、残り分岐数をデクリメント。0になったら `fork_waiters` から親を取り出し `active` に戻して join を完了させる。
+  - 関数呼び出し本体（ゼロタイム実行の `exec_sync_stmt`）では `NamedBlock` はラベル無視で逐次実行、`Disable` は no-op、`Fork` は逐次実行にフォールバック（関数内でのdisable/forkは仕様上ほぼ使われないため、サブセットとして許容）。
+
+### 制約
+
+- `disable` は同一プロセス内の名前付きブロックのみ対象。他プロセスで実行中のタスク呼び出しやブロックを中断する一般形（`disable` の本来の主用途の一つ）は未対応。
+- `disable fork;`（forkした分岐をまとめて中断）は未対応。
+- `fork`/`join_any`/`join_none` の区別をしておらず、全て `join`（全分岐完了待ち）として扱う。
+- 関数本体（ゼロタイム実行）内の `disable`/`fork` は意味的に簡略化（no-op/逐次実行）。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok
+test test_gates ... ok
+test test_generate ... ok
+test test_disable_fork ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+手動確認 (`tests/integration/cases/disable_fork/dut.v`):
+```
+i=0
+i=1
+i=2
+i=3
+i=5
+i=6
+i=7
+i=8
+i=9
+after loop i=10
+branch b done at 2
+branch a done at 5
+joined at 5 a=1 b=2
+$finish at time 6
+```
+`disable loop_body;` がfor文の1イテレーション（i=4）だけをスキップし（forループ自体は継続）、`fork...join` がdelay 2とdelay 5の2分岐を並行実行して両方完了するt=5までjoinが待つことを確認。
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- `$readmemh`/`$random` 対応
+- 部分 X 伝搬の精度向上

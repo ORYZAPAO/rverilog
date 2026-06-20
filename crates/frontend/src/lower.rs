@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use rverilog_hir::{
     AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, EdgeType, Expr, FunctionDecl,
+    GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems,
     HirModule, InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl,
     NetKind, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, RegDecl,
     Sensitivity, SensitivityItem, Stmt, SysTask, SysFuncKind, TaskDecl, TfArg, UnOp,
@@ -102,9 +103,9 @@ fn lower_module_ansi(
 
     let ports = lower_ansi_ports(tree, &header.nodes.6)?;
     let params = lower_param_port_list(tree, &header.nodes.5)?;
-    let (nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks) = lower_nonport_items(tree, &x.nodes.2)?;
+    let (nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks, generates) = lower_nonport_items(tree, &x.nodes.2)?;
 
-    Ok(HirModule { name, ports, params, locals, nets, regs, mems, assigns, initials, alwayses, instances, functions, tasks })
+    Ok(HirModule { name, ports, params, locals, nets, regs, mems, assigns, initials, alwayses, instances, functions, tasks, generates })
 }
 
 fn lower_module_nonansi(
@@ -115,9 +116,9 @@ fn lower_module_nonansi(
     let name = get_id(tree, RefNode::ModuleIdentifier(&header.nodes.3))
         .ok_or_else(|| FrontendError::ParseError("missing module name".into()))?;
 
-    let (nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks) = lower_module_items(tree, &x.nodes.2)?;
+    let (nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks, generates) = lower_module_items(tree, &x.nodes.2)?;
 
-    Ok(HirModule { name, ports: vec![], params: vec![], locals, nets, regs, mems, assigns, initials, alwayses, instances, functions, tasks })
+    Ok(HirModule { name, ports: vec![], params: vec![], locals, nets, regs, mems, assigns, initials, alwayses, instances, functions, tasks, generates })
 }
 
 // ── ports ─────────────────────────────────────────────────────────────────────
@@ -228,10 +229,22 @@ fn lower_param_port_list(
                 }
             }
             sv_parser::ParameterPortList::Declaration(d) => {
+                // `#(parameter WIDTH = 8, parameter DEPTH = 16)` 形式：各項目が個別の
+                // `parameter` キーワードを持つため、デフォルト値の式もここで取り出す。
                 for item in d.nodes.1.nodes.1.contents() {
-                    if let Some(name_node) = unwrap_node!(item, ParameterIdentifier) {
-                        if let Some(name) = get_id(tree, name_node) {
-                            params.push(ParamDecl { name, value: Expr::Const(lv(0, 32)) });
+                    if let sv_parser::ParameterPortDeclaration::ParameterDeclaration(pd) = item {
+                        if let sv_parser::ParameterDeclaration::Param(pp) = pd.as_ref() {
+                            for pa in pp.nodes.2.nodes.0.contents() {
+                                if let Some(name) = get_id(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) {
+                                    let value = if let Some((_, cpe)) = &pa.nodes.2 {
+                                        let text = tree.get_str(cpe).unwrap_or("0");
+                                        parse_simple_const_expr(text.trim())
+                                    } else {
+                                        Expr::Const(lv(0, 32))
+                                    };
+                                    params.push(ParamDecl { name, value });
+                                }
+                            }
                         }
                     }
                 }
@@ -244,7 +257,7 @@ fn lower_param_port_list(
 
 // ── module items ──────────────────────────────────────────────────────────────
 
-type Items = (Vec<NetDecl>, Vec<RegDecl>, Vec<MemDecl>, Vec<LocalParamDecl>, Vec<ContinuousAssign>, Vec<InitialConstruct>, Vec<AlwaysConstruct>, Vec<ModuleInstance>, Vec<FunctionDecl>, Vec<TaskDecl>);
+type Items = (Vec<NetDecl>, Vec<RegDecl>, Vec<MemDecl>, Vec<LocalParamDecl>, Vec<ContinuousAssign>, Vec<InitialConstruct>, Vec<AlwaysConstruct>, Vec<ModuleInstance>, Vec<FunctionDecl>, Vec<TaskDecl>, GenerateItems);
 
 fn lower_nonport_items(
     tree: &SyntaxTree,
@@ -260,13 +273,21 @@ fn lower_nonport_items(
     let mut instances = Vec::new();
     let mut functions = Vec::new();
     let mut tasks = Vec::new();
+    let mut generates = GenerateItems::default();
 
     for item in items {
-        if let sv_parser::NonPortModuleItem::ModuleOrGenerateItem(mogi) = item {
-            process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances, &mut functions, &mut tasks)?;
+        match item {
+            sv_parser::NonPortModuleItem::ModuleOrGenerateItem(mogi) => {
+                process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances, &mut functions, &mut tasks, &mut generates)?;
+            }
+            sv_parser::NonPortModuleItem::GenerateRegion(gr) => {
+                let g = lower_generate_items(tree, &gr.nodes.1);
+                merge_generate_items(&mut generates, g);
+            }
+            _ => {}
         }
     }
-    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks))
+    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks, generates))
 }
 
 fn lower_module_items(
@@ -283,15 +304,35 @@ fn lower_module_items(
     let mut instances = Vec::new();
     let mut functions = Vec::new();
     let mut tasks = Vec::new();
+    let mut generates = GenerateItems::default();
 
     for item in items {
         if let sv_parser::ModuleItem::NonPortModuleItem(npmi) = item {
-            if let sv_parser::NonPortModuleItem::ModuleOrGenerateItem(mogi) = npmi.as_ref() {
-                process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances, &mut functions, &mut tasks)?;
+            match npmi.as_ref() {
+                sv_parser::NonPortModuleItem::ModuleOrGenerateItem(mogi) => {
+                    process_mogi(tree, mogi, &mut nets, &mut regs, &mut mems, &mut locals, &mut assigns, &mut initials, &mut alwayses, &mut instances, &mut functions, &mut tasks, &mut generates)?;
+                }
+                sv_parser::NonPortModuleItem::GenerateRegion(gr) => {
+                    let g = lower_generate_items(tree, &gr.nodes.1);
+                    merge_generate_items(&mut generates, g);
+                }
+                _ => {}
             }
         }
     }
-    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks))
+    Ok((nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks, generates))
+}
+
+fn merge_generate_items(dst: &mut GenerateItems, src: GenerateItems) {
+    dst.nets.extend(src.nets);
+    dst.regs.extend(src.regs);
+    dst.mems.extend(src.mems);
+    dst.locals.extend(src.locals);
+    dst.assigns.extend(src.assigns);
+    dst.initials.extend(src.initials);
+    dst.alwayses.extend(src.alwayses);
+    dst.instances.extend(src.instances);
+    dst.nested.extend(src.nested);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -308,6 +349,7 @@ fn process_mogi(
     instances: &mut Vec<ModuleInstance>,
     functions: &mut Vec<FunctionDecl>,
     tasks: &mut Vec<TaskDecl>,
+    generates: &mut GenerateItems,
 ) -> Result<(), FrontendError> {
     use sv_parser::ModuleOrGenerateItem as MOGI;
     match mogi {
@@ -324,12 +366,239 @@ fn process_mogi(
                 MCI::InitialConstruct(ic) => initials.push(lower_initial(tree, ic)?),
                 MCI::ContinuousAssign(ca) => assigns.extend(lower_continuous_assign(tree, ca)?),
                 MCI::ModuleOrGenerateItemDeclaration(d) => lower_decl(tree, d, nets, regs, mems, locals, functions, tasks)?,
+                MCI::LoopGenerateConstruct(lgc) => {
+                    if let Some(c) = lower_loop_generate(tree, lgc) {
+                        generates.nested.push(GenerateConstruct::For(c));
+                    }
+                }
+                MCI::ConditionalGenerateConstruct(cgc) => {
+                    if let Some(c) = lower_conditional_generate(tree, cgc) {
+                        generates.nested.push(c);
+                    }
+                }
                 _ => {}
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+// ── generate / genvar ─────────────────────────────────────────────────────────
+
+fn lower_generate_items(tree: &SyntaxTree, items: &[sv_parser::GenerateItem]) -> GenerateItems {
+    let mut g = GenerateItems::default();
+    for item in items {
+        process_generate_item(tree, item, &mut g);
+    }
+    g
+}
+
+fn process_generate_item(tree: &SyntaxTree, item: &sv_parser::GenerateItem, g: &mut GenerateItems) {
+    if let sv_parser::GenerateItem::ModuleOrGenerateItem(mogi) = item {
+        process_generate_mogi(tree, mogi, g);
+    }
+}
+
+fn process_generate_mogi(tree: &SyntaxTree, mogi: &sv_parser::ModuleOrGenerateItem, g: &mut GenerateItems) {
+    use sv_parser::ModuleOrGenerateItem as MOGI;
+    match mogi {
+        MOGI::Module(m) => {
+            if let Ok(inst) = lower_module_inst(tree, &m.nodes.1) {
+                g.instances.push(inst);
+            }
+        }
+        MOGI::Gate(gt) => {
+            g.assigns.extend(lower_gate_inst(tree, &gt.nodes.1));
+        }
+        MOGI::ModuleItem(mi) => {
+            use sv_parser::ModuleCommonItem as MCI;
+            match &mi.nodes.1 {
+                MCI::AlwaysConstruct(ac) => {
+                    if let Ok(a) = lower_always(tree, ac) { g.alwayses.push(a); }
+                }
+                MCI::InitialConstruct(ic) => {
+                    if let Ok(i) = lower_initial(tree, ic) { g.initials.push(i); }
+                }
+                MCI::ContinuousAssign(ca) => {
+                    if let Ok(v) = lower_continuous_assign(tree, ca) { g.assigns.extend(v); }
+                }
+                MCI::ModuleOrGenerateItemDeclaration(d) => lower_generate_decl(tree, d, g),
+                MCI::LoopGenerateConstruct(lgc) => {
+                    if let Some(c) = lower_loop_generate(tree, lgc) {
+                        g.nested.push(GenerateConstruct::For(c));
+                    }
+                }
+                MCI::ConditionalGenerateConstruct(cgc) => {
+                    if let Some(c) = lower_conditional_generate(tree, cgc) {
+                        g.nested.push(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lower_generate_decl(tree: &SyntaxTree, d: &sv_parser::ModuleOrGenerateItemDeclaration, g: &mut GenerateItems) {
+    use sv_parser::ModuleOrGenerateItemDeclaration as D;
+    if let D::PackageOrGenerateItemDeclaration(p) = d {
+        use sv_parser::PackageOrGenerateItemDeclaration as PD;
+        match p.as_ref() {
+            PD::NetDeclaration(nd) => {
+                if let Ok(v) = lower_net_decl(tree, nd) { g.nets.extend(v); }
+            }
+            PD::DataDeclaration(dd) => {
+                if let Ok((regs, mems)) = lower_data_decl(tree, dd) {
+                    g.regs.extend(regs);
+                    g.mems.extend(mems);
+                }
+            }
+            PD::LocalParameterDeclaration(lp) => {
+                if let Ok(v) = lower_localparam(tree, lp) { g.locals.extend(v); }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lower_generate_block(tree: &SyntaxTree, gb: &sv_parser::GenerateBlock) -> GenerateItems {
+    use sv_parser::GenerateBlock as GB;
+    match gb {
+        GB::GenerateItem(gi) => {
+            let mut g = GenerateItems::default();
+            process_generate_item(tree, gi, &mut g);
+            g
+        }
+        GB::Multiple(m) => lower_generate_items(tree, &m.nodes.3),
+    }
+}
+
+fn lower_loop_generate(tree: &SyntaxTree, lgc: &sv_parser::LoopGenerateConstruct) -> Option<GenerateFor> {
+    let (init, _, cond, _, iter) = &lgc.nodes.1.nodes.1;
+    let var = get_id(tree, RefNode::GenvarIdentifier(&init.nodes.1))?;
+    let init_expr = lower_constant_expr(tree, &init.nodes.3).ok()?;
+    let cond_expr = lower_constant_expr(tree, &cond.nodes.0).ok()?;
+    let step_expr = lower_genvar_iteration(tree, &var, iter)?;
+    let body = lower_generate_block(tree, &lgc.nodes.2);
+    Some(GenerateFor { var, init: init_expr, cond: cond_expr, step: step_expr, body })
+}
+
+fn lower_genvar_iteration(tree: &SyntaxTree, var: &SmolStr, iter: &sv_parser::GenvarIteration) -> Option<Expr> {
+    use sv_parser::GenvarIteration as GI;
+    match iter {
+        // ++i / i++ は ++/-- の区別をテキストで判定する
+        GI::Prefix(p) => Some(inc_or_dec_expr(tree, var, &p.nodes.0)),
+        GI::Suffix(s) => Some(inc_or_dec_expr(tree, var, &s.nodes.1)),
+        GI::Assignment(a) => {
+            // GenvarIterationAssignment.nodes = (GenvarIdentifier, AssignmentOperator, GenvarExpression)
+            lower_constant_expr(tree, &a.nodes.2.nodes.0).ok()
+        }
+    }
+}
+
+fn inc_or_dec_expr(tree: &SyntaxTree, var: &SmolStr, op: &sv_parser::IncOrDecOperator) -> Expr {
+    let text = tree.get_str(op).unwrap_or("++").trim();
+    let bin_op = if text == "--" { BinOp::Sub } else { BinOp::Add };
+    Expr::Bin(bin_op, Box::new(Expr::Net(var.clone())), Box::new(Expr::Const(lv(1, 32))))
+}
+
+fn lower_conditional_generate(tree: &SyntaxTree, cgc: &sv_parser::ConditionalGenerateConstruct) -> Option<GenerateConstruct> {
+    use sv_parser::ConditionalGenerateConstruct as CGC;
+    match cgc {
+        CGC::If(ifc) => {
+            let cond = lower_constant_expr(tree, &ifc.nodes.1.nodes.1).ok()?;
+            let then_items = lower_generate_block(tree, &ifc.nodes.2);
+            let else_items = match &ifc.nodes.3 {
+                Some((_, gb)) => lower_generate_block(tree, gb),
+                None => GenerateItems::default(),
+            };
+            Some(GenerateConstruct::If(GenerateIf { cond, then_items, else_items }))
+        }
+        CGC::Case(casec) => {
+            let sel = lower_constant_expr(tree, &casec.nodes.1.nodes.1).ok()?;
+            let mut arms = Vec::new();
+            let mut default = None;
+            for item in &casec.nodes.2 {
+                match item {
+                    sv_parser::CaseGenerateItem::Nondefault(nd) => {
+                        let pats: Vec<Expr> = nd.nodes.0.contents().into_iter()
+                            .filter_map(|ce| lower_constant_expr(tree, ce).ok())
+                            .collect();
+                        let body = lower_generate_block(tree, &nd.nodes.2);
+                        arms.push((pats, body));
+                    }
+                    sv_parser::CaseGenerateItem::Default(d) => {
+                        default = Some(lower_generate_block(tree, &d.nodes.2));
+                    }
+                }
+            }
+            Some(GenerateConstruct::Case(GenerateCase { sel, arms, default }))
+        }
+    }
+}
+
+// ── constant expression lowering (genvar/parameter aware) ─────────────────────
+
+fn lower_constant_expr(tree: &SyntaxTree, ce: &sv_parser::ConstantExpression) -> Result<Expr, FrontendError> {
+    use sv_parser::ConstantExpression as CE;
+    match ce {
+        CE::ConstantPrimary(p) => lower_constant_primary(tree, p),
+        CE::Unary(u) => {
+            let op = lower_unary_op(tree, &u.nodes.0)?;
+            let inner = lower_constant_primary(tree, &u.nodes.2)?;
+            Ok(Expr::Un(op, Box::new(inner)))
+        }
+        CE::Binary(b) => {
+            let lhs = lower_constant_expr(tree, &b.nodes.0)?;
+            let op = lower_binary_op(tree, &b.nodes.1)?;
+            let rhs = lower_constant_expr(tree, &b.nodes.3)?;
+            Ok(Expr::Bin(op, Box::new(lhs), Box::new(rhs)))
+        }
+        CE::Ternary(t) => {
+            let cond = lower_constant_expr(tree, &t.nodes.0)?;
+            let then_e = lower_constant_expr(tree, &t.nodes.3)?;
+            let else_e = lower_constant_expr(tree, &t.nodes.5)?;
+            Ok(Expr::Cond(Box::new(cond), Box::new(then_e), Box::new(else_e)))
+        }
+        CE::Inside(_) => Err(unsupported("constant inside expression")),
+    }
+}
+
+fn lower_constant_primary(tree: &SyntaxTree, p: &sv_parser::ConstantPrimary) -> Result<Expr, FrontendError> {
+    use sv_parser::ConstantPrimary as CP;
+    match p {
+        CP::PrimaryLiteral(lit) => lower_primary_literal(tree, lit),
+        CP::GenvarIdentifier(g) => {
+            let name = get_id(tree, RefNode::GenvarIdentifier(g))
+                .ok_or_else(|| FrontendError::ParseError("genvar identifier missing".into()))?;
+            Ok(Expr::Net(name))
+        }
+        CP::PsParameter(pp) => {
+            let text = tree.get_str(&pp.nodes.0).unwrap_or("?").trim();
+            Ok(Expr::Net(SmolStr::from(text)))
+        }
+        CP::MintypmaxExpression(m) => {
+            use sv_parser::ConstantMintypmaxExpression as CM;
+            match &m.nodes.0.nodes.1 {
+                CM::Unary(ce) => lower_constant_expr(tree, ce),
+                CM::Ternary(t) => {
+                    let cond = lower_constant_expr(tree, &t.nodes.0)?;
+                    let then_e = lower_constant_expr(tree, &t.nodes.2)?;
+                    let else_e = lower_constant_expr(tree, &t.nodes.4)?;
+                    Ok(Expr::Cond(Box::new(cond), Box::new(then_e), Box::new(else_e)))
+                }
+            }
+        }
+        _ => {
+            if let Some(t) = tree.get_str(p) {
+                Ok(parse_simple_const_expr(t.trim()))
+            } else {
+                Err(unsupported("constant primary kind"))
+            }
+        }
+    }
 }
 
 // ── declarations ──────────────────────────────────────────────────────────────
@@ -894,8 +1163,39 @@ fn lower_stmt_item(tree: &SyntaxTree, item: &sv_parser::StatementItem) -> Result
         SI::SubroutineCallStatement(sc) => lower_syscall_stmt(tree, sc),
         SI::CaseStatement(cs) => lower_case(tree, cs),
         SI::LoopStatement(ls) => lower_loop_stmt(tree, ls),
+        SI::DisableStatement(ds) => lower_disable(tree, ds),
+        SI::ParBlock(pb) => lower_par_block(tree, pb),
         _ => Err(unsupported("statement kind")),
     }
+}
+
+fn lower_disable(tree: &SyntaxTree, ds: &sv_parser::DisableStatement) -> Result<Stmt, FrontendError> {
+    use sv_parser::DisableStatement as DS;
+    match ds {
+        DS::Block(b) => {
+            let ident = &b.nodes.1.nodes.0.nodes.2;
+            let name = get_id(tree, RefNode::Identifier(ident))
+                .ok_or_else(|| unsupported("disable target identifier"))?;
+            Ok(Stmt::Disable(name))
+        }
+        // `disable task;` も同じブロック中断機構で扱う（タスク本体はNamedBlockとして展開されていない場合は no-op）。
+        DS::Task(t) => {
+            let ident = &t.nodes.1.nodes.0.nodes.2;
+            let name = get_id(tree, RefNode::Identifier(ident))
+                .ok_or_else(|| unsupported("disable target identifier"))?;
+            Ok(Stmt::Disable(name))
+        }
+        DS::Fork(_) => Err(unsupported("disable fork")),
+    }
+}
+
+fn lower_par_block(tree: &SyntaxTree, pb: &sv_parser::ParBlock) -> Result<Stmt, FrontendError> {
+    // ParBlock.nodes = (fork, Option<label>, Vec<BlockItemDecl>, Vec<StatementOrNull>, JoinKeyword, Option<end label>)
+    let mut branches = Vec::new();
+    for s in &pb.nodes.3 {
+        branches.push(lower_stmt_or_null(tree, s)?);
+    }
+    Ok(Stmt::Fork(branches))
 }
 
 fn lower_loop_stmt(tree: &SyntaxTree, ls: &sv_parser::LoopStatement) -> Result<Stmt, FrontendError> {
@@ -975,12 +1275,18 @@ fn lower_for_step(tree: &SyntaxTree, step: &sv_parser::ForStep) -> Result<Stmt, 
 }
 
 fn lower_seq_block(tree: &SyntaxTree, sb: &sv_parser::SeqBlock) -> Result<Stmt, FrontendError> {
-    // SeqBlock.nodes = (begin, Option<...>, Vec<BlockItemDecl>, Vec<StatementOrNull>, end, ...)
+    // SeqBlock.nodes = (begin, Option<(":", label)>, Vec<BlockItemDecl>, Vec<StatementOrNull>, end, ...)
     let mut stmts = Vec::new();
     for s in &sb.nodes.3 {
         stmts.push(lower_stmt_or_null(tree, s)?);
     }
-    Ok(Stmt::Block(stmts))
+    if let Some((_, label)) = &sb.nodes.1 {
+        let name = get_id(tree, RefNode::BlockIdentifier(label))
+            .unwrap_or_else(|| SmolStr::from("__block"));
+        Ok(Stmt::NamedBlock(name, stmts))
+    } else {
+        Ok(Stmt::Block(stmts))
+    }
 }
 
 fn lower_conditional(tree: &SyntaxTree, cs: &sv_parser::ConditionalStatement) -> Result<Stmt, FrontendError> {
