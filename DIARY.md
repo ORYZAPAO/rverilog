@@ -1065,3 +1065,77 @@ running 5 tests (readmem_tests, interp.rs内)  -- 全件pass
 ### Next
 
 - 部分 X 伝搬の精度向上（`%h`/`%b`/`%o`/`%d` フォーマッタのX/Z対応、幅修飾子付き指定子の完全実装含む）
+
+---
+
+## 2026-06-21 (3)
+
+### Task
+
+「部分X伝搬の精度向上」。`$display`系フォーマッタ（`%d`/`%h`/`%o`/`%b`）のX/Z表示と、
+幅修飾子付き指定子（`%5d`/`%08h`等）の完全実装。
+
+### 発見した追加バグ（実装中）
+
+検証用に `8'bxxxx_xxxx`/`8'bzzzz_zzzz`/`8'b1010_xxxx` 等のリテラルで動作確認したところ、
+フォーマッタとは別の、より根本的なバグが判明した：`crates/frontend/src/lower.rs` の
+`parse_number_text`（基数付きリテラルのパース）が、digit部分に`x`/`X`/`z`/`Z`が
+**1文字でも**含まれていると、桁ごとの情報を一切見ずに**全bit X**（`lv_x`）に
+丸めていた。つまり `8'bzzzz_zzzz` や `8'b1010_xxxx` のようなリテラルは、ソースコード
+経由ではこれまで全く正しく表現できていなかった（`$readmemh`はファイル読み込み時に
+別の専用パーサ`parse_readmem_token`を使っていたため、こちらは元々正しくX/Zを保持できていた）。
+今回のタスクの本質（X/Z表示精度の検証）を進める前提として、このリテラルパースも修正した。
+
+### 修正
+
+1. **リテラルのbit単位X/Z保持** (`crates/frontend/src/lower.rs`):
+   `parse_number_text`に`parse_based_digits`関数を新設（`$readmemh`の
+   `parse_readmem_token`と同様、digitごとにX/Zをbit展開するclosureパターンを採用）。
+   2進/8進/16進は桁ごとに`x`/`z`を正しく展開し、10進は値全体が`x`/`z`の場合のみ対応
+   （IEEE仕様上、10進は桁単位のX/Z混在が存在しないため）。
+2. **フォーマッタのX/Z対応＋幅修飾子完全実装** (`crates/sim/src/interp.rs`の`format_string`):
+   iverilog (v13.0) で`8bit`値の既知/全X/全Z/部分X/部分Z/明示幅修飾子の組み合わせを
+   実機検証し、以下の規則を確認・実装した:
+   - 各「桁」（`%b`=1bit、`%h`=4bit、`%o`=3bit、`%d`=値全体を1グループ）について、
+     グループ内が全known→数字、全unknownかつ単一種別（全X or 全Z）→小文字`x`/`z`、
+     部分known+unknownまたは種別混在→大文字`X`/`Z`（iverilog実測と一致）。
+   - 幅修飾子なし: ビット幅由来の桁数（`%d`は最大値の10進桁数、`%h`/`%o`/`%b`は
+     ビット幅から導出）で算出した「自然表示」をそのまま使う。
+   - 幅修飾子`0`のみ（`%0d`等）: 自然表示の先頭`'0'`（および`%d`の場合は先頭空白）を
+     取り除いた最小桁数表示。
+   - 幅修飾子が数値N（`%5d`/`%08h`等）: 自然表示をN文字に達するまで、先頭が`0`なら
+     ゼロ詰め、そうでなければ空白詰め。
+   - 新設のヘルパー`group_char`/`natural_repr`/`apply_width_modifier`で実装。
+     `%h`/`%o`の境界（8bit幅で`%o`の最上位桁が2bitしかない等）はグループごとに
+     実際に残っているbit数でマスクを動的に決定し、誤って既知0bitを混入させない
+     ようにした（このマスク計算を誤ると、本来"全unknown→小文字"になるべき桁が
+     "部分known→大文字"に誤判定される）。
+
+### 制約
+
+- 64bit超（Large値）は既存通り対象外（生のaval表示のまま）。
+- グループ内でX型とZ型のunknownビットが混在する稀なケースは大文字`X`にフォールバック
+  （iverilogでの実機確認なし、保守的な仕様判断）。
+
+### Result
+
+```
+$ cargo test --workspace
+8 tests (integration.rs)        全件pass（新規 test_format_xz 追加）
+7 tests (iverilog_compare.rs)   全件pass（新規 compare_format_xz 追加。
+                                 $readmemhでX/Z値を読み込んだケースもiverilogと完全一致）
+11 tests (interp.rs内ユニットテスト) 全件pass（新規 format_tests モジュール6件、
+                                 iverilog実測値をそのまま期待値として使用）
+全テストパス ✅
+```
+
+`$readmemh`で`xx`/`zz`/`1z`等を読み込んだメモリを`%h`/`%b`/`%d`で表示するテスト
+（`tests/integration/cases/format_xz/`）を追加し、iverilogとの出力比較でも一致を確認。
+これにより以前明記していた「`$readmemh`で読み込んだX/Z値が`%h`等で正しく表示されない」
+という制約は解消された。
+
+### Next
+
+- 64bit超（Large値）のフォーマッタ・リテラルパースのX/Z対応
+- `fork`/`join_any`/`join_none`の区別
+- `$random(seed)`のseed参照更新（IEEE仕様準拠）

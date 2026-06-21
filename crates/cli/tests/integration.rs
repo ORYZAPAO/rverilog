@@ -65,6 +65,16 @@ fn test_readmem_random() {
 }
 
 #[test]
+fn test_format_xz() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/format_xz/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("format_xz");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![

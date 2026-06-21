@@ -96,6 +96,12 @@ fn compare_disable_fork() {
 }
 
 #[test]
+fn compare_format_xz() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/format_xz/dut.v")]);
+}
+
+#[test]
 fn compare_fifo_sync() {
     let root = workspace_root();
     compare_case("tb_fifo_sync", &[

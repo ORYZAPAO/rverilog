@@ -1,0 +1,5 @@
+mem[0]: h=1a b=00011010 d= 26
+mem[1]: h=xx b=xxxxxxxx d=  x
+mem[2]: h=zz b=zzzzzzzz d=  z
+mem[3]: h=1z b=0001zzzz d=  Z
+$finish at time 0
