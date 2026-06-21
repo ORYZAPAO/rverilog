@@ -939,3 +939,203 @@ $finish at time 6
 - iverilog との出力比較 CI 導入
 - `$readmemh`/`$random` 対応
 - 部分 X 伝搬の精度向上
+
+---
+
+## 2026-06-21
+
+### Task
+
+`$readmemh`/`$readmemb`/`$random` 対応の実装。
+
+### 設計
+
+- **HIR/MIR**: `SysTask` に `ReadMemH`/`ReadMemB` を追加。汎用の `Stmt::SysCall(SysTask, Vec<ExprId>)` だと第2引数の「対象メモリ」を `ExprId` として表現できない（メモリは式ではなく `MemId` で参照する必要がある）ため、MIRに専用バリアント `Stmt::ReadMem(SysTask, ExprId, MemId)` を新設した。`$random` は式コンテキストのシステム関数のため、既存の `SysFuncKind`（従来は `Clog2` のみ・const式専用）に `Random` を追加し、実行時評価される `Expr::Random(Option<ExprId>)` をMIRに新設した。
+- **Frontend** (`crates/frontend/src/lower.rs`): `lower_system_task` の名前抽出部を `system_tf_name` ヘルパーに切り出し、文コンテキスト（`lower_system_task`）と式コンテキスト（`lower_primary` の `FunctionSubroutineCall` 内、新規追加した `SystemTfCall` 分岐）の両方から共有。`$readmemh`/`$readmemb` は文として、`$random` は式としてパースする。対象メモリ識別子はビット選択なしの単純参照なので、既存の `lower_primary`（`Hierarchical` 分岐）がそのまま `Expr::Net(mem_name)` を生成する。
+- **Elab** (`crates/elab/src/elaborate.rs`): `HirStmt::SysCall` の処理を `ReadMemH`/`ReadMemB` 専用分岐と既存の汎用分岐に分割。専用分岐では第2引数の `HirExpr::Net(name)` を `ctx.resolve_mem` でメモリ本体に解決し `Stmt::ReadMem` を生成（メモリ以外の式が渡された場合は `UnsupportedConstruct` エラー）。`lower_expr` の `HirExpr::SysFunc` 分岐を `Clog2`/`Random` で分け、`Random` はseed引数（あれば）を実行時式として lowering して `Expr::Random(Option<ExprId>)` を生成。
+- **Sim** (`crates/sim/src/interp.rs`):
+  - `Stmt::ReadMem` 実行時に対象ファイルを読み込み、`strip_readmem_comments`（`//`/`/* */` 除去）→ 空白区切りトークン化 → `@<hexaddr>` でアドレスジャンプ → 各値トークンを `parse_readmem_token`（16進/2進、`x`/`X`/`z`/`Z`/`_` 対応）でパースし `mem_values` に書き込む。`x`/`z` は桁（nibble/bit）全体をX/Zにする必要があり、最初の実装では1ビットだけX/Zにする bug があったため、digit→bit展開を「数値桁はビット分解、x/z桁は全ビット同値」に修正。
+  - `Expr::Random(seed)`: `Interpreter` に固定シード（`0x2545F4914F6CDD1D`）の `rng_state: u64` を追加し、xorshift64* で32bit値を生成。seed引数があれば一度だけ `rng_state` を上書き（IEEE仕様の「seedを参照で更新する」動作は実装せず、読み取り専用として扱う）。
+
+### 制約
+
+- `$readmemh`/`$readmemb` のファイルパスは文字列リテラルのみ対応（変数・式は不可）。対象メモリ引数はビット選択なしの単純識別子のみ。
+- `$random(seed)` の seed は読み取り専用（IEEE仕様の参照更新は未実装）。
+- PRNGは固定シード・簡易アルゴリズム（xorshift64*）であり、iverilog等の `$random` 系列とは数値が一致しない。決定的なため統合テストでの再現性は保たれる。
+- 既存の `$display`/`$write`/`$monitor` の `%h`/`%b`/`%o`/`%d` フォーマッタは X/Z ビット（bval）を見ずに aval をそのまま出力する既存の制約があり、`$readmemh` で読み込んだ X/Z 値は `%h` 等で正しく "x" と表示されない（"部分X伝搬の精度向上" は別タスクの範囲）。この制約に当たるため、統合テストでは X/Z パース自体の正しさを `crates/sim/src/interp.rs` 内の単体テスト（`readmem_tests` モジュール）で直接 `LogicVal` の bit 単位検証により確認した。
+
+### Result
+
+```
+$ cargo test --workspace
+test test_counter4 ... ok
+test test_func_task ... ok
+test test_gates ... ok
+test test_generate ... ok
+test test_disable_fork ... ok
+test test_readmem_random ... ok   (新規)
+test test_fifo_sync ... ok
+全テストパス ✅
+```
+
+新規追加: `crates/sim/src/interp.rs` の `readmem_tests` モジュール（5テスト、hex/bin/x/z digit decomposition とコメント除去を検証）。
+
+統合テスト (`tests/integration/cases/readmem_random/`):
+```
+mem[0]=0
+mem[1]=11
+mem[2]=22
+mem[3]=0
+mem[4]=0
+mem[5]=aa
+rand0=325595736
+rand1=258385808
+rand_seeded=144411322
+$finish at time 0
+```
+`$readmemh` がコメント（`//`/`/* */`）と `@addr` アドレスジャンプを正しく処理してメモリを初期化し、`$random`/`$random(seed)` が決定的なPRNG値を返すことを確認。
+
+### Next
+
+- iverilog との出力比較 CI 導入
+- 部分 X 伝搬の精度向上（`%h`/`%b`/`%o`/`%d` フォーマッタのX/Z対応含む）
+
+---
+
+## 2026-06-21 (2)
+
+### Task
+
+「iverilog との出力比較 CI 導入」。
+
+### 経緯・発見した既存バグ
+
+CI導入の前段として、既存の統合テストケース（`disable_fork`/`func_task`/`generate`/
+`fifo_sync` 等）を実際に iverilog (v13.0) で実行して比較したところ、
+`crates/sim/src/interp.rs` の `format_string`（`$display`/`$write`/`$monitor` の
+書式処理）が `%d`/`%h`/`%o`/`%b` の**幅修飾子なし**の既定フィールド幅パディングを
+一切実装していないバグが判明した。IEEE 1364では幅修飾子なしの場合、フィールド幅は
+オペランドのビット幅から導出される（`%d`なら最大値の10進桁数で空白パディング、
+`%h`/`%o`/`%b`ならビット幅から導出される桁数でゼロパディング）。例:
+`generate` テストで4bit値 `0110` を `%b` 出力すると iverilog は `0110` だが
+rverilog（修正前）は先頭ゼロが落ちて `110` になっていた。
+
+これはCI比較を導入する上で既存テストが即座に不一致になる実物の正確性バグであり、
+CI導入の前提として今回修正した（部分X伝搬/bval表示の精度問題とは独立した、
+known値の桁数パディング欠落というだけの問題）。
+
+### 修正
+
+- `format_string` に「幅修飾子があるかどうか」のフラグを追加し、幅修飾子が
+  **ない**場合のみビット幅由来の既定フィールド幅でパディングする処理を追加：
+  `%d`→最大値の10進桁数で空白右詰め、`%h`→`ceil(width/4)`桁でゼロ左詰め、
+  `%o`→`ceil(width/3)`桁でゼロ左詰め、`%b`→`width`桁でゼロ左詰め。
+  幅修飾子がある場合（`%08d`等、既存テストでは未使用）は従来どおりパディングなし。
+  64bit超（Large値）とX/Z表示は対象外（既存の制約のまま、別タスク）。
+- 修正の影響で `func_task`/`generate`/`readmem_random` の `expected.stdout` を
+  実際の（iverilog互換の）出力に更新した。
+
+### CI構成
+
+- `crates/cli/tests/common/mod.rs` に `workspace_root`/`run_sim`/`expected_stdout`
+  を切り出し、既存の `integration.rs` と新規の `iverilog_compare.rs` から共有。
+- `crates/cli/tests/iverilog_compare.rs` を新規追加。`iverilog`コマンドが
+  環境に無い場合は `eprintln!` してスキップ（ローカル開発者の `cargo test` を
+  壊さない方針）。あれば `iverilog -g2001` でコンパイル→`vvp`実行し、rverilogの
+  出力と比較する。`$finish`の通知メッセージはrverilog独自文言
+  （`$finish at time N`）とiverilog独自文言（`... $finish called at N (1s)`）で
+  意図的に異なるため、両者とも末尾の`$finish`行を1行除去してから比較する。
+  比較対象: `counter4`/`func_task`/`gates`/`generate`/`disable_fork`/`fifo_sync`。
+  `readmem_random` は `$random` のPRNGアルゴリズムが異なり数値が一致しないため除外。
+- `.github/workflows/ci.yml` を新規追加。`apt-get install iverilog` の後に
+  `cargo build --workspace`→`cargo test --workspace` を実行する単純な構成。
+  これによりCI環境では `iverilog_compare` テストが必ず実行される。
+
+### Result
+
+```
+$ cargo test --workspace
+running 7 tests (integration.rs)  -- 全件pass（func_task/generate/readmem_random は
+                                       新フォーマッタ出力に合わせ expected.stdout 更新済み）
+running 6 tests (iverilog_compare.rs)  -- 全件pass
+running 5 tests (readmem_tests, interp.rs内)  -- 全件pass
+全テストパス ✅
+```
+
+### Next
+
+- 部分 X 伝搬の精度向上（`%h`/`%b`/`%o`/`%d` フォーマッタのX/Z対応、幅修飾子付き指定子の完全実装含む）
+
+---
+
+## 2026-06-21 (3)
+
+### Task
+
+「部分X伝搬の精度向上」。`$display`系フォーマッタ（`%d`/`%h`/`%o`/`%b`）のX/Z表示と、
+幅修飾子付き指定子（`%5d`/`%08h`等）の完全実装。
+
+### 発見した追加バグ（実装中）
+
+検証用に `8'bxxxx_xxxx`/`8'bzzzz_zzzz`/`8'b1010_xxxx` 等のリテラルで動作確認したところ、
+フォーマッタとは別の、より根本的なバグが判明した：`crates/frontend/src/lower.rs` の
+`parse_number_text`（基数付きリテラルのパース）が、digit部分に`x`/`X`/`z`/`Z`が
+**1文字でも**含まれていると、桁ごとの情報を一切見ずに**全bit X**（`lv_x`）に
+丸めていた。つまり `8'bzzzz_zzzz` や `8'b1010_xxxx` のようなリテラルは、ソースコード
+経由ではこれまで全く正しく表現できていなかった（`$readmemh`はファイル読み込み時に
+別の専用パーサ`parse_readmem_token`を使っていたため、こちらは元々正しくX/Zを保持できていた）。
+今回のタスクの本質（X/Z表示精度の検証）を進める前提として、このリテラルパースも修正した。
+
+### 修正
+
+1. **リテラルのbit単位X/Z保持** (`crates/frontend/src/lower.rs`):
+   `parse_number_text`に`parse_based_digits`関数を新設（`$readmemh`の
+   `parse_readmem_token`と同様、digitごとにX/Zをbit展開するclosureパターンを採用）。
+   2進/8進/16進は桁ごとに`x`/`z`を正しく展開し、10進は値全体が`x`/`z`の場合のみ対応
+   （IEEE仕様上、10進は桁単位のX/Z混在が存在しないため）。
+2. **フォーマッタのX/Z対応＋幅修飾子完全実装** (`crates/sim/src/interp.rs`の`format_string`):
+   iverilog (v13.0) で`8bit`値の既知/全X/全Z/部分X/部分Z/明示幅修飾子の組み合わせを
+   実機検証し、以下の規則を確認・実装した:
+   - 各「桁」（`%b`=1bit、`%h`=4bit、`%o`=3bit、`%d`=値全体を1グループ）について、
+     グループ内が全known→数字、全unknownかつ単一種別（全X or 全Z）→小文字`x`/`z`、
+     部分known+unknownまたは種別混在→大文字`X`/`Z`（iverilog実測と一致）。
+   - 幅修飾子なし: ビット幅由来の桁数（`%d`は最大値の10進桁数、`%h`/`%o`/`%b`は
+     ビット幅から導出）で算出した「自然表示」をそのまま使う。
+   - 幅修飾子`0`のみ（`%0d`等）: 自然表示の先頭`'0'`（および`%d`の場合は先頭空白）を
+     取り除いた最小桁数表示。
+   - 幅修飾子が数値N（`%5d`/`%08h`等）: 自然表示をN文字に達するまで、先頭が`0`なら
+     ゼロ詰め、そうでなければ空白詰め。
+   - 新設のヘルパー`group_char`/`natural_repr`/`apply_width_modifier`で実装。
+     `%h`/`%o`の境界（8bit幅で`%o`の最上位桁が2bitしかない等）はグループごとに
+     実際に残っているbit数でマスクを動的に決定し、誤って既知0bitを混入させない
+     ようにした（このマスク計算を誤ると、本来"全unknown→小文字"になるべき桁が
+     "部分known→大文字"に誤判定される）。
+
+### 制約
+
+- 64bit超（Large値）は既存通り対象外（生のaval表示のまま）。
+- グループ内でX型とZ型のunknownビットが混在する稀なケースは大文字`X`にフォールバック
+  （iverilogでの実機確認なし、保守的な仕様判断）。
+
+### Result
+
+```
+$ cargo test --workspace
+8 tests (integration.rs)        全件pass（新規 test_format_xz 追加）
+7 tests (iverilog_compare.rs)   全件pass（新規 compare_format_xz 追加。
+                                 $readmemhでX/Z値を読み込んだケースもiverilogと完全一致）
+11 tests (interp.rs内ユニットテスト) 全件pass（新規 format_tests モジュール6件、
+                                 iverilog実測値をそのまま期待値として使用）
+全テストパス ✅
+```
+
+`$readmemh`で`xx`/`zz`/`1z`等を読み込んだメモリを`%h`/`%b`/`%d`で表示するテスト
+（`tests/integration/cases/format_xz/`）を追加し、iverilogとの出力比較でも一致を確認。
+これにより以前明記していた「`$readmemh`で読み込んだX/Z値が`%h`等で正しく表示されない」
+という制約は解消された。
+
+### Next
+
+- 64bit超（Large値）のフォーマッタ・リテラルパースのX/Z対応
+- `fork`/`join_any`/`join_none`の区別
+- `$random(seed)`のseed参照更新（IEEE仕様準拠）

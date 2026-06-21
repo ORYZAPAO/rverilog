@@ -1,31 +1,5 @@
-use std::path::{Path, PathBuf};
-use rverilog_frontend::parse_files;
-use rverilog_elab::elaborate;
-use rverilog_sim::Interpreter;
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()  // crates/
-        .parent().unwrap()  // workspace root
-        .to_path_buf()
-}
-
-fn run_sim(top: &str, files: &[PathBuf]) -> String {
-    let design = parse_files(files, &[], &[]).expect("parse failed");
-    let elaborated = elaborate(&design, top, &[]).expect("elaborate failed");
-    let mut interp = Interpreter::new(elaborated);
-    interp.run();
-    interp.output().to_string()
-}
-
-fn expected_stdout(case: &str) -> String {
-    let path = workspace_root()
-        .join("tests/integration/cases")
-        .join(case)
-        .join("expected.stdout");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e))
-}
+mod common;
+use common::{workspace_root, run_sim, expected_stdout};
 
 #[test]
 fn test_counter4() {
@@ -76,6 +50,26 @@ fn test_disable_fork() {
     let files = vec![root.join("tests/integration/cases/disable_fork/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("disable_fork");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
+fn test_readmem_random() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/readmem_random/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("readmem_random");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
+fn test_format_xz() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/format_xz/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("format_xz");
     assert_eq!(got, expected,
         "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
 }

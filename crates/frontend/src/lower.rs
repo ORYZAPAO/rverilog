@@ -19,11 +19,6 @@ fn lv(v: u64, w: u16) -> LogicVal {
     LogicVal::new(w, v, 0)
 }
 
-fn lv_x(w: u16) -> LogicVal {
-    let mask = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
-    LogicVal::new(w, mask, mask)
-}
-
 fn get_id(tree: &SyntaxTree, node: RefNode) -> Option<SmolStr> {
     match unwrap_node!(node, SimpleIdentifier, EscapedIdentifier) {
         Some(RefNode::SimpleIdentifier(x)) => Some(SmolStr::new(tree.get_str(&x.nodes.0)?)),
@@ -1403,17 +1398,21 @@ fn collect_tf_call_args(tree: &SyntaxTree, tf: &sv_parser::TfCall) -> Vec<Expr> 
     args
 }
 
-fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result<Stmt, FrontendError> {
+fn system_tf_name<'a>(tree: &'a SyntaxTree, sys: &'a sv_parser::SystemTfCall) -> &'a str {
     let name_node = match sys {
         sv_parser::SystemTfCall::ArgOptionl(s) => RefNode::SystemTfIdentifier(&s.nodes.0),
         sv_parser::SystemTfCall::ArgExpression(s) => RefNode::SystemTfIdentifier(&s.nodes.0),
         sv_parser::SystemTfCall::ArgDataType(s) => RefNode::SystemTfIdentifier(&s.nodes.0),
     };
-    let name_text = if let Some(RefNode::SystemTfIdentifier(tf)) = Some(name_node) {
+    if let RefNode::SystemTfIdentifier(tf) = name_node {
         tree.get_str(&tf.nodes.0).unwrap_or("?")
     } else {
         "?"
-    };
+    }
+}
+
+fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result<Stmt, FrontendError> {
+    let name_text = system_tf_name(tree, sys);
 
     let task = match name_text {
         "$display" => SysTask::Display,
@@ -1423,6 +1422,8 @@ fn lower_system_task(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Result
         "$time" => SysTask::Time,
         "$dumpfile" => SysTask::DumpFile,
         "$dumpvars" => SysTask::DumpVars,
+        "$readmemh" => SysTask::ReadMemH,
+        "$readmemb" => SysTask::ReadMemB,
         n => return Err(unsupported(&format!("system task {}", n))),
     };
 
@@ -1607,13 +1608,25 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
             Ok(Expr::Repeat(Box::new(count_expr), vec![inner]))
         }
         P::FunctionSubroutineCall(fsc) => {
-            if let sv_parser::SubroutineCall::TfCall(tf) = &fsc.nodes.0 {
-                let name = get_id(tree, RefNode::PsOrHierarchicalTfIdentifier(&tf.nodes.0))
-                    .ok_or_else(|| FrontendError::ParseError("function call name missing".into()))?;
-                let args = collect_tf_call_args(tree, tf);
-                return Ok(Expr::Call(name, args));
+            match &fsc.nodes.0 {
+                sv_parser::SubroutineCall::TfCall(tf) => {
+                    let name = get_id(tree, RefNode::PsOrHierarchicalTfIdentifier(&tf.nodes.0))
+                        .ok_or_else(|| FrontendError::ParseError("function call name missing".into()))?;
+                    let args = collect_tf_call_args(tree, tf);
+                    Ok(Expr::Call(name, args))
+                }
+                sv_parser::SubroutineCall::SystemTfCall(sys) => {
+                    let name_text = system_tf_name(tree, sys);
+                    match name_text {
+                        "$random" => {
+                            let args = collect_syscall_args(tree, sys);
+                            Ok(Expr::SysFunc(SysFuncKind::Random, args))
+                        }
+                        n => Err(unsupported(&format!("system function {} in expression", n))),
+                    }
+                }
+                _ => Err(unsupported("non-tf subroutine call in expression")),
             }
-            Err(unsupported("non-tf subroutine call in expression"))
         }
         P::MintypmaxExpression(m) => {
             let ma = m.as_ref();
@@ -1665,15 +1678,53 @@ fn parse_number_text(text: &str) -> LogicVal {
             _ => (10u32, rest),
         };
         let clean: String = digits.chars().filter(|c| *c != '_').collect();
-        if clean.chars().any(|c| c == 'x' || c == 'X' || c == 'z' || c == 'Z') {
-            return lv_x(size as u16);
-        }
-        let val = u64::from_str_radix(&clean, base).unwrap_or(0);
-        lv(val, size as u16)
+        parse_based_digits(&clean, base, size)
     } else {
         let val: u64 = text.trim().parse().unwrap_or(0);
         lv(val, 32)
     }
+}
+
+/// 基数付きリテラル（`8'b1010xxxx`等）の数字部分をbit単位でX/Zを保持してパースする。
+/// 2進/8進/16進は桁ごとにX/Zを展開し、10進は値全体がx/zの場合のみ対応する
+/// （10進では桁ごとのx/z混在はVerilog仕様上存在しない）。
+fn parse_based_digits(digits: &str, radix: u32, width: u32) -> LogicVal {
+    let n_chunks = ((width as usize) + 63) / 64;
+    if radix == 10 {
+        if digits.eq_ignore_ascii_case("x") {
+            return LogicVal::from_chunks(width, &vec![u64::MAX; n_chunks], &vec![u64::MAX; n_chunks]);
+        }
+        if digits.eq_ignore_ascii_case("z") || digits == "?" {
+            return LogicVal::from_chunks(width, &vec![0u64; n_chunks], &vec![u64::MAX; n_chunks]);
+        }
+        let val = u64::from_str_radix(digits, radix).unwrap_or(0);
+        return LogicVal::from_chunks(width, &[val], &vec![0u64; n_chunks]);
+    }
+    let bits_per_digit = match radix { 2 => 1, 8 => 3, 16 => 4, _ => 1 };
+    let mut a = vec![0u64; n_chunks];
+    let mut b = vec![0u64; n_chunks];
+    let mut bitpos: usize = 0;
+    for ch in digits.chars().rev() {
+        if bitpos >= width as usize { break; }
+        let digit_bit: Box<dyn Fn(u32) -> (u64, u64)> = match ch {
+            'x' | 'X' => Box::new(|_| (1, 1)),
+            'z' | 'Z' | '?' => Box::new(|_| (0, 1)),
+            _ => match ch.to_digit(radix) {
+                Some(d) => Box::new(move |bit| (((d as u64) >> bit) & 1, 0)),
+                None => continue,
+            },
+        };
+        for bit in 0..bits_per_digit {
+            if bitpos >= width as usize { break; }
+            let (av, bv) = digit_bit(bit);
+            let chunk = bitpos / 64;
+            let off = bitpos % 64;
+            if av != 0 { a[chunk] |= 1u64 << off; }
+            if bv != 0 { b[chunk] |= 1u64 << off; }
+            bitpos += 1;
+        }
+    }
+    LogicVal::from_chunks(width, &a, &b)
 }
 
 fn lower_unary_op(tree: &SyntaxTree, op: &sv_parser::UnaryOperator) -> Result<UnOp, FrontendError> {

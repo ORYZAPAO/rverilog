@@ -146,6 +146,8 @@ pub enum Stmt {
     Disable(u32),
     /// `fork ... join`。各分岐を並行プロセスとして起動し、全分岐の完了を待つ。
     Fork(Vec<StmtId>),
+    /// `$readmemh`/`$readmemb`。第1引数（文字列リテラル式）のファイルからメモリを初期化する。
+    ReadMem(SysTask, ExprId, MemId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +172,8 @@ pub enum Expr {
     MemRead(MemId, ExprId),
     /// Statements that must run before reading the net (function-call setup), then the net holds the result.
     CallResult(Vec<StmtId>, NetId),
+    /// `$random`/`$random(seed)`。seed があれば評価して一度だけRNG状態を上書きする（読み取り専用、書き戻しなし）。
+    Random(Option<ExprId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +200,8 @@ pub enum SysTask {
     Time,
     DumpFile,
     DumpVars,
+    ReadMemH,
+    ReadMemB,
 }
 
 #[derive(Debug, Clone)]

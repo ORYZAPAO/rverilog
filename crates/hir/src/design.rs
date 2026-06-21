@@ -11,6 +11,7 @@ pub enum NetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysFuncKind {
     Clog2,
+    Random,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +300,8 @@ pub enum SysTask {
     Time,
     DumpFile,
     DumpVars,
+    ReadMemH,
+    ReadMemB,
 }
 
 use rverilog_mir::LogicVal;

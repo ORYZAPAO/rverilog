@@ -1,0 +1,4 @@
+// readmemh test data: comments and @addr are both exercised here.
+00 11 /* block comment */ 22
+@5
+aa
