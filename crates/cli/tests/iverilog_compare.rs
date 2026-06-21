@@ -1,0 +1,105 @@
+mod common;
+use common::{workspace_root, run_sim};
+use std::path::PathBuf;
+use std::process::Command;
+
+fn iverilog_available() -> bool {
+    Command::new("iverilog")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn run_iverilog(files: &[PathBuf]) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir();
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let vvp_path = dir.join(format!("rverilog_iv_{}_{}.vvp", std::process::id(), unique));
+
+    let compile = Command::new("iverilog")
+        .arg("-g2001")
+        .arg("-o").arg(&vvp_path)
+        .args(files)
+        .output()
+        .expect("failed to run iverilog");
+    assert!(compile.status.success(),
+        "iverilog compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+
+    let run = Command::new("vvp")
+        .arg(&vvp_path)
+        .output()
+        .expect("failed to run vvp");
+    let _ = std::fs::remove_file(&vvp_path);
+
+    String::from_utf8_lossy(&run.stdout).to_string()
+}
+
+/// rverilogとiverilogでは`$finish`通知メッセージの文言が異なる
+/// （rverilog: "$finish at time N" / iverilog: ".../file:NN: $finish called at N (1s)"）ため、
+/// 末尾の$finish系1行は両者から取り除いてから比較する。
+fn strip_finish_line(output: &str) -> String {
+    let mut lines: Vec<&str> = output.lines().collect();
+    if let Some(last) = lines.last() {
+        if last.contains("$finish") {
+            lines.pop();
+        }
+    }
+    lines.join("\n")
+}
+
+fn compare_case(top: &str, files: &[PathBuf]) {
+    if !iverilog_available() {
+        eprintln!("iverilog not found, skipping comparison for {}", top);
+        return;
+    }
+    let rverilog_out = run_sim(top, files);
+    let iverilog_out = run_iverilog(files);
+    let got = strip_finish_line(&rverilog_out);
+    let want = strip_finish_line(&iverilog_out);
+    assert_eq!(got, want,
+        "\n--- iverilog ---\n{}\n--- rverilog ---\n{}", want, got);
+}
+
+#[test]
+fn compare_counter4() {
+    let root = workspace_root();
+    compare_case("tb_counter4", &[
+        root.join("samples/counter4/tb.v"),
+        root.join("samples/counter4/counter4.v"),
+    ]);
+}
+
+#[test]
+fn compare_func_task() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/func_task/dut.v")]);
+}
+
+#[test]
+fn compare_gates() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/gates/dut.v")]);
+}
+
+#[test]
+fn compare_generate() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/generate/dut.v")]);
+}
+
+#[test]
+fn compare_disable_fork() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/disable_fork/dut.v")]);
+}
+
+#[test]
+fn compare_fifo_sync() {
+    let root = workspace_root();
+    compare_case("tb_fifo_sync", &[
+        root.join("samples/fifo_sync/tb/tb.v"),
+        root.join("samples/fifo_sync/rtl/fifo_sync.v"),
+    ]);
+}

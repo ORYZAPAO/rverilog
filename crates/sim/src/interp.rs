@@ -867,7 +867,9 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
     while let Some(c) = chars.next() {
         if c == '%' {
             // Skip numeric width/precision modifiers (e.g. %0d, %8d)
+            let mut has_width_mod = false;
             while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                has_width_mod = true;
                 chars.next();
             }
             let spec = chars.next().unwrap_or('%');
@@ -877,11 +879,44 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
                 LogicVal::ZERO
             };
             arg_idx += 1;
+            let width = val.width();
+            let n = val.pad_to_width(width);
+            // 幅修飾子なしの%d/%h/%o/%bはIEEE既定どおりビット幅由来のフィールド幅で
+            // パディングする（64bit超の値はpad_to_widthがu64しか扱えないため対象外）。
+            let use_default_padding = !has_width_mod && width <= 64;
             match spec {
-                'd' | 'D' => result.push_str(&val.pad_to_width(val.width()).to_string()),
-                'h' | 'H' => result.push_str(&format!("{:x}", val.pad_to_width(val.width()))),
-                'b' | 'B' => result.push_str(&format!("{:b}", val.pad_to_width(val.width()))),
-                'o' | 'O' => result.push_str(&format!("{:o}", val.pad_to_width(val.width()))),
+                'd' | 'D' => {
+                    if use_default_padding {
+                        let max = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                        let digits = max.to_string().len();
+                        result.push_str(&format!("{:>width$}", n, width = digits));
+                    } else {
+                        result.push_str(&n.to_string());
+                    }
+                }
+                'h' | 'H' => {
+                    if use_default_padding {
+                        let digits = ((width + 3) / 4) as usize;
+                        result.push_str(&format!("{:0>width$x}", n, width = digits));
+                    } else {
+                        result.push_str(&format!("{:x}", n));
+                    }
+                }
+                'b' | 'B' => {
+                    if use_default_padding {
+                        result.push_str(&format!("{:0>width$b}", n, width = width as usize));
+                    } else {
+                        result.push_str(&format!("{:b}", n));
+                    }
+                }
+                'o' | 'O' => {
+                    if use_default_padding {
+                        let digits = ((width + 2) / 3) as usize;
+                        result.push_str(&format!("{:0>width$o}", n, width = digits));
+                    } else {
+                        result.push_str(&format!("{:o}", n));
+                    }
+                }
                 's' | 'S' => result.push_str(&val.to_string()),
                 't' | 'T' => { arg_idx -= 1; result.push_str(&now.to_string()); }
                 '%' => { arg_idx -= 1; result.push('%'); }

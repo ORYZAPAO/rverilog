@@ -999,3 +999,69 @@ $finish at time 0
 
 - iverilog との出力比較 CI 導入
 - 部分 X 伝搬の精度向上（`%h`/`%b`/`%o`/`%d` フォーマッタのX/Z対応含む）
+
+---
+
+## 2026-06-21 (2)
+
+### Task
+
+「iverilog との出力比較 CI 導入」。
+
+### 経緯・発見した既存バグ
+
+CI導入の前段として、既存の統合テストケース（`disable_fork`/`func_task`/`generate`/
+`fifo_sync` 等）を実際に iverilog (v13.0) で実行して比較したところ、
+`crates/sim/src/interp.rs` の `format_string`（`$display`/`$write`/`$monitor` の
+書式処理）が `%d`/`%h`/`%o`/`%b` の**幅修飾子なし**の既定フィールド幅パディングを
+一切実装していないバグが判明した。IEEE 1364では幅修飾子なしの場合、フィールド幅は
+オペランドのビット幅から導出される（`%d`なら最大値の10進桁数で空白パディング、
+`%h`/`%o`/`%b`ならビット幅から導出される桁数でゼロパディング）。例:
+`generate` テストで4bit値 `0110` を `%b` 出力すると iverilog は `0110` だが
+rverilog（修正前）は先頭ゼロが落ちて `110` になっていた。
+
+これはCI比較を導入する上で既存テストが即座に不一致になる実物の正確性バグであり、
+CI導入の前提として今回修正した（部分X伝搬/bval表示の精度問題とは独立した、
+known値の桁数パディング欠落というだけの問題）。
+
+### 修正
+
+- `format_string` に「幅修飾子があるかどうか」のフラグを追加し、幅修飾子が
+  **ない**場合のみビット幅由来の既定フィールド幅でパディングする処理を追加：
+  `%d`→最大値の10進桁数で空白右詰め、`%h`→`ceil(width/4)`桁でゼロ左詰め、
+  `%o`→`ceil(width/3)`桁でゼロ左詰め、`%b`→`width`桁でゼロ左詰め。
+  幅修飾子がある場合（`%08d`等、既存テストでは未使用）は従来どおりパディングなし。
+  64bit超（Large値）とX/Z表示は対象外（既存の制約のまま、別タスク）。
+- 修正の影響で `func_task`/`generate`/`readmem_random` の `expected.stdout` を
+  実際の（iverilog互換の）出力に更新した。
+
+### CI構成
+
+- `crates/cli/tests/common/mod.rs` に `workspace_root`/`run_sim`/`expected_stdout`
+  を切り出し、既存の `integration.rs` と新規の `iverilog_compare.rs` から共有。
+- `crates/cli/tests/iverilog_compare.rs` を新規追加。`iverilog`コマンドが
+  環境に無い場合は `eprintln!` してスキップ（ローカル開発者の `cargo test` を
+  壊さない方針）。あれば `iverilog -g2001` でコンパイル→`vvp`実行し、rverilogの
+  出力と比較する。`$finish`の通知メッセージはrverilog独自文言
+  （`$finish at time N`）とiverilog独自文言（`... $finish called at N (1s)`）で
+  意図的に異なるため、両者とも末尾の`$finish`行を1行除去してから比較する。
+  比較対象: `counter4`/`func_task`/`gates`/`generate`/`disable_fork`/`fifo_sync`。
+  `readmem_random` は `$random` のPRNGアルゴリズムが異なり数値が一致しないため除外。
+- `.github/workflows/ci.yml` を新規追加。`apt-get install iverilog` の後に
+  `cargo build --workspace`→`cargo test --workspace` を実行する単純な構成。
+  これによりCI環境では `iverilog_compare` テストが必ず実行される。
+
+### Result
+
+```
+$ cargo test --workspace
+running 7 tests (integration.rs)  -- 全件pass（func_task/generate/readmem_random は
+                                       新フォーマッタ出力に合わせ expected.stdout 更新済み）
+running 6 tests (iverilog_compare.rs)  -- 全件pass
+running 5 tests (readmem_tests, interp.rs内)  -- 全件pass
+全テストパス ✅
+```
+
+### Next
+
+- 部分 X 伝搬の精度向上（`%h`/`%b`/`%o`/`%d` フォーマッタのX/Z対応、幅修飾子付き指定子の完全実装含む）
