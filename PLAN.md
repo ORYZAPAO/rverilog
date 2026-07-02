@@ -246,11 +246,20 @@ pub fn parse_files(
 9. VCD writer 統合
 10. `samples/counter4` 通過 → `samples/fifo_sync` 通過
 
-### M2 以降（参考）
+### M2 以降
+
+完了済み（2026-07-02 時点）:
 - `function`/`task`、`generate`/`genvar`、ゲートプリミティブ
-- `$readmemh`/`$random`、部分 X 伝搬の精度向上
-- iverilog との bit-exact 比較を CI 導入
-- SystemVerilog 拡張（`logic`/`always_ff`/`always_comb`/struct/typedef）
+- `disable`/`fork`-`join`
+- `$readmemh`/`$readmemb`/`$random`、部分 X 伝搬の精度向上（$display 系フォーマッタ）
+- iverilog との出力比較を CI 導入
+
+残タスク（優先順は「実装レビューと課題」参照）:
+1. signed 対応（幅・符号推論の再設計とセット）
+2. エッジ検出の IEEE 準拠化（X→1 posedge 等）
+3. monitor リージョン実装 + `#0` (inactive) 順序修正（イベントループ再構成として一括）
+4. 連続代入の sensitivity 駆動化
+5. SystemVerilog 拡張（`logic`/`always_ff`/`always_comb`/struct/typedef）
 
 ## サンプル & テスト戦略
 
@@ -303,3 +312,43 @@ CLI 引数:
 - **\`include / \`define の解決順**: sv-parser プリプロセッサ API の細部を M0 で実機確認
 - **vcd クレートの十分性**: 書込のみなので恐らく問題なし、不足時は自前 writer 化
 - **決定論性**: HashMap 順序による非決定論を避けるため `IndexMap` または `Vec` 経由で走査
+
+## 実装レビューと課題（2026-07-02）
+
+M1 完了後のコードレビュー結果。アーキテクチャ（HIR→elab→MIR→イベント駆動 interp、
+4 値 aval/bval、sv-parser）自体は健全で方針変更は不要。ただし以下の乖離・課題がある。
+
+### 重大（シミュレーション結果が誤りになる）
+
+| # | 課題 | 箇所 | 内容 |
+|---|---|---|---|
+| 1 | signed 演算が全面未実装 | `mir/src/ir.rs`, `elab/` | `NetInfo` に `is_signed` がなく符号情報が MIR に伝播しない。`integer` の負数比較、`>>>`、signed の `%d` がすべて unsigned 扱い |
+| 2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
+| 3 | $monitor が $display と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
+| 4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
+| 5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
+
+### 設計と実装の乖離
+
+| # | 課題 | 箇所 | 内容 |
+|---|---|---|---|
+| 6 | scheduler.rs が死んだコード | `sim/src/scheduler.rs` | `run_step` は TODO スタブのまま、実ループは `Interpreter::run` に別実装。未使用の `future: VecDeque` は時刻順ソートされないバグも内包。削除または interp ループの移設で一本化する |
+| 7 | 連続代入が総当たり固定点ループ | `sim/src/interp.rs` `eval_conts` | 毎 δ サイクル全 assign を最大 200 回再評価。本計画の「NetId→プロセス逆引きテーブル」方式と乖離、規模で性能劣化。200 回打ち切りは発振回路で黙って誤結果（最低限、警告を出す） |
+| 8 | width.rs が実質スタブ | `elab/src/width.rs` | 幅推論は elaborate.rs に分散し、IEEE の context-determined width ルールが体系実装されていない。MIR の Expr に幅情報が載らず、signed 対応（課題 1）の障害になる |
+
+### 軽微（既知の割り切り）
+
+- `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
+- `casez`/`casex` が `case_eq` と同一実装（ワイルドカードマッチ未実装の可能性、要確認）
+- `disable` は同一プロセス内のみ、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
+- `$display("%s", "文字列引数")` が動作しない（StringLit の eval が ZERO を返す）
+- 64bit 超の乗除算は常に X、`$random` は iverilog と数値非互換（固定シード xorshift64*）
+
+### 対応方針
+
+推奨着手順: 課題 1（signed + 幅推論再設計）→ 課題 2 → 課題 3・4（イベントループ
+再構成として一括）→ 課題 7。課題 1 と 3・4 はデータ構造に触るため後回しにするほど
+手戻りが大きい。課題 6 はどのタイミングでも安価。
+
+課題 2・3・4・7 は、修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0`
+レース、発振検出）を iverilog 比較 CI へ追加してから直すこと。
