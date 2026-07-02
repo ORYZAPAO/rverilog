@@ -1139,3 +1139,33 @@ $ cargo test --workspace
 - 64bit超（Large値）のフォーマッタ・リテラルパースのX/Z対応
 - `fork`/`join_any`/`join_none`の区別
 - `$random(seed)`のseed参照更新（IEEE仕様準拠）
+
+## 2026-07-02
+
+### 実装方針レビュー（コード変更なし）
+
+PLAN.md の設計方針と現行実装の乖離・IEEE 1364 セマンティクス上の問題を調査。
+主な発見:
+
+1. scheduler.rs は死んだコード（run_step が TODO スタブ、実ループは interp.rs に別実装）
+2. $monitor が $display と同一動作（monitor リージョン未実装、値変化時の再表示なし）
+3. エッジ検出が IEEE 非準拠: X→1 の posedge / 1→X の negedge を検出できない
+   （trigger_sensitivity が aval のみで判定）
+4. #0 遅延が future ヒープ経由のため NBA 適用の「後」に再開される
+   （IEEE の inactive→NBA 順序と逆）
+5. 連続代入が毎 δ サイクル全件再評価の固定点ループ（200 回打ち切り）。
+   sensitivity 逆引きテーブル方式（PLAN 記載）と乖離、規模で性能劣化
+6. write_lvalue のビット/部分選択パスが u64 演算のみで 64bit 超ネットに未対応
+7. signed 演算が全面未実装（NetInfo に is_signed なし、>>>・signed 比較・%d が unsigned 扱い）
+8. width.rs は 14 行の実質スタブ（context-determined width 未実装）
+9. $dumpvars の深さ・スコープ引数未対応
+
+課題リストは会話ログ参照。M2 の優先順位候補: signed 対応 → monitor リージョン →
+エッジ検出修正 → 連続代入の sensitivity 駆動化。
+
+### PLAN.md へ反映
+
+- 「M2 以降」を更新: 完了済み項目（function/task, generate, gate primitive,
+  disable/fork, $readmem/$random, iverilog 比較 CI）と残タスク優先順を明記
+- 新セクション「実装レビューと課題（2026-07-02）」を追加:
+  重大 5 件 / 乖離 3 件 / 軽微 5 件の課題表と対応方針（テスト先行で修正）
