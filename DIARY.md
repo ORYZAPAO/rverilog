@@ -1196,3 +1196,38 @@ master ベースで実装課題の棚卸しを行い、PLAN.md に「実装課�
 - 最優先は signed 対応（A1、width.rs 再設計とセット）。データ構造に触るため
   後回しにするほど手戻りが大きい
 - 修正前に iverilog 比較 CI へテストケースを追加するテスト先行方針
+
+---
+
+## 2026-07-09 (続き)
+
+### Task
+
+未マージ 3 ブランチ（`feat/func-task-gates`、`feat/generate-disable-fork`、
+`docs/implementation-review`）を master に統合。実装課題の推奨着手順 0 番。
+
+### What was done
+
+- ブランチ間の祖先関係を確認: `docs/implementation-review` が他 2 ブランチを
+  完全に含む単一の直列統合ブランチであることが判明（マージは 1 回で済んだ）
+- `git merge --no-ff docs/implementation-review` を実行。PLAN.md/DIARY.md が
+  コンフリクト（両ブランチが独立に追記していたため）
+  - DIARY.md: ブランチ側のエントリ（2026-06-18〜07-02）を自分の 07-09 エントリの
+    前に時系列で並べ替えて統合
+  - PLAN.md: 「実装課題（2026-07-09）」と「実装レビューと課題（2026-07-02）」の
+    重複 2 セクションを 1 つに統合。「※未マージ」注記を解消し、branch 側のみに
+    あった軽微課題（disable の同一プロセス制限、$random の iverilog 非互換）を
+    軽微セクションへ統合。テスト/CI セクションを現状（iverilog 比較 CI 導入済み、
+    統合テスト 8 ケース）に更新
+- `cargo build --workspace` / `cargo test --workspace` で検証
+
+### Result
+
+✅ マージ成功、コンフリクト解消
+✅ `cargo build --workspace` 成功（dead-code warning 3 件のみ）
+✅ `cargo test --workspace` 全 39 テスト通過（unit 22 + integration 8 + iverilog_compare 7 +
+   frontend 1 + doc-tests 0、iverilog 実行環境あり）
+
+### Next
+
+- 実装課題 A1: signed 演算対応（`elab/src/width.rs` の幅・符号推論再設計とセット）
