@@ -303,3 +303,85 @@ CLI 引数:
 - **\`include / \`define の解決順**: sv-parser プリプロセッサ API の細部を M0 で実機確認
 - **vcd クレートの十分性**: 書込のみなので恐らく問題なし、不足時は自前 writer 化
 - **決定論性**: HashMap 順序による非決定論を避けるため `IndexMap` または `Vec` 経由で走査
+
+## 実装課題（2026-07-09 時点、master ベース）
+
+M1 マージ後の master に対するコードベース全体の棚卸し結果。
+注記: `docs/implementation-review` ブランチの PLAN.md に既存の「実装レビューと課題（2026-07-02）」
+セクションがあり、本セクションはそれを包含・拡張した内容のため、マージ時に統合すること。
+「※未マージ」印の項目は `feat/func-task-gates` / `feat/generate-disable-fork` /
+`docs/implementation-review` ブランチで解決済みだが master に未反映。
+
+### A. 正確性（シミュレーション結果が誤りになる）
+
+| # | 課題 | 箇所 | 内容 |
+|---|---|---|---|
+| A1 | signed 演算が全面未実装 | `elab/src/width.rs`, `mir/src/logicval.rs` | `NetInfo` に符号情報がなく `infer_signed` は常に false。比較は unsigned のみ、`<<<` は `<<` と同一実装。`integer` の負数比較、signed の `%d` がすべて unsigned 扱い |
+| A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
+| A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
+| A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
+| A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue` | ビット/部分選択の書き込みパスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
+| A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
+| A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
+| A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
+| A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
+
+### B. 未対応の言語機能
+
+- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: `defparam`、`specify`、UDP、
+  および master では function/task/generate/gate primitive も `lower.rs` の `_ => {}` catch-all で
+  無言スキップされる。最低限 `UnsupportedConstruct` エラーにすべき
+- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`fork`-`join`、`disable`、
+  `**` 演算子、式中の関数呼び出し
+- `real`/`realtime` が型検査なしで 1bit reg として解釈される
+- ※未マージ: function/task/gate primitive（`feat/func-task-gates`）、
+  generate/genvar・disable・fork-join（`feat/generate-disable-fork`）
+
+### C. システムタスク・関数の不足
+
+- 未実装: `$stop`、`$strobe`、`$fopen`/`$fclose`/`$fwrite` 等ファイル I/O、
+  `$value$plusargs`/`$test$plusargs`、`$realtime`、`$signed`/`$unsigned`、`$dumpoff`/`$dumpon`
+- 式の中の `$time` が未対応（`eval_expr` に SysFunc 分岐がない。`$clog2` は elaboration 時の
+  定数畳み込みでのみ動作）
+- ※未マージ: `$readmemh`/`$readmemb`/`$random`
+
+### D. 設計と実装の乖離・死コード
+
+- `sim/src/scheduler.rs` が TODO スタブのまま死コード。実イベントループは `Interpreter::run` に
+  別実装されており、未使用の `future: VecDeque` は時刻順ソートされないバグも内包。
+  削除するか interp ループを移設して一本化する
+- `sim/src/systask.rs` も全関数 TODO スタブで `interp.rs::exec_syscall` と重複（`lib.rs` で
+  pub use されたまま）
+- 連続代入が計画の「NetId→プロセス逆引きテーブル」方式でなく総当たり固定点ループ
+  （`interp.rs` `eval_conts`、最大 200 回打ち切り）。規模で性能劣化し、発振回路で黙って誤結果
+  （最低限、打ち切り時に警告を出す）
+- `elab/src/width.rs` が実質スタブ（14 行）。IEEE の context-determined 幅推論が体系実装されず
+  幅処理が elaborate.rs に分散。A1（signed 対応）の障害になる
+
+### E. テスト・CI
+
+- master に CI が一切ない（`.github/` 不在）。fmt/clippy ジョブはブランチ側の ci.yml にもない
+- 統合テストが 2 ケースのみ（counter4/fifo_sync）。サブセット外構文のエラーを確認する
+  負パステストがない
+- ※未マージ: iverilog 出力比較 CI とテストケース 6 件追加（`docs/implementation-review`）
+
+### F. 軽微
+
+- `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
+- `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
+- `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
+- 連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）
+- リポジトリの CLAUDE.md が空、`tests/rtl/fifo_counter.v` が未使用
+
+### 推奨着手順
+
+0. 未マージ 3 ブランチ（`feat/func-task-gates` → `feat/generate-disable-fork` →
+   `docs/implementation-review`）の master への統合（B/C/E の※印が解消）
+1. A1: signed 対応（width.rs の幅・符号推論再設計とセット。データ構造に触るため最優先）
+2. A2: エッジ検出の IEEE 準拠化
+3. A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正（イベントループ再構成として一括）
+4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
+5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
+
+修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0` レース、発振検出）を
+iverilog 比較 CI へ追加してから直すこと（テスト先行）。

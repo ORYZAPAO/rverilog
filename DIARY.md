@@ -578,3 +578,30 @@ $finish at time 370
 - SystemVerilog 拡張（`logic`/`always_ff`/`always_comb`）
 - ビット幅推論の精度向上（context-determined 完全対応）
 - reg 幅のパラメータ依存解決（`[ADDR_WIDTH:0]` → 実幅の評価）
+
+## 2026-07-09
+
+### Task
+
+master ベースで実装課題の棚卸しを行い、PLAN.md に「実装課題」セクションとして追記。
+
+### What was done
+
+- コードベース全体（frontend/elab/mir/sim/vcd_out/cli）を調査し、未対応構文・
+  コードレベルの負債（TODO/スタブ）・既知の近似・システムタスク不足・幅/符号推論の
+  ギャップを洗い出した
+- 未マージブランチ（`feat/func-task-gates`、`feat/generate-disable-fork`、
+  `docs/implementation-review`）と突合し、ブランチ側で解決済みの項目
+  （function/task、generate/genvar、disable/fork-join、gate primitive、
+  $readmemh/$readmemb/$random、iverilog 比較 CI）には「※未マージ」と注記
+- PLAN.md 末尾に「実装課題（2026-07-09 時点、master ベース）」を追記。
+  正確性 9 件（A1-A9）・未対応言語機能・システムタスク不足・設計乖離/死コード 4 件・
+  テスト/CI・軽微 5 件の 6 分類と推奨着手順を記録
+- `docs/implementation-review` ブランチの PLAN.md に既存の
+  「実装レビューと課題（2026-07-02）」があるため、マージ時に統合する旨を明記
+
+### Notes
+
+- 最優先は signed 対応（A1、width.rs 再設計とセット）。データ構造に触るため
+  後回しにするほど手戻りが大きい
+- 修正前に iverilog 比較 CI へテストケースを追加するテスト先行方針
