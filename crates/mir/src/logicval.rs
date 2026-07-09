@@ -416,14 +416,109 @@ impl LogicVal {
 
     pub fn ashl(&self, rhs: &LogicVal) -> Self { self.shl(rhs) }
 
+    /// 値自身のMSB（aval）を符号ビットとして返す。幅0のときは0。
+    fn sign_bit(&self) -> u64 {
+        let w = self.width();
+        if w == 0 { return 0; }
+        let n = num_chunks(w);
+        let sign_bit_pos = if w % 64 == 0 { 63 } else { (w % 64) - 1 };
+        (self.get_chunk(n - 1) >> sign_bit_pos) & 1
+    }
+
+    /// `new_width` へ符号拡張する（自身のMSBで埋める）。`new_width <= width()` の場合は `resize` と同じ。
+    /// signed 演算（比較・除算・剰余・`>>>`）の共通境界を揃えるために使う。
+    pub fn extend_sign(&self, new_width: u32) -> Self {
+        let old_w = self.width();
+        if new_width <= old_w { return self.resize(new_width); }
+        let fill = if self.sign_bit() == 1 { u64::MAX } else { 0u64 };
+        let n = num_chunks(new_width);
+        let old_n = num_chunks(old_w);
+        let mut a: Vec<u64> = Vec::with_capacity(n);
+        let mut b: Vec<u64> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i < old_n {
+                let mut av = self.get_chunk(i);
+                let bv = self.get_chunk_b(i);
+                if i == old_n - 1 && old_w % 64 != 0 {
+                    let tm = top_mask(old_w);
+                    av = (av & tm) | (fill & !tm);
+                }
+                a.push(av);
+                b.push(bv);
+            } else {
+                a.push(fill);
+                b.push(0);
+            }
+        }
+        Self::from_chunks(new_width, &a, &b)
+    }
+
+    /// 64bit以内の値を符号付き i64 として取り出す（signed 除算・剰余用）。
+    fn as_i64(&self) -> i64 {
+        self.extend_sign(64).get_chunk(0) as i64
+    }
+
+    // Multi-word signed comparison helper（両辺を共通幅へ符号拡張してから比較）
+    fn cmp_signed(&self, rhs: &LogicVal) -> Option<std::cmp::Ordering> {
+        if !self.is_known() || !rhs.is_known() { return None; }
+        let w = self.width().max(rhs.width());
+        let l = self.extend_sign(w);
+        let r = rhs.extend_sign(w);
+        let (ls, rs) = (l.sign_bit(), r.sign_bit());
+        if ls != rs {
+            return Some(if ls == 1 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
+        }
+        l.cmp_unsigned(&r)
+    }
+
+    pub fn lt_signed(&self, rhs: &LogicVal) -> LogicVal {
+        match self.cmp_signed(rhs) {
+            None => LogicVal::X,
+            Some(std::cmp::Ordering::Less) => LogicVal::ONE,
+            _ => LogicVal::ZERO,
+        }
+    }
+
+    pub fn gt_signed(&self, rhs: &LogicVal) -> LogicVal { rhs.lt_signed(self) }
+
+    pub fn le_signed(&self, rhs: &LogicVal) -> LogicVal {
+        match self.cmp_signed(rhs) {
+            None => LogicVal::X,
+            Some(std::cmp::Ordering::Greater) => LogicVal::ZERO,
+            _ => LogicVal::ONE,
+        }
+    }
+
+    pub fn ge_signed(&self, rhs: &LogicVal) -> LogicVal { rhs.le_signed(self) }
+
+    /// signed 除算（0への切り捨て）。64bit超は unsigned 版と同じく X（既知の割り切り）。
+    pub fn div_signed(&self, rhs: &LogicVal) -> LogicVal {
+        let w = self.width().max(rhs.width());
+        if w > 64 { return LogicVal::X; }
+        if !self.is_known() || !rhs.is_known() { return LogicVal::X; }
+        let rv = rhs.as_i64();
+        if rv == 0 { return LogicVal::X; }
+        let result = self.as_i64().wrapping_div(rv);
+        Self::from_chunks(w, &[result as u64], &[0])
+    }
+
+    /// signed 剰余（結果の符号は被除数側、Rust の `%` と同じ切り捨て規則）。
+    pub fn mod_signed(&self, rhs: &LogicVal) -> LogicVal {
+        let w = self.width().max(rhs.width());
+        if w > 64 { return LogicVal::X; }
+        if !self.is_known() || !rhs.is_known() { return LogicVal::X; }
+        let rv = rhs.as_i64();
+        if rv == 0 { return LogicVal::X; }
+        let result = self.as_i64().wrapping_rem(rv);
+        Self::from_chunks(w, &[result as u64], &[0])
+    }
+
     pub fn ashr(&self, rhs: &LogicVal) -> LogicVal {
         if !self.is_known() || !rhs.is_known() { return LogicVal::X; }
         let shift = rhs.pad_to_width(32) as u32;
         let w = self.width();
         let n = num_chunks(w);
-        let sign_chunk = n - 1;
-        let sign_bit_pos = if w % 64 == 0 { 63 } else { (w % 64) - 1 };
-        let sign = (self.get_chunk(sign_chunk) >> sign_bit_pos) & 1;
+        let sign = self.sign_bit();
         if sign == 0 { return self.shr(rhs); }
         // Fill with 1s from MSB
         if shift >= w {
@@ -757,6 +852,56 @@ mod tests {
         let e = a.extend_zero(8);
         assert_eq!(e.width(), 8);
         assert_eq!(e.pad_to_width(8), 0b00001010);
+    }
+
+    #[test]
+    fn test_extend_sign_negative_fills_with_ones() {
+        // 4bit -6 (0b1010) を 8bit へ符号拡張すると 0b11111010 (-6) になる
+        let a = LogicVal::new(4, 0b1010, 0);
+        let e = a.extend_sign(8);
+        assert_eq!(e.width(), 8);
+        assert_eq!(e.pad_to_width(8), 0b11111010);
+    }
+
+    #[test]
+    fn test_extend_sign_positive_fills_with_zeros() {
+        let a = LogicVal::new(4, 0b0101, 0); // +5
+        let e = a.extend_sign(8);
+        assert_eq!(e.pad_to_width(8), 0b00000101);
+    }
+
+    #[test]
+    fn test_signed_comparison() {
+        // 4bit: -1 (0b1111) と 1 (0b0001) は unsigned では -1 の方が大きいが signed では小さい
+        let neg1 = LogicVal::new(4, 0b1111, 0);
+        let pos1 = LogicVal::new(4, 0b0001, 0);
+        assert!(neg1.lt_signed(&pos1).is_one());
+        assert!(neg1.lt(&pos1).is_zero()); // unsigned は逆
+        assert!(pos1.gt_signed(&neg1).is_one());
+        assert!(neg1.le_signed(&neg1).is_one());
+        assert!(neg1.ge_signed(&neg1).is_one());
+    }
+
+    #[test]
+    fn test_signed_div_mod() {
+        // 8bit: -7 / 2 = -3 (0への切り捨て), -7 % 2 = -1（被除数の符号）
+        let neg7 = LogicVal::new(8, (-7i8) as u8 as u64, 0);
+        let two = LogicVal::new(8, 2, 0);
+        let q = neg7.div_signed(&two);
+        assert_eq!(q.as_i64(), -3);
+        let r = neg7.mod_signed(&two);
+        assert_eq!(r.as_i64(), -1);
+    }
+
+    #[test]
+    fn test_ashr_vs_shr_on_negative_bitpattern() {
+        // 4bit 0b1000 (unsigned解釈なら8、signed解釈なら-8)
+        let v = LogicVal::new(4, 0b1000, 0);
+        let one = LogicVal::new(4, 1, 0);
+        // shr (論理右シフト): unsigned オペランドとして常にこちらを使う
+        assert_eq!(v.shr(&one).pad_to_width(4), 0b0100);
+        // ashr (算術右シフト): signed オペランドの場合に使う。MSBで埋める
+        assert_eq!(v.ashr(&one).pad_to_width(4), 0b1100);
     }
 
     #[test]

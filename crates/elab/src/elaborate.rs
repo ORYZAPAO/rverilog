@@ -35,6 +35,8 @@ struct ElabCtx<'a> {
     memories: Vec<MemInfo>,
     stmts: Vec<Stmt>,
     exprs: Vec<Expr>,
+    /// exprs[i] と対応するsignedness（比較/除算/剰余/算術シフトの符号選択に使用）
+    expr_signed: Vec<bool>,
     processes: Vec<Process>,
     conts: Vec<ContAssign>,
     scopes: Vec<Scope>,
@@ -56,6 +58,7 @@ impl<'a> ElabCtx<'a> {
             memories: Vec::new(),
             stmts: Vec::new(),
             exprs: Vec::new(),
+            expr_signed: Vec::new(),
             processes: Vec::new(),
             conts: Vec::new(),
             scopes: Vec::new(),
@@ -89,9 +92,60 @@ impl<'a> ElabCtx<'a> {
     }
 
     fn alloc_expr(&mut self, expr: Expr) -> ExprId {
+        let signed = self.compute_expr_signed(&expr);
+        self.alloc_expr_signed(expr, signed)
+    }
+
+    /// signedness を自動算出せず明示的に指定する版。符号無し10進即値や `'s` 基数の
+    /// リテラル（`HirExpr::SignedConst`）は MIR 上では通常の `Expr::Const` に落ちる
+    /// ため `compute_expr_signed` からは判別できず、ここで明示指定する。
+    fn alloc_expr_signed(&mut self, expr: Expr, signed: bool) -> ExprId {
         let id = ExprId(self.exprs.len() as u32);
         self.exprs.push(expr);
+        self.expr_signed.push(signed);
         id
+    }
+
+    /// 式のsignedness（IEEE 1364-2001 4.5.1 準拠の簡易版）を子の signedness から算出する。
+    /// 子 ExprId は必ず自分より先に alloc_expr 済みのため `expr_signed` に既に値がある。
+    fn compute_expr_signed(&self, expr: &Expr) -> bool {
+        match expr {
+            // signed リテラル（8'sh..）は未対応のため常に unsigned 扱い（既知の割り切り）
+            Expr::Const(_) => false,
+            Expr::Net(id) => self.nets[id.0 as usize].is_signed,
+            // ビット選択/部分選択/連結/リピート/メモリ読み出しは self-determined unsigned（IEEE準拠）
+            Expr::BitSel(..) | Expr::PartSel(..) | Expr::Concat(..) | Expr::Repeat(..) | Expr::MemRead(..) => false,
+            Expr::StringLit(_) => false,
+            Expr::Random(_) => false,
+            Expr::CallResult(_, ret_net) => self.nets[ret_net.0 as usize].is_signed,
+            Expr::Bin(op, l, r) => {
+                let ls = self.expr_signed[l.0 as usize];
+                let rs = self.expr_signed[r.0 as usize];
+                match op {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::BitNand | BinOp::BitNor | BinOp::BitXnor => ls && rs,
+                    // シフト量(right)の符号は無視し、左辺のsignednessを結果に伝播する
+                    BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr => ls,
+                    // 比較/論理演算の結果は常に1bit unsigned（signed比較の要否は評価時に
+                    // 各オペランドの expr_signed を個別参照して判定する）
+                    BinOp::LogAnd | BinOp::LogOr | BinOp::Eq | BinOp::Ne
+                    | BinOp::CaseEq | BinOp::CaseNe | BinOp::Lt | BinOp::Gt
+                    | BinOp::Le | BinOp::Ge => false,
+                }
+            }
+            Expr::Un(op, e) => {
+                let es = self.expr_signed[e.0 as usize];
+                match op {
+                    UnOp::Pos | UnOp::Neg | UnOp::BitNot => es,
+                    UnOp::LogNot | UnOp::RedAnd | UnOp::RedNand | UnOp::RedOr
+                    | UnOp::RedNor | UnOp::RedXor | UnOp::RedXnor => false,
+                }
+            }
+            Expr::Cond(_, t, f) => {
+                self.expr_signed[t.0 as usize] && self.expr_signed[f.0 as usize]
+            }
+        }
     }
 
     fn register_net(&mut self, scope: ScopeId, name: SmolStr, net_id: NetId) {
@@ -238,6 +292,7 @@ pub fn elaborate(
         scopes: ctx.scopes,
         top: top_scope,
         sensitivity_table: ctx.sensitivity_table,
+        expr_signed: ctx.expr_signed,
     })
 }
 
@@ -283,7 +338,7 @@ fn elab_module(
         };
         let width = eval_const_hir(ctx, scope, &port.width_expr)
             .map(|v| v as u32).unwrap_or(port.width).max(1);
-        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: port.name.clone() });
+        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: port.name.clone(), is_signed: port.signed });
         ctx.register_net(scope, port.name.clone(), net_id);
     }
 
@@ -292,7 +347,7 @@ fn elab_module(
         let kind = lower_netkind(net.kind);
         let width = eval_const_hir(ctx, scope, &net.width_expr)
             .map(|v| v as u32).unwrap_or(net.width).max(1);
-        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: net.name.clone() });
+        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: net.name.clone(), is_signed: net.signed });
         ctx.register_net(scope, net.name.clone(), net_id);
     }
 
@@ -300,7 +355,7 @@ fn elab_module(
     for reg in &hir.regs {
         let width = eval_const_hir(ctx, scope, &reg.width_expr)
             .map(|v| v as u32).unwrap_or(reg.width).max(1);
-        let net_id = ctx.alloc_net(NetInfo { width, kind: NetKind::Reg, scope, name: reg.name.clone() });
+        let net_id = ctx.alloc_net(NetInfo { width, kind: NetKind::Reg, scope, name: reg.name.clone(), is_signed: reg.signed });
         ctx.register_net(scope, reg.name.clone(), net_id);
     }
 
@@ -321,20 +376,20 @@ fn elab_module(
         });
         let ret_w = eval_const_hir(ctx, scope, &func.width_expr)
             .map(|v| v as u32).unwrap_or(func.width).max(1);
-        let ret_net = ctx.alloc_net(NetInfo { width: ret_w, kind: NetKind::Reg, scope: func_scope, name: func.name.clone() });
+        let ret_net = ctx.alloc_net(NetInfo { width: ret_w, kind: NetKind::Reg, scope: func_scope, name: func.name.clone(), is_signed: func.signed });
         ctx.register_net(func_scope, func.name.clone(), ret_net);
 
         let mut arg_nets = Vec::new();
         for arg in &func.args {
             let w = eval_const_hir(ctx, scope, &arg.width_expr).unwrap_or(1).max(1) as u32;
-            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: func_scope, name: arg.name.clone() });
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: func_scope, name: arg.name.clone(), is_signed: arg.signed });
             ctx.register_net(func_scope, arg.name.clone(), net_id);
             arg_nets.push(net_id);
         }
         for local in &func.locals {
             let w = eval_const_hir(ctx, func_scope, &local.width_expr)
                 .map(|v| v as u32).unwrap_or(local.width).max(1);
-            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: func_scope, name: local.name.clone() });
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: func_scope, name: local.name.clone(), is_signed: local.signed });
             ctx.register_net(func_scope, local.name.clone(), net_id);
         }
 
@@ -352,14 +407,14 @@ fn elab_module(
         let mut params = Vec::new();
         for arg in &task.args {
             let w = eval_const_hir(ctx, scope, &arg.width_expr).unwrap_or(1).max(1) as u32;
-            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: task_scope, name: arg.name.clone() });
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: task_scope, name: arg.name.clone(), is_signed: arg.signed });
             ctx.register_net(task_scope, arg.name.clone(), net_id);
             params.push((net_id, arg.direction));
         }
         for local in &task.locals {
             let w = eval_const_hir(ctx, task_scope, &local.width_expr)
                 .map(|v| v as u32).unwrap_or(local.width).max(1);
-            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: task_scope, name: local.name.clone() });
+            let net_id = ctx.alloc_net(NetInfo { width: w, kind: NetKind::Reg, scope: task_scope, name: local.name.clone(), is_signed: local.signed });
             ctx.register_net(task_scope, local.name.clone(), net_id);
         }
 
@@ -497,14 +552,14 @@ fn elab_generate_items(
         let kind = lower_netkind(net.kind);
         let width = eval_const_hir(ctx, scope, &net.width_expr)
             .map(|v| v as u32).unwrap_or(net.width).max(1);
-        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: net.name.clone() });
+        let net_id = ctx.alloc_net(NetInfo { width, kind, scope, name: net.name.clone(), is_signed: net.signed });
         ctx.register_net(scope, net.name.clone(), net_id);
     }
 
     for reg in &items.regs {
         let width = eval_const_hir(ctx, scope, &reg.width_expr)
             .map(|v| v as u32).unwrap_or(reg.width).max(1);
-        let net_id = ctx.alloc_net(NetInfo { width, kind: NetKind::Reg, scope, name: reg.name.clone() });
+        let net_id = ctx.alloc_net(NetInfo { width, kind: NetKind::Reg, scope, name: reg.name.clone(), is_signed: reg.signed });
         ctx.register_net(scope, reg.name.clone(), net_id);
     }
 
@@ -666,8 +721,14 @@ fn elab_generate_items(
 // ── HIR → MIR lowering ───────────────────────────────────────────────────────
 
 fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, ElabError> {
+    // signed リテラル（符号無し10進即値 / `'s` 基数）はMIR上ではExpr::Constと同じ
+    // 表現になるため、compute_expr_signed による自動判定を経由せずここで明示登録する。
+    if let HirExpr::SignedConst(v) = e {
+        return Ok(ctx.alloc_expr_signed(Expr::Const(v.clone()), true));
+    }
     let mir = match e {
         HirExpr::Const(v) => Expr::Const(v.clone()),
+        HirExpr::SignedConst(_) => unreachable!(),
         HirExpr::Net(name) => {
             if let Some(id) = ctx.resolve_net(scope, name.as_str()) {
                 Expr::Net(id)
@@ -888,7 +949,7 @@ fn lower_stmt(ctx: &mut ElabCtx, scope: ScopeId, s: &HirStmt) -> Result<StmtId, 
         HirStmt::For { var, init, cond, step, body } => {
             // Ensure loop variable is declared as a net in this scope
             if ctx.resolve_net(scope, var.as_str()).is_none() {
-                let net_id = ctx.alloc_net(NetInfo { width: 32, kind: NetKind::Integer, scope, name: var.clone() });
+                let net_id = ctx.alloc_net(NetInfo { width: 32, kind: NetKind::Integer, scope, name: var.clone(), is_signed: true });
                 ctx.register_net(scope, var.clone(), net_id);
             }
             let init_id = lower_stmt(ctx, scope, init)?;
@@ -978,7 +1039,7 @@ fn eval_const_hir_with(
     extra: &IndexMap<SmolStr, u64>,
 ) -> Result<u64, ElabError> {
     match e {
-        HirExpr::Const(v) => {
+        HirExpr::Const(v) | HirExpr::SignedConst(v) => {
             if v.is_known() {
                 Ok(v.pad_to_width(v.width()))
             } else {

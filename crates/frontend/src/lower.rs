@@ -152,7 +152,7 @@ fn lower_ansi_port(
             };
             let name = get_id(tree, RefNode::PortIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
-            Ok(PortDecl { name, direction: dir, width: 1, width_expr: Expr::Const(lv(1, 32)) })
+            Ok(PortDecl { name, direction: dir, width: 1, width_expr: Expr::Const(lv(1, 32)), signed: false })
         }
     }
 }
@@ -172,9 +172,10 @@ fn lower_ansi_port_net(
         PortDirection::Input
     };
     let (width, width_expr) = packed_width_expr(tree, RefNode::AnsiPortDeclarationNet(x));
+    let signed = has_signed(RefNode::AnsiPortDeclarationNet(x));
     let name = get_id(tree, RefNode::PortIdentifier(&x.nodes.1))
         .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
-    Ok(PortDecl { name, direction: dir, width, width_expr })
+    Ok(PortDecl { name, direction: dir, width, width_expr, signed })
 }
 
 fn lower_ansi_port_variable(
@@ -187,9 +188,10 @@ fn lower_ansi_port_variable(
         PortDirection::Output
     };
     let (width, width_expr) = packed_width_expr(tree, RefNode::AnsiPortDeclarationVariable(x));
+    let signed = has_signed(RefNode::AnsiPortDeclarationVariable(x));
     let name = get_id(tree, RefNode::PortIdentifier(&x.nodes.1))
         .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
-    Ok(PortDecl { name, direction: dir, width, width_expr })
+    Ok(PortDecl { name, direction: dir, width, width_expr, signed })
 }
 
 fn lower_port_direction(d: &sv_parser::PortDirection) -> PortDirection {
@@ -646,9 +648,10 @@ fn lower_tf_port_item(tree: &SyntaxTree, item: &sv_parser::TfPortItem, default_d
         None => default_dir,
     };
     let (_, width_expr) = packed_width_expr(tree, RefNode::TfPortItem(item));
+    let signed = has_signed(RefNode::TfPortItem(item));
     let (name, _, _) = item.nodes.4.as_ref()?;
     let name = get_id(tree, RefNode::PortIdentifier(name))?;
-    Some(TfArg { name, width_expr, direction: dir })
+    Some(TfArg { name, width_expr, direction: dir, signed })
 }
 
 /// `function/task ...; input a; output b; ...` style (no parenthesized port list):
@@ -665,9 +668,10 @@ fn lower_tf_item_decls(tree: &SyntaxTree, items: &[sv_parser::TfItemDeclaration]
                     TD::ConstRef(_) => PortDirection::Input,
                 };
                 let (_, width_expr) = packed_width_expr(tree, RefNode::TfPortDeclaration(d));
+                let signed = has_signed(RefNode::TfPortDeclaration(d));
                 for (name_node, _, _) in d.nodes.4.nodes.0.contents() {
                     if let Some(name) = get_id(tree, RefNode::PortIdentifier(name_node)) {
-                        args.push(TfArg { name, width_expr: width_expr.clone(), direction: dir });
+                        args.push(TfArg { name, width_expr: width_expr.clone(), direction: dir, signed });
                     }
                 }
             }
@@ -690,6 +694,7 @@ fn lower_function_decl(tree: &SyntaxTree, fd: &sv_parser::FunctionDeclaration) -
             let name = get_id(tree, RefNode::FunctionIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("function name missing".into()))?;
             let (width, width_expr) = packed_width_expr(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
+            let signed = has_signed(RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
             let mut args = Vec::new();
             if let Some(list) = &p.nodes.3.nodes.1 {
                 for item in list.nodes.0.contents() {
@@ -711,12 +716,13 @@ fn lower_function_decl(tree: &SyntaxTree, fd: &sv_parser::FunctionDeclaration) -
                     stmts.push(lower_statement(tree, &s.nodes.0)?);
                 }
             }
-            Ok(Some(FunctionDecl { name, width, width_expr, args, locals, body: Stmt::Block(stmts) }))
+            Ok(Some(FunctionDecl { name, width, width_expr, signed, args, locals, body: Stmt::Block(stmts) }))
         }
         FB::WithoutPort(p) => {
             let name = get_id(tree, RefNode::FunctionIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("function name missing".into()))?;
             let (width, width_expr) = packed_width_expr(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
+            let signed = has_signed(RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
             let (args, locals) = lower_tf_item_decls(tree, &p.nodes.4);
             let mut stmts = Vec::new();
             for fs in &p.nodes.5 {
@@ -724,7 +730,7 @@ fn lower_function_decl(tree: &SyntaxTree, fd: &sv_parser::FunctionDeclaration) -
                     stmts.push(lower_statement(tree, &s.nodes.0)?);
                 }
             }
-            Ok(Some(FunctionDecl { name, width, width_expr, args, locals, body: Stmt::Block(stmts) }))
+            Ok(Some(FunctionDecl { name, width, width_expr, signed, args, locals, body: Stmt::Block(stmts) }))
         }
     }
 }
@@ -773,10 +779,11 @@ fn lower_net_decl(tree: &SyntaxTree, nd: &sv_parser::NetDeclaration) -> Result<V
     let mut out = Vec::new();
     if let sv_parser::NetDeclaration::NetType(nt) = nd {
         let (width, width_expr) = packed_width_expr(tree, RefNode::NetDeclarationNetType(nt));
+        let signed = has_signed(RefNode::NetDeclarationNetType(nt));
         // ListOfNetDeclAssignments → NetDeclAssignment → NetIdentifier
         for name_node in unwrap_all_net_identifiers(RefNode::NetDeclarationNetType(nt)) {
             if let Some(name) = get_id(tree, name_node) {
-                out.push(NetDecl { name, width, kind: NetKind::Wire, width_expr: width_expr.clone() });
+                out.push(NetDecl { name, width, kind: NetKind::Wire, width_expr: width_expr.clone(), signed });
             }
         }
     }
@@ -794,6 +801,8 @@ fn lower_data_decl(tree: &SyntaxTree, dd: &sv_parser::DataDeclaration) -> Result
         } else {
             packed_width_expr(tree, RefNode::DataDeclarationVariable(dv))
         };
+        // `integer` は IEEE 1364 上 32bit signed 型として定義される
+        let signed = is_integer || has_signed(RefNode::DataDeclarationVariable(dv));
 
         // Check for unpacked dimension (indicates memory array)
         for vda_node in unwrap_all_var_decl_assignments(RefNode::DataDeclarationVariable(dv)) {
@@ -805,7 +814,7 @@ fn lower_data_decl(tree: &SyntaxTree, dd: &sv_parser::DataDeclaration) -> Result
             if let Some(depth) = depth_expr {
                 mems.push(MemDecl { name, elem_width: width_expr.clone(), depth });
             } else {
-                regs.push(RegDecl { name, width, width_expr: width_expr.clone() });
+                regs.push(RegDecl { name, width, width_expr: width_expr.clone(), signed });
             }
         }
     }
@@ -817,6 +826,19 @@ fn has_integer_type(tree: &SyntaxTree, node: RefNode) -> bool {
         if let RefNode::IntegerAtomType(iat) = inner {
             if let Some(t) = tree.get_str(iat) {
                 return t.trim() == "integer";
+            }
+        }
+    }
+    false
+}
+
+/// `signed` キーワード（`Signing::Signed`）がノード内に存在するかを走査する。
+/// `wire signed [7:0] x`、`reg signed [7:0] y`、ポート宣言の `signed` に対応。
+fn has_signed(node: RefNode) -> bool {
+    for inner in node {
+        if let RefNode::Signing(s) = inner {
+            if matches!(s, sv_parser::Signing::Signed(_)) {
+                return true;
             }
         }
     }
@@ -1656,20 +1678,29 @@ fn lower_primary_literal(tree: &SyntaxTree, lit: &sv_parser::PrimaryLiteral) -> 
 
 fn lower_number(tree: &SyntaxTree, n: &sv_parser::Number) -> Result<Expr, FrontendError> {
     let text = tree.get_str(n).unwrap_or("0");
-    Ok(Expr::Const(parse_number_text(text.trim())))
+    let (v, signed) = parse_number_text(text.trim());
+    Ok(if signed { Expr::SignedConst(v) } else { Expr::Const(v) })
 }
 
 fn lower_const_expr(tree: &SyntaxTree, ce: &sv_parser::ConstantExpression) -> Result<Expr, FrontendError> {
     if let Some(text) = tree.get_str(ce) {
-        return Ok(Expr::Const(parse_number_text(text.trim())));
+        let (v, signed) = parse_number_text(text.trim());
+        return Ok(if signed { Expr::SignedConst(v) } else { Expr::Const(v) });
     }
     Ok(Expr::Const(lv(1, 32)))
 }
 
-fn parse_number_text(text: &str) -> LogicVal {
+/// リテラルの値と、signed文脈で扱うべきか（IEEE 1364-2001 4.8）を返す。
+/// 符号無し10進の即値（`-7`, `2` 等、`'`基数指定なし）と `'s` 基数指定
+/// （`4'sd5` 等）はsigned、それ以外の基数付きリテラルはunsigned。
+fn parse_number_text(text: &str) -> (LogicVal, bool) {
     if let Some(tick) = text.find('\'') {
         let size: u32 = text[..tick].trim().parse().unwrap_or(32);
         let rest = &text[tick + 1..];
+        let (signed, rest) = match rest.strip_prefix(['s', 'S']) {
+            Some(r) => (true, r),
+            None => (false, rest),
+        };
         let (base, digits) = match rest.chars().next().unwrap_or('d') {
             'd' | 'D' => (10u32, &rest[1..]),
             'h' | 'H' => (16u32, &rest[1..]),
@@ -1678,10 +1709,10 @@ fn parse_number_text(text: &str) -> LogicVal {
             _ => (10u32, rest),
         };
         let clean: String = digits.chars().filter(|c| *c != '_').collect();
-        parse_based_digits(&clean, base, size)
+        (parse_based_digits(&clean, base, size), signed)
     } else {
-        let val: u64 = text.trim().parse().unwrap_or(0);
-        lv(val, 32)
+        let val: i64 = text.trim().parse().unwrap_or(0);
+        (lv(val as u64, 32), true)
     }
 }
 

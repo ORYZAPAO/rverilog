@@ -323,9 +323,9 @@ iverilog 出力比較 CI 導入済み）。
 
 ### A. 正確性（シミュレーション結果が誤りになる）
 
-| # | 課題 | 箇所 | 内容 |
+| # | 課題 | 箇所 | 状態 |
 |---|---|---|---|
-| A1 | signed 演算が全面未実装 | `elab/src/width.rs`, `mir/src/logicval.rs` | `NetInfo` に符号情報がなく `infer_signed` は常に false。比較は unsigned のみ、`<<<` は `<<` と同一実装。`integer` の負数比較、signed の `%d` がすべて unsigned 扱い |
+| A1 | signed 演算 | `hir::design.rs`/`mir::ir.rs`（`signed`/`is_signed`フィールド）、`elab::elaborate.rs`（`expr_signed`伝搬）、`mir::logicval.rs`（`*_signed`演算群） | **対応済み（2026-07-09）**。net/reg/port/integer/function/task 引数の `signed` 宣言、符号無し10進即値と `'s` 基数リテラルの既定signed扱い、signed比較（`<`/`>`/`<=`/`>=`）・signed除算/剰余・`>>>`の左辺signedness依存・signed `%d` 表示を実装。iverilogとのbit-exact比較テスト`tests/integration/cases/signed/`で検証済み。既知の残課題: 式の最終signednessは子ExprIdからの単純な機械的伝搬（IEEE 4.5.1のcontext-determined規則の一部簡略化）、`width.rs`自体は未着手のまま |
 | A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
 | A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
 | A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
@@ -383,12 +383,16 @@ iverilog 出力比較 CI 導入済み）。
 
 ### 推奨着手順
 
-1. A1: signed 対応（width.rs の幅・符号推論再設計とセット。データ構造に触るため最優先）
+1. ~~A1: signed 対応~~ 完了（2026-07-09）
 2. A2: エッジ検出の IEEE 準拠化
 3. A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正（イベントループ再構成として一括）
 4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
 5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
 6. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
+
+補足: A1 で `width.rs` 自体の context-determined 幅推論再設計は見送った（signedness 伝搬のみ
+`ElabCtx.expr_signed` として別経路で実装し、幅計算は既存の elaborate.rs 分散実装のまま）。
+width.rs のスタブ化（D 参照）は依然未解消。
 
 修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0` レース、発振検出）を
 iverilog 比較 CI へ追加してから直すこと（テスト先行）。

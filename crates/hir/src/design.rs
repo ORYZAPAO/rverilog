@@ -89,6 +89,7 @@ pub struct FunctionDecl {
     pub name: SmolStr,
     pub width: u32,
     pub width_expr: Expr,
+    pub signed: bool,
     pub args: Vec<TfArg>,
     pub locals: Vec<RegDecl>,
     pub body: Stmt,
@@ -107,6 +108,7 @@ pub struct TfArg {
     pub name: SmolStr,
     pub width_expr: Expr,
     pub direction: PortDirection,
+    pub signed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +117,7 @@ pub struct PortDecl {
     pub direction: PortDirection,
     pub width: u32,        // static fallback (1 if param-dependent)
     pub width_expr: Expr,  // authoritative width expression
+    pub signed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +145,7 @@ pub struct NetDecl {
     pub width: u32,
     pub kind: NetKind,
     pub width_expr: Expr,
+    pub signed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +153,7 @@ pub struct RegDecl {
     pub name: SmolStr,
     pub width: u32,
     pub width_expr: Expr,
+    pub signed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +250,9 @@ pub enum CaseKind {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Const(LogicVal),
+    /// signed literal: 符号無しの10進即値（`-7`, `2` 等）、または `'s` 基数指定
+    /// （`4'sd5` 等）。IEEE 1364-2001 4.8: これらは既定でsigned文脈になる。
+    SignedConst(LogicVal),
     Net(SmolStr),
     StringLit(SmolStr),
     BitSel(Box<Expr>, Box<Expr>),

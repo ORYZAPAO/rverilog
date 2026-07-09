@@ -75,6 +75,16 @@ fn test_format_xz() {
 }
 
 #[test]
+fn test_signed() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/signed/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("signed");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![
