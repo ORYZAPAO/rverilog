@@ -1,0 +1,4 @@
+a=0 b=0 and=0 or=0 nand=1 nor=1 xor=0 xnor=1 buf=0 not=1
+a=1 b=0 and=0 or=1 nand=1 nor=0 xor=1 xnor=0 buf=1 not=0
+a=1 b=1 and=1 or=1 nand=0 nor=0 xor=0 xnor=1 buf=1 not=0
+$finish at time 3

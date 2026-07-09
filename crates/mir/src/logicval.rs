@@ -170,6 +170,19 @@ impl LogicVal {
 
     // ── zero extension / sign extension ──────────────────────────────────────
 
+    /// Truncates or zero-extends to `width`, regardless of whether it's wider or narrower
+    /// than the current value. Used when storing into a net of a fixed declared width.
+    pub fn resize(&self, width: u32) -> Self {
+        let n = num_chunks(width);
+        let mut av: SmallVec<[u64; 4]> = SmallVec::new();
+        let mut bv: SmallVec<[u64; 4]> = SmallVec::new();
+        for i in 0..n {
+            av.push(self.get_chunk(i));
+            bv.push(self.get_chunk_b(i));
+        }
+        LogicVal::from_chunks(width, &av, &bv)
+    }
+
     pub fn extend_zero(&self, new_width: u32) -> Self {
         let n = num_chunks(new_width);
         let mut a: Vec<u64> = (0..n).map(|i| self.get_chunk(i)).collect();

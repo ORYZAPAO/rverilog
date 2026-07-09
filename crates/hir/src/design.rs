@@ -11,6 +11,7 @@ pub enum NetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysFuncKind {
     Clog2,
+    Random,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,81 @@ pub struct HirModule {
     pub initials: Vec<InitialConstruct>,
     pub alwayses: Vec<AlwaysConstruct>,
     pub instances: Vec<ModuleInstance>,
+    pub functions: Vec<FunctionDecl>,
+    pub tasks: Vec<TaskDecl>,
+    pub generates: GenerateItems,
+}
+
+/// Items contributed by a `generate`/`endgenerate` region or a conditional/loop
+/// generate construct. Mirrors the flat item lists on `HirModule`, plus nested
+/// generate constructs for recursive expansion at elaboration time.
+#[derive(Debug, Clone, Default)]
+pub struct GenerateItems {
+    pub nets: Vec<NetDecl>,
+    pub regs: Vec<RegDecl>,
+    pub mems: Vec<MemDecl>,
+    pub locals: Vec<LocalParamDecl>,
+    pub assigns: Vec<ContinuousAssign>,
+    pub initials: Vec<InitialConstruct>,
+    pub alwayses: Vec<AlwaysConstruct>,
+    pub instances: Vec<ModuleInstance>,
+    pub nested: Vec<GenerateConstruct>,
+}
+
+#[derive(Debug, Clone)]
+pub enum GenerateConstruct {
+    If(GenerateIf),
+    Case(GenerateCase),
+    For(GenerateFor),
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateIf {
+    pub cond: Expr,
+    pub then_items: GenerateItems,
+    pub else_items: GenerateItems,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateCase {
+    pub sel: Expr,
+    pub arms: Vec<(Vec<Expr>, GenerateItems)>,
+    pub default: Option<GenerateItems>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateFor {
+    pub var: SmolStr,
+    pub init: Expr,
+    pub cond: Expr,
+    /// expression for the new value of `var` after each iteration (e.g. `i+1`)
+    pub step: Expr,
+    pub body: GenerateItems,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionDecl {
+    pub name: SmolStr,
+    pub width: u32,
+    pub width_expr: Expr,
+    pub args: Vec<TfArg>,
+    pub locals: Vec<RegDecl>,
+    pub body: Stmt,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskDecl {
+    pub name: SmolStr,
+    pub args: Vec<TfArg>,
+    pub locals: Vec<RegDecl>,
+    pub body: Stmt,
+}
+
+#[derive(Debug, Clone)]
+pub struct TfArg {
+    pub name: SmolStr,
+    pub width_expr: Expr,
+    pub direction: PortDirection,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +219,7 @@ pub enum Stmt {
     Delay(u64, Box<Stmt>),
     EventCtl(Sensitivity, Box<Stmt>),
     SysCall(SysTask, Vec<Expr>),
+    TaskCall(SmolStr, Vec<Expr>),
     For {
         var: SmolStr,
         init: Box<Stmt>,
@@ -150,6 +227,12 @@ pub enum Stmt {
         step: Box<Stmt>,
         body: Box<Stmt>,
     },
+    /// `begin : label ... end`。`disable label;` の対象になり得る名前付きブロック。
+    NamedBlock(SmolStr, Vec<Stmt>),
+    /// `disable label;`。同一プロセス内の名前付きブロックを中断して抜ける（M2サブセット：他プロセスのタスク/ブロックの中断は未対応）。
+    Disable(SmolStr),
+    /// `fork ... join`。各分岐を並行プロセスとして起動し、全分岐の完了を待つ（join_any/join_noneはjoinとして扱う）。
+    Fork(Vec<Stmt>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +256,7 @@ pub enum Expr {
     Cond(Box<Expr>, Box<Expr>, Box<Expr>),
     IndexSel(SmolStr, Box<Expr>),
     SysFunc(SysFuncKind, Vec<Expr>),
+    Call(SmolStr, Vec<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +300,8 @@ pub enum SysTask {
     Time,
     DumpFile,
     DumpVars,
+    ReadMemH,
+    ReadMemB,
 }
 
 use rverilog_mir::LogicVal;

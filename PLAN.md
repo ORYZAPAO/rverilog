@@ -246,11 +246,20 @@ pub fn parse_files(
 9. VCD writer 統合
 10. `samples/counter4` 通過 → `samples/fifo_sync` 通過
 
-### M2 以降（参考）
+### M2 以降
+
+完了済み（2026-07-02 時点）:
 - `function`/`task`、`generate`/`genvar`、ゲートプリミティブ
-- `$readmemh`/`$random`、部分 X 伝搬の精度向上
-- iverilog との bit-exact 比較を CI 導入
-- SystemVerilog 拡張（`logic`/`always_ff`/`always_comb`/struct/typedef）
+- `disable`/`fork`-`join`
+- `$readmemh`/`$readmemb`/`$random`、部分 X 伝搬の精度向上（$display 系フォーマッタ）
+- iverilog との出力比較を CI 導入
+
+残タスク（優先順は「実装レビューと課題」参照）:
+1. signed 対応（幅・符号推論の再設計とセット）
+2. エッジ検出の IEEE 準拠化（X→1 posedge 等）
+3. monitor リージョン実装 + `#0` (inactive) 順序修正（イベントループ再構成として一括）
+4. 連続代入の sensitivity 駆動化
+5. SystemVerilog 拡張（`logic`/`always_ff`/`always_comb`/struct/typedef）
 
 ## サンプル & テスト戦略
 
@@ -304,13 +313,13 @@ CLI 引数:
 - **vcd クレートの十分性**: 書込のみなので恐らく問題なし、不足時は自前 writer 化
 - **決定論性**: HashMap 順序による非決定論を避けるため `IndexMap` または `Vec` 経由で走査
 
-## 実装課題（2026-07-09 時点、master ベース）
+## 実装課題（2026-07-09 マージ後）
 
-M1 マージ後の master に対するコードベース全体の棚卸し結果。
-注記: `docs/implementation-review` ブランチの PLAN.md に既存の「実装レビューと課題（2026-07-02）」
-セクションがあり、本セクションはそれを包含・拡張した内容のため、マージ時に統合すること。
-「※未マージ」印の項目は `feat/func-task-gates` / `feat/generate-disable-fork` /
-`docs/implementation-review` ブランチで解決済みだが master に未反映。
+M1 マージ後のコードベース全体の棚卸し結果。2026-07-02 レビュー（旧 `docs/implementation-review`
+ブランチ）と 2026-07-09 の再調査を統合。`feat/func-task-gates` / `feat/generate-disable-fork` /
+`docs/implementation-review` の 3 ブランチは本セクション執筆時点で master にマージ済み
+（function/task/gate primitive/generate/genvar/disable/fork-join/$readmemh/$readmemb/$random/
+iverilog 出力比較 CI 導入済み）。
 
 ### A. 正確性（シミュレーション結果が誤りになる）
 
@@ -328,14 +337,13 @@ M1 マージ後の master に対するコードベース全体の棚卸し結果
 
 ### B. 未対応の言語機能
 
-- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: `defparam`、`specify`、UDP、
-  および master では function/task/generate/gate primitive も `lower.rs` の `_ => {}` catch-all で
-  無言スキップされる。最低限 `UnsupportedConstruct` エラーにすべき
-- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`fork`-`join`、`disable`、
-  `**` 演算子、式中の関数呼び出し
+- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: `defparam`、`specify`、UDP は
+  `lower.rs` の `_ => {}` catch-all で無言スキップされる。最低限 `UnsupportedConstruct` エラーに
+  すべき
+- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子、
+  式中の関数呼び出し
 - `real`/`realtime` が型検査なしで 1bit reg として解釈される
-- ※未マージ: function/task/gate primitive（`feat/func-task-gates`）、
-  generate/genvar・disable・fork-join（`feat/generate-disable-fork`）
+- `disable` は同一プロセス内のみ対応、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
 
 ### C. システムタスク・関数の不足
 
@@ -343,7 +351,7 @@ M1 マージ後の master に対するコードベース全体の棚卸し結果
   `$value$plusargs`/`$test$plusargs`、`$realtime`、`$signed`/`$unsigned`、`$dumpoff`/`$dumpon`
 - 式の中の `$time` が未対応（`eval_expr` に SysFunc 分岐がない。`$clog2` は elaboration 時の
   定数畳み込みでのみ動作）
-- ※未マージ: `$readmemh`/`$readmemb`/`$random`
+- `$random` は iverilog と数値非互換（固定シード xorshift64*、bit-exact 一致は目標外）
 
 ### D. 設計と実装の乖離・死コード
 
@@ -360,10 +368,10 @@ M1 マージ後の master に対するコードベース全体の棚卸し結果
 
 ### E. テスト・CI
 
-- master に CI が一切ない（`.github/` 不在）。fmt/clippy ジョブはブランチ側の ci.yml にもない
-- 統合テストが 2 ケースのみ（counter4/fifo_sync）。サブセット外構文のエラーを確認する
-  負パステストがない
-- ※未マージ: iverilog 出力比較 CI とテストケース 6 件追加（`docs/implementation-review`）
+- iverilog 出力比較 CI 導入済み（`.github/workflows/ci.yml`、`crates/cli/tests/iverilog_compare.rs`）
+- fmt/clippy ジョブは未導入
+- 統合テストは 8 ケース（counter4/fifo_sync/disable_fork/format_xz/func_task/gates/generate/
+  readmem_random）。サブセット外構文のエラーを確認する負パステストはまだない
 
 ### F. 軽微
 
@@ -375,13 +383,12 @@ M1 マージ後の master に対するコードベース全体の棚卸し結果
 
 ### 推奨着手順
 
-0. 未マージ 3 ブランチ（`feat/func-task-gates` → `feat/generate-disable-fork` →
-   `docs/implementation-review`）の master への統合（B/C/E の※印が解消）
 1. A1: signed 対応（width.rs の幅・符号推論再設計とセット。データ構造に触るため最優先）
 2. A2: エッジ検出の IEEE 準拠化
 3. A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正（イベントループ再構成として一括）
 4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
 5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
+6. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
 
 修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0` レース、発振検出）を
 iverilog 比較 CI へ追加してから直すこと（テスト先行）。

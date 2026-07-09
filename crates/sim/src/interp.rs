@@ -4,13 +4,15 @@ use std::path::PathBuf;
 use rverilog_mir::*;
 use rverilog_vcd::VcdWriter;
 
-// Execution frame: (stmt_list, next_index)
-type Frame = (Vec<StmtId>, usize);
+// Execution frame: (stmt_list, next_index, block_id of NamedBlock this frame represents, for `disable`)
+type Frame = (Vec<StmtId>, usize, Option<u32>);
 
 struct ProcState {
     id: ProcessId,
     kind: ProcessKind,
     frames: Vec<Frame>,
+    /// `fork`の分岐として起動された場合のfork ID。完了時にjoinカウンタを減算する。
+    fork_ctx: Option<u32>,
 }
 
 enum StepResult {
@@ -19,6 +21,8 @@ enum StepResult {
     Delay(u64),
     Wait(Sensitivity),
     Finish,
+    /// `fork`文を実行した。引数はfork ID。全分岐の完了までこのプロセスを止める。
+    ForkJoin(u32),
 }
 
 pub struct Interpreter {
@@ -37,6 +41,13 @@ pub struct Interpreter {
     vcd_path: Option<PathBuf>,   // set by $dumpfile
     vcd_active: bool,            // enabled by $dumpvars
     output_buf: String,
+    fork_seq: u32,
+    /// fork ID → 未完了の分岐数
+    fork_remaining: HashMap<u32, u32>,
+    /// fork ID → join待ちの親プロセス
+    fork_waiters: HashMap<u32, ProcState>,
+    /// `$random` 用の固定シードPRNG状態（テストの決定性を保つため固定シード）。
+    rng_state: u64,
 }
 
 impl Interpreter {
@@ -66,6 +77,10 @@ impl Interpreter {
             vcd_path: None,
             vcd_active: false,
             output_buf: String::new(),
+            fork_seq: 0,
+            fork_remaining: HashMap::new(),
+            fork_waiters: HashMap::new(),
+            rng_state: 0x2545_F491_4F6C_DD1D,
         }
     }
 
@@ -81,7 +96,8 @@ impl Interpreter {
             let state = ProcState {
                 id: ProcessId(i as u32),
                 kind: proc.kind,
-                frames: vec![(vec![proc.body], 0)],
+                frames: vec![(vec![proc.body], 0, None)],
+                fork_ctx: None,
             };
             // Always with non-empty sensitivity: wait for first event
             let sens = proc.sensitivity.clone();
@@ -161,11 +177,15 @@ impl Interpreter {
             match self.step(&mut state) {
                 StepResult::Continue => {}
                 StepResult::Done => {
+                    if let Some(fid) = state.fork_ctx {
+                        self.fork_branch_done(fid);
+                        return;
+                    }
                     if state.kind == ProcessKind::Always {
                         let proc = &self.design.processes[state.id.0 as usize];
                         let body = proc.body;
                         let sens = proc.sensitivity.clone();
-                        state.frames = vec![(vec![body], 0)];
+                        state.frames = vec![(vec![body], 0, None)];
                         if let Sensitivity::Items(ref items) = sens {
                             if !items.is_empty() {
                                 self.event_waiters.push((sens, state));
@@ -176,6 +196,10 @@ impl Interpreter {
                     } else {
                         return;
                     }
+                }
+                StepResult::ForkJoin(fid) => {
+                    self.fork_waiters.insert(fid, state);
+                    return;
                 }
                 StepResult::Delay(t) => {
                     self.seq += 1;
@@ -205,7 +229,7 @@ impl Interpreter {
         let stmt_id = loop {
             match state.frames.last_mut() {
                 None => return StepResult::Done,
-                Some((stmts, idx)) => {
+                Some((stmts, idx, _)) => {
                     if *idx < stmts.len() {
                         let id = stmts[*idx];
                         *idx += 1;
@@ -222,7 +246,7 @@ impl Interpreter {
 
             Stmt::Block(stmts) => {
                 if !stmts.is_empty() {
-                    state.frames.push((stmts, 0));
+                    state.frames.push((stmts, 0, None));
                 }
                 StepResult::Continue
             }
@@ -232,10 +256,10 @@ impl Interpreter {
                 let nonzero = cond.pad_to_width(cond.width()) != 0;
                 let known = cond.is_known();
                 if known && nonzero {
-                    state.frames.push((vec![then_id], 0));
+                    state.frames.push((vec![then_id], 0, None));
                 } else if known {
                     if let Some(e) = else_id {
-                        state.frames.push((vec![e], 0));
+                        state.frames.push((vec![e], 0, None));
                     }
                 }
                 StepResult::Continue
@@ -256,7 +280,7 @@ impl Interpreter {
                             }
                         };
                         if eq == LogicVal::ONE {
-                            state.frames.push((vec![*body], 0));
+                            state.frames.push((vec![*body], 0, None));
                             matched = true;
                             break 'outer;
                         }
@@ -264,7 +288,7 @@ impl Interpreter {
                 }
                 if !matched {
                     if let Some(d) = default {
-                        state.frames.push((vec![d], 0));
+                        state.frames.push((vec![d], 0, None));
                     }
                 }
                 StepResult::Continue
@@ -285,12 +309,12 @@ impl Interpreter {
             }
 
             Stmt::Delay(t, body) => {
-                state.frames.push((vec![body], 0));
+                state.frames.push((vec![body], 0, None));
                 StepResult::Delay(t)
             }
 
             Stmt::EventCtl(sens, body) => {
-                state.frames.push((vec![body], 0));
+                state.frames.push((vec![body], 0, None));
                 StepResult::Wait(sens)
             }
 
@@ -302,14 +326,66 @@ impl Interpreter {
                 StepResult::Continue
             }
 
+            Stmt::ReadMem(task, path_id, mem_id) => {
+                self.exec_readmem(task, path_id, mem_id);
+                StepResult::Continue
+            }
+
             Stmt::While(cond_id, body_id) => {
                 let cond = self.eval_expr(cond_id);
                 let nonzero = cond.pad_to_width(cond.width()) != 0;
                 if cond.is_known() && nonzero {
                     // Push body followed by this while stmt again
-                    state.frames.push((vec![body_id, stmt_id], 0));
+                    state.frames.push((vec![body_id, stmt_id], 0, None));
                 }
                 StepResult::Continue
+            }
+
+            Stmt::NamedBlock(block_id, stmts) => {
+                if !stmts.is_empty() {
+                    state.frames.push((stmts, 0, Some(block_id)));
+                }
+                StepResult::Continue
+            }
+
+            Stmt::Disable(target) => {
+                // 同一プロセスのフレームスタックから対象ブロックを探し、それを含む上の階層を巻き戻す。
+                // 他プロセスで実行中のブロック/タスクの中断には対応しない（M2サブセット）。
+                if let Some(i) = state.frames.iter().rposition(|(_, _, id)| *id == Some(target)) {
+                    state.frames.truncate(i);
+                }
+                StepResult::Continue
+            }
+
+            Stmt::Fork(branches) => {
+                if branches.is_empty() {
+                    return StepResult::Continue;
+                }
+                self.fork_seq += 1;
+                let fid = self.fork_seq;
+                self.fork_remaining.insert(fid, branches.len() as u32);
+                for b in branches {
+                    self.active.push(ProcState {
+                        id: state.id,
+                        kind: state.kind,
+                        frames: vec![(vec![b], 0, None)],
+                        fork_ctx: Some(fid),
+                    });
+                }
+                StepResult::ForkJoin(fid)
+            }
+        }
+    }
+
+    /// fork分岐の完了を記録し、全分岐が終わったらjoin待ちの親プロセスを再開する。
+    fn fork_branch_done(&mut self, fid: u32) {
+        if let Some(remaining) = self.fork_remaining.get_mut(&fid) {
+            *remaining -= 1;
+            if *remaining == 0 {
+                self.fork_remaining.remove(&fid);
+                if let Some(parent) = self.fork_waiters.remove(&fid) {
+                    self.active.push(parent);
+                }
             }
         }
     }
@@ -351,10 +427,49 @@ impl Interpreter {
                     self.init_vcd_from_path(path);
                 }
             }
+            // ReadMemH/ReadMemB は elaboration時に Stmt::ReadMem へ変換されるため、
+            // ここには到達しない。
+            SysTask::ReadMemH | SysTask::ReadMemB => {}
         }
     }
 
-    pub fn eval_expr(&self, id: ExprId) -> LogicVal {
+    /// `$readmemh`/`$readmemb` でファイルからメモリ配列を初期化する。
+    /// 制約: ファイルパスは文字列リテラルのみ、対象は単純なメモリ識別子のみ。
+    fn exec_readmem(&mut self, task: SysTask, path_id: ExprId, mem_id: MemId) {
+        let path = match self.design.get_expr(path_id).clone() {
+            Expr::StringLit(s) => s,
+            _ => {
+                eprintln!("$readmem: file path must be a string literal");
+                return;
+            }
+        };
+        let content = match std::fs::read_to_string(path.as_str()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("$readmem: failed to read '{}': {}", path, e);
+                return;
+            }
+        };
+        let elem_width = self.design.get_mem(mem_id).elem_width;
+        let radix = match task {
+            SysTask::ReadMemB => 2,
+            _ => 16,
+        };
+        let mut addr: u32 = 0;
+        for token in strip_readmem_comments(&content).split_whitespace() {
+            if let Some(addr_text) = token.strip_prefix('@') {
+                if let Ok(a) = u32::from_str_radix(addr_text, 16) {
+                    addr = a;
+                }
+                continue;
+            }
+            let val = parse_readmem_token(token, radix, elem_width);
+            self.mem_values.insert((mem_id.0, addr), val);
+            addr += 1;
+        }
+    }
+
+    pub fn eval_expr(&mut self, id: ExprId) -> LogicVal {
         match self.design.get_expr(id).clone() {
             Expr::Const(v) => v,
             Expr::StringLit(_) => LogicVal::ZERO,
@@ -405,6 +520,107 @@ impl Interpreter {
                     .cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0))
             }
+            Expr::CallResult(setup, ret_net) => {
+                for sid in setup {
+                    self.exec_sync_stmt(sid);
+                }
+                self.read_net(ret_net)
+            }
+            Expr::Random(seed) => {
+                if let Some(seed_id) = seed {
+                    let s = self.eval_expr(seed_id).pad_to_width(64);
+                    self.rng_state = s;
+                }
+                let v = self.next_rand_u32();
+                LogicVal::new(32, v as u64, 0)
+            }
+        }
+    }
+
+    /// xorshift64* による軽量PRNG。固定シードのため再現性がある
+    /// （iverilog等の `$random` とは数値が一致しない）。
+    fn next_rand_u32(&mut self) -> u32 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng_state = x;
+        (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32
+    }
+
+    /// Runs a statement to completion without going through the scheduler.
+    /// Used for function-call bodies, which Verilog requires to execute in zero time.
+    /// `Delay`/`EventCtl` inside such bodies are non-conformant but tolerated by
+    /// running their inner statement immediately.
+    fn exec_sync_stmt(&mut self, id: StmtId) {
+        match self.design.get_stmt(id).clone() {
+            Stmt::Null => {}
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    self.exec_sync_stmt(s);
+                }
+            }
+            Stmt::If(cond_id, then_id, else_id) => {
+                let cond = self.eval_expr(cond_id);
+                if cond.is_known() && cond.pad_to_width(cond.width()) != 0 {
+                    self.exec_sync_stmt(then_id);
+                } else if let Some(e) = else_id {
+                    self.exec_sync_stmt(e);
+                }
+            }
+            Stmt::Case { sel, arms, default, .. } => {
+                let sel_val = self.eval_expr(sel);
+                let mut matched = false;
+                'outer: for (pats, body) in &arms {
+                    for &pid in pats {
+                        let pv = self.eval_expr(pid);
+                        if sel_val.case_eq(&pv) == LogicVal::ONE {
+                            self.exec_sync_stmt(*body);
+                            matched = true;
+                            break 'outer;
+                        }
+                    }
+                }
+                if !matched {
+                    if let Some(d) = default {
+                        self.exec_sync_stmt(d);
+                    }
+                }
+            }
+            Stmt::BlockingAssign(lval, expr_id) | Stmt::NbaAssign(lval, expr_id) => {
+                let val = self.eval_expr(expr_id);
+                let old = self.get_lval_val(&lval);
+                self.write_lvalue(&lval, val.clone());
+                self.trigger_sensitivity(&lval, old.as_ref(), &val);
+            }
+            Stmt::Delay(_, body) | Stmt::EventCtl(_, body) => {
+                self.exec_sync_stmt(body);
+            }
+            Stmt::SysCall(task, args) => {
+                self.exec_syscall(task, &args);
+            }
+            Stmt::ReadMem(task, path_id, mem_id) => {
+                self.exec_readmem(task, path_id, mem_id);
+            }
+            Stmt::While(cond_id, body_id) => {
+                for _ in 0..1_000_000 {
+                    let cond = self.eval_expr(cond_id);
+                    if !cond.is_known() || cond.pad_to_width(cond.width()) == 0 { break; }
+                    self.exec_sync_stmt(body_id);
+                }
+            }
+            Stmt::NamedBlock(_, stmts) => {
+                for s in stmts {
+                    self.exec_sync_stmt(s);
+                }
+            }
+            // 関数本体内のdisable/forkは未対応のサブセット（zero-time実行のため意味を持たない）。
+            Stmt::Disable(_) => {}
+            Stmt::Fork(branches) => {
+                for b in branches {
+                    self.exec_sync_stmt(b);
+                }
+            }
         }
     }
 
@@ -416,10 +632,10 @@ impl Interpreter {
         })
     }
 
-    fn get_lval_val(&self, lval: &LValue) -> Option<LogicVal> {
+    fn get_lval_val(&mut self, lval: &LValue) -> Option<LogicVal> {
         match lval {
             LValue::Net(id) => self.net_values.get(id).cloned(),
-            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) => {
+            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => {
                 self.net_values.get(id).cloned()
             }
             LValue::MemWrite(mem_id, idx_id) => {
@@ -433,11 +649,30 @@ impl Interpreter {
         match lval {
             LValue::Net(id) => {
                 let net_id = *id;
+                let w = self.design.get_net(net_id).width;
+                let val = if val.width() == w { val } else { val.resize(w) };
                 self.net_values.insert(net_id, val.clone());
                 self.vcd_record_net_change(net_id, &val);
             }
             LValue::BitSelect(id, bit) => {
                 let net_id = *id;
+                let w = self.design.get_net(net_id).width;
+                let old = self.net_values.get(&net_id).cloned()
+                    .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
+                let oa = old.pad_to_width(w);
+                let ob = old.pad_to_width_b(w);
+                let ba = val.pad_to_width(1);
+                let bb = val.pad_to_width_b(1);
+                let m = 1u64 << bit;
+                let na = (oa & !m) | (ba << bit);
+                let nb = (ob & !m) | (bb << bit);
+                let new_val = LogicVal::new(w as u16, na, nb);
+                self.net_values.insert(net_id, new_val.clone());
+                self.vcd_record_net_change(net_id, &new_val);
+            }
+            LValue::DynBitSelect(id, idx_id) => {
+                let net_id = *id;
+                let bit = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 let w = self.design.get_net(net_id).width;
                 let old = self.net_values.get(&net_id).cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
@@ -478,7 +713,7 @@ impl Interpreter {
 
     fn trigger_sensitivity(&mut self, lval: &LValue, old: Option<&LogicVal>, new: &LogicVal) {
         let net_id = match lval {
-            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) => *id,
+            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => *id,
             LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
         };
 
@@ -534,11 +769,12 @@ impl Interpreter {
         }
     }
 
-    fn format_args(&self, args: &[ExprId]) -> String {
+    fn format_args(&mut self, args: &[ExprId]) -> String {
         if args.is_empty() { return String::new(); }
         let first = self.design.get_expr(args[0]).clone();
         if let Expr::StringLit(fmt) = first {
-            format_string(&fmt, &args[1..], self, self.now)
+            let now = self.now;
+            format_string(&fmt, &args[1..], self, now)
         } else {
             // No format string: space-separated values
             args.iter().map(|&id| self.eval_expr(id).to_string()).collect::<Vec<_>>().join(" ")
@@ -624,15 +860,16 @@ impl Interpreter {
     }
 }
 
-fn format_string(fmt: &str, args: &[ExprId], interp: &Interpreter, now: u64) -> String {
+fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64) -> String {
     let mut result = String::new();
     let mut arg_idx = 0;
     let mut chars = fmt.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '%' {
-            // Skip numeric width/precision modifiers (e.g. %0d, %8d)
+            // 数字幅修飾子（例: %0d, %8d, %08h）を捕捉する。
+            let mut width_digits = String::new();
             while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                chars.next();
+                width_digits.push(chars.next().unwrap());
             }
             let spec = chars.next().unwrap_or('%');
             let val = if arg_idx < args.len() {
@@ -641,11 +878,25 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &Interpreter, now: u64) -> 
                 LogicVal::ZERO
             };
             arg_idx += 1;
+            let width = val.width();
             match spec {
-                'd' | 'D' => result.push_str(&val.pad_to_width(val.width()).to_string()),
-                'h' | 'H' => result.push_str(&format!("{:x}", val.pad_to_width(val.width()))),
-                'b' | 'B' => result.push_str(&format!("{:b}", val.pad_to_width(val.width()))),
-                'o' | 'O' => result.push_str(&format!("{:o}", val.pad_to_width(val.width()))),
+                'd' | 'D' | 'h' | 'H' | 'b' | 'B' | 'o' | 'O' => {
+                    // 64bit超（Large値）は既存の生表示のまま対象外。
+                    if width > 64 {
+                        let n = val.pad_to_width(width);
+                        result.push_str(&match spec {
+                            'd' | 'D' => n.to_string(),
+                            'h' | 'H' => format!("{:x}", n),
+                            'b' | 'B' => format!("{:b}", n),
+                            _ => format!("{:o}", n),
+                        });
+                    } else {
+                        let a = val.pad_to_width(width);
+                        let b = val.pad_to_width_b(width);
+                        let natural = natural_repr(spec, a, b, width);
+                        result.push_str(&apply_width_modifier(spec, width, &width_digits, &natural));
+                    }
+                }
                 's' | 'S' => result.push_str(&val.to_string()),
                 't' | 'T' => { arg_idx -= 1; result.push_str(&now.to_string()); }
                 '%' => { arg_idx -= 1; result.push('%'); }
@@ -664,6 +915,93 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &Interpreter, now: u64) -> 
         }
     }
     result
+}
+
+/// グループ（%bなら1bit、%hなら4bit、%oなら3bit、%dなら値全体）内のa/bビット
+/// （マスク済み）から表示文字を決める。known_digitは全bit既知時の数字変換。
+/// 既知/不明混在、またはX型/Z型unknown混在は大文字 `X` にフォールバックする
+/// （iverilogの実測挙動: 全bit不明かつ単一種別ならx/z小文字、それ以外は大文字）。
+fn group_char(a_grp: u64, b_grp: u64, mask: u64, known_digit: impl Fn(u64) -> char) -> char {
+    if b_grp == 0 {
+        return known_digit(a_grp);
+    }
+    let unknown_a = a_grp & b_grp; // X型unknownビット
+    let has_x = unknown_a != 0;
+    let has_z = (b_grp & !unknown_a) != 0; // Z型unknownビット
+    let fully_unknown = b_grp == mask;
+    match (fully_unknown, has_x, has_z) {
+        (true, true, false) => 'x',
+        (true, false, true) => 'z',
+        (false, true, false) => 'X',
+        (false, false, true) => 'Z',
+        _ => 'X',
+    }
+}
+
+/// 幅修飾子を考慮しない、ビット幅由来の桁数で計算した「自然表示」文字列を返す。
+fn natural_repr(spec: char, a: u64, b: u64, width: u32) -> String {
+    match spec {
+        'b' | 'B' => (0..width).rev()
+            .map(|bit| group_char((a >> bit) & 1, (b >> bit) & 1, 1, |v| if v == 0 { '0' } else { '1' }))
+            .collect(),
+        'h' | 'H' => {
+            let digits = (((width + 3) / 4).max(1)) as usize;
+            (0..digits as u32).rev()
+                .map(|i| {
+                    let s = i * 4;
+                    let mask = (1u64 << (4.min(width - s))) - 1;
+                    group_char((a >> s) & mask, (b >> s) & mask, mask, |v| std::char::from_digit(v as u32, 16).unwrap())
+                })
+                .collect()
+        }
+        'o' | 'O' => {
+            let digits = (((width + 2) / 3).max(1)) as usize;
+            (0..digits as u32).rev()
+                .map(|i| {
+                    let s = i * 3;
+                    let mask = (1u64 << (3.min(width - s))) - 1;
+                    group_char((a >> s) & mask, (b >> s) & mask, mask, |v| std::char::from_digit(v as u32, 8).unwrap())
+                })
+                .collect()
+        }
+        _ => {
+            // 'd' | 'D'（パディングなしの最小表示。既定の幅パディングは
+            // apply_width_modifier側で行う）
+            if b == 0 {
+                a.to_string()
+            } else {
+                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                group_char(a, b, mask, |_| unreachable!()).to_string()
+            }
+        }
+    }
+}
+
+/// 数字幅修飾子（空文字列=なし、"0"=最小桁数、それ以外=明示幅N）を自然表示文字列に適用する。
+/// `%d`のみ、幅修飾子なしの場合にビット幅由来の桁数を空白パディングで補う
+/// （`%h`/`%o`/`%b`は`natural_repr`が既にビット幅由来の桁数を生成済みのため不要）。
+fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &str) -> String {
+    if width_digits.is_empty() {
+        if spec == 'd' || spec == 'D' {
+            let max = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let digits = max.to_string().len();
+            return format!("{:>width$}", natural, width = digits);
+        }
+        return natural.to_string();
+    }
+    if width_digits == "0" {
+        let trimmed = natural.trim_start_matches('0');
+        return if trimmed.is_empty() { "0".to_string() } else { trimmed.to_string() };
+    }
+    let n: usize = width_digits.parse().unwrap_or(0);
+    if natural.len() >= n {
+        return natural.to_string();
+    }
+    if width_digits.starts_with('0') {
+        format!("{:0>width$}", natural, width = n)
+    } else {
+        format!("{:>width$}", natural, width = n)
+    }
 }
 
 fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal) -> LogicVal {
@@ -715,5 +1053,190 @@ fn apply_unop(op: UnOp, v: &LogicVal, _now: u64) -> LogicVal {
         UnOp::RedNor => v.reduce_nor(),
         UnOp::RedXor => v.reduce_xor(),
         UnOp::RedXnor => v.reduce_xnor(),
+    }
+}
+
+/// `//` 行コメントと `/* */` ブロックコメントを取り除く（`$readmemh`/`$readmemb` ファイル用）。
+fn strip_readmem_comments(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '/' && chars.peek() == Some(&'/') {
+            while let Some(&n) = chars.peek() {
+                if n == '\n' { break; }
+                chars.next();
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(n) = chars.next() {
+                if n == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `$readmemh`/`$readmemb` の値トークンを `elem_width` ビットの `LogicVal` にパースする。
+/// `radix` は 16（hex）または 2（bin）。`x`/`X`/`z`/`Z` はその桁の全ビットをX/Zにし、
+/// `_` は読み飛ばす。
+fn parse_readmem_token(token: &str, radix: u32, elem_width: u32) -> LogicVal {
+    let bits_per_digit = if radix == 2 { 1 } else { 4 };
+    let n_chunks = ((elem_width as usize) + 63) / 64;
+    let mut a = vec![0u64; n_chunks];
+    let mut b = vec![0u64; n_chunks];
+    let mut bitpos: usize = 0;
+    for ch in token.chars().filter(|&c| c != '_').rev() {
+        if bitpos >= elem_width as usize {
+            break;
+        }
+        // digit_bit(bit) returns (aval, bval) for the given bit position within this digit.
+        let digit_bit: Box<dyn Fn(u32) -> (u64, u64)> = match ch {
+            'x' | 'X' => Box::new(|_| (1, 1)),
+            'z' | 'Z' => Box::new(|_| (0, 1)),
+            _ => match ch.to_digit(radix) {
+                Some(d) => Box::new(move |bit| (((d as u64) >> bit) & 1, 0)),
+                None => continue,
+            },
+        };
+        for bit in 0..bits_per_digit {
+            if bitpos >= elem_width as usize {
+                break;
+            }
+            let (av, bv) = digit_bit(bit);
+            let chunk = bitpos / 64;
+            let off = bitpos % 64;
+            if av != 0 {
+                a[chunk] |= 1u64 << off;
+            }
+            if bv != 0 {
+                b[chunk] |= 1u64 << off;
+            }
+            bitpos += 1;
+        }
+    }
+    LogicVal::from_chunks(elem_width, &a, &b)
+}
+
+#[cfg(test)]
+mod readmem_tests {
+    use super::*;
+
+    #[test]
+    fn strips_line_and_block_comments() {
+        let s = strip_readmem_comments("aa // line\nbb /* block */ cc");
+        assert_eq!(s, "aa \nbb  cc");
+    }
+
+    #[test]
+    fn parses_hex_digits() {
+        let v = parse_readmem_token("a5", 16, 8);
+        assert_eq!(v.pad_to_width(8), 0xa5);
+        assert!(v.is_known());
+    }
+
+    #[test]
+    fn parses_x_digit_marks_whole_nibble_unknown() {
+        let v = parse_readmem_token("x", 16, 4);
+        assert!(!v.is_known());
+        for bit in 0..4 {
+            assert_eq!(v.bit_select(bit).unwrap(), LogicVal::X);
+        }
+    }
+
+    #[test]
+    fn parses_z_digit_marks_whole_nibble_z() {
+        let v = parse_readmem_token("z", 16, 4);
+        for bit in 0..4 {
+            assert_eq!(v.bit_select(bit).unwrap(), LogicVal::Z);
+        }
+    }
+
+    #[test]
+    fn parses_binary_digits() {
+        let v = parse_readmem_token("101", 2, 3);
+        assert_eq!(v.pad_to_width(3), 0b101);
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    const A: u64 = 0b1010_1100; // 8'b1010_1100 = 0xAC = 172
+    const FULL: u64 = 0xFF;
+    const TOP_NIBBLE_X: u64 = 0xF0; // 上位4bit known(1010)、下位4bit X
+    const LOW_NIBBLE: u64 = 0x0F;
+
+    fn repr(spec: char, a: u64, b: u64) -> String {
+        apply_width_modifier(spec, 8, "", &natural_repr(spec, a, b, 8))
+    }
+
+    // 既知値（幅修飾子なし）: /tmp/xz.v の iverilog実測"known: d=172 h=ac o=254 b=10101100"と一致。
+    #[test]
+    fn known_value_default_padding() {
+        assert_eq!(repr('d', A, 0), "172");
+        assert_eq!(repr('h', A, 0), "ac");
+        assert_eq!(repr('o', A, 0), "254");
+        assert_eq!(repr('b', A, 0), "10101100");
+    }
+
+    // 全bit X: iverilog実測 "allx: d=  x h=xx o=xxx b=xxxxxxxx"
+    #[test]
+    fn all_x_value() {
+        assert_eq!(repr('d', FULL, FULL), "  x");
+        assert_eq!(repr('h', FULL, FULL), "xx");
+        assert_eq!(repr('o', FULL, FULL), "xxx");
+        assert_eq!(repr('b', FULL, FULL), "xxxxxxxx");
+    }
+
+    // 全bit Z: iverilog実測 "allz: d=  z h=zz o=zzz b=zzzzzzzz"
+    #[test]
+    fn all_z_value() {
+        assert_eq!(repr('d', 0, FULL), "  z");
+        assert_eq!(repr('h', 0, FULL), "zz");
+        assert_eq!(repr('o', 0, FULL), "zzz");
+        assert_eq!(repr('b', 0, FULL), "zzzzzzzz");
+    }
+
+    // 上位nibble既知(1010)・下位nibble全X: iverilog実測 "mixx: d=  X h=ax o=2Xx b=1010xxxx"
+    #[test]
+    fn partial_x_value() {
+        let a = (TOP_NIBBLE_X & A) | LOW_NIBBLE; // 上位4bit=known(1010)、下位4bitはX型(a=b=1)
+        let b = LOW_NIBBLE;       // 下位4bitがX
+        assert_eq!(repr('d', a, b), "  X");
+        assert_eq!(repr('h', a, b), "ax");
+        assert_eq!(repr('o', a, b), "2Xx");
+        assert_eq!(repr('b', a, b), "1010xxxx");
+    }
+
+    // 上位nibble既知(1010)・下位nibble全Z: iverilog実測 "mixz: d=  Z h=az o=2Zz b=1010zzzz"
+    #[test]
+    fn partial_z_value() {
+        let a = TOP_NIBBLE_X & A; // 下位4bitはZなのでa側は0のまま
+        let b = LOW_NIBBLE;
+        assert_eq!(repr('d', a, b), "  Z");
+        assert_eq!(repr('h', a, b), "az");
+        assert_eq!(repr('o', a, b), "2Zz");
+        assert_eq!(repr('b', a, b), "1010zzzz");
+    }
+
+    #[test]
+    fn explicit_width_and_zero_modifier() {
+        // iverilog実測: "width: d=  172 h=  ac o= 254 b=  10101100"
+        assert_eq!(apply_width_modifier('d', 8, "5", &natural_repr('d', A, 0, 8)), "  172");
+        assert_eq!(apply_width_modifier('h', 8, "4", &natural_repr('h', A, 0, 8)), "  ac");
+        assert_eq!(apply_width_modifier('o', 8, "4", &natural_repr('o', A, 0, 8)), " 254");
+        assert_eq!(apply_width_modifier('b', 8, "10", &natural_repr('b', A, 0, 8)), "  10101100");
+        // iverilog実測: "zpad: d=00172 h=00ac"
+        assert_eq!(apply_width_modifier('d', 8, "05", &natural_repr('d', A, 0, 8)), "00172");
+        assert_eq!(apply_width_modifier('h', 8, "04", &natural_repr('h', A, 0, 8)), "00ac");
+        // iverilog実測: "zero: d=172 h=ac"（%0d/%0h は最小桁数）
+        assert_eq!(apply_width_modifier('d', 8, "0", &natural_repr('d', A, 0, 8)), "172");
+        assert_eq!(apply_width_modifier('h', 8, "0", &natural_repr('h', A, 0, 8)), "ac");
     }
 }

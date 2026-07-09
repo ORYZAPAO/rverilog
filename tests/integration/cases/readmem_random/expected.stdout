@@ -1,0 +1,10 @@
+mem[0]=00
+mem[1]=11
+mem[2]=22
+mem[3]=00
+mem[4]=00
+mem[5]=aa
+rand0=325595736
+rand1=258385808
+rand_seeded=144411322
+$finish at time 0
