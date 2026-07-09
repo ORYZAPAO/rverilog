@@ -497,7 +497,9 @@ impl Interpreter {
             Expr::Bin(op, l, r) => {
                 let lv = self.eval_expr(l);
                 let rv = self.eval_expr(r);
-                apply_binop(op, &lv, &rv)
+                let l_signed = self.design.expr_signed[l.0 as usize];
+                let r_signed = self.design.expr_signed[r.0 as usize];
+                apply_binop(op, &lv, &rv, l_signed, r_signed)
             }
             Expr::Un(op, e) => {
                 let v = self.eval_expr(e);
@@ -877,6 +879,8 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
             } else {
                 LogicVal::ZERO
             };
+            let arg_signed = arg_idx < args.len()
+                && interp.design.expr_signed[args[arg_idx].0 as usize];
             arg_idx += 1;
             let width = val.width();
             match spec {
@@ -893,8 +897,8 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
                     } else {
                         let a = val.pad_to_width(width);
                         let b = val.pad_to_width_b(width);
-                        let natural = natural_repr(spec, a, b, width);
-                        result.push_str(&apply_width_modifier(spec, width, &width_digits, &natural));
+                        let natural = natural_repr(spec, a, b, width, arg_signed);
+                        result.push_str(&apply_width_modifier(spec, width, &width_digits, &natural, arg_signed));
                     }
                 }
                 's' | 'S' => result.push_str(&val.to_string()),
@@ -939,7 +943,9 @@ fn group_char(a_grp: u64, b_grp: u64, mask: u64, known_digit: impl Fn(u64) -> ch
 }
 
 /// 幅修飾子を考慮しない、ビット幅由来の桁数で計算した「自然表示」文字列を返す。
-fn natural_repr(spec: char, a: u64, b: u64, width: u32) -> String {
+/// `signed` は `%d`/`%D` のみで参照し、trueかつMSBが1なら二の補数を負の10進数として表示する
+/// （`%h`/`%o`/`%b`はIEEE準拠でビットパターン表示のみ、signednessの影響を受けない）。
+fn natural_repr(spec: char, a: u64, b: u64, width: u32, signed: bool) -> String {
     match spec {
         'b' | 'B' => (0..width).rev()
             .map(|bit| group_char((a >> bit) & 1, (b >> bit) & 1, 1, |v| if v == 0 { '0' } else { '1' }))
@@ -968,6 +974,13 @@ fn natural_repr(spec: char, a: u64, b: u64, width: u32) -> String {
             // 'd' | 'D'（パディングなしの最小表示。既定の幅パディングは
             // apply_width_modifier側で行う）
             if b == 0 {
+                if signed && width > 0 {
+                    let sign_bit = if width >= 64 { (a >> 63) & 1 } else { (a >> (width - 1)) & 1 };
+                    if sign_bit == 1 {
+                        let signed_val: i64 = if width >= 64 { a as i64 } else { (a as i64) - (1i64 << width) };
+                        return signed_val.to_string();
+                    }
+                }
                 a.to_string()
             } else {
                 let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
@@ -980,11 +993,18 @@ fn natural_repr(spec: char, a: u64, b: u64, width: u32) -> String {
 /// 数字幅修飾子（空文字列=なし、"0"=最小桁数、それ以外=明示幅N）を自然表示文字列に適用する。
 /// `%d`のみ、幅修飾子なしの場合にビット幅由来の桁数を空白パディングで補う
 /// （`%h`/`%o`/`%b`は`natural_repr`が既にビット幅由来の桁数を生成済みのため不要）。
-fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &str) -> String {
+/// `signed`（iverilog実測挙動）: signed値は符号1桁分を常に確保するため、最大正値
+/// `2^(width-1)-1` の桁数+1をフィールド幅とする（unsignedは`2^width-1`の桁数そのまま）。
+fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &str, signed: bool) -> String {
     if width_digits.is_empty() {
         if spec == 'd' || spec == 'D' {
-            let max = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
-            let digits = max.to_string().len();
+            let digits = if signed && width > 0 {
+                let max_pos = if width - 1 >= 64 { u64::MAX } else { (1u64 << (width - 1)) - 1 };
+                max_pos.to_string().len() + 1
+            } else {
+                let max = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                max.to_string().len()
+            };
             return format!("{:>width$}", natural, width = digits);
         }
         return natural.to_string();
@@ -1004,13 +1024,18 @@ fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &st
     }
 }
 
-fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal) -> LogicVal {
+/// `l_signed`/`r_signed` は各オペランドが signed 文脈で評価されたか
+/// （`ElaboratedDesign::expr_signed` 由来）。比較/除算/剰余は両辺が signed の
+/// ときのみ signed 演算を、`>>>` は左辺の signedness のみを見て演算子を選択する
+/// （IEEE 1364-2001 4.5.1: shift 量の符号は結果に影響しない）。
+fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal, l_signed: bool, r_signed: bool) -> LogicVal {
+    let both_signed = l_signed && r_signed;
     match op {
         BinOp::Add => l.add(r),
         BinOp::Sub => l.sub(r),
         BinOp::Mul => l.mul(r),
-        BinOp::Div => l.div(r),
-        BinOp::Mod => l.mod_(r),
+        BinOp::Div => if both_signed { l.div_signed(r) } else { l.div(r) },
+        BinOp::Mod => if both_signed { l.mod_signed(r) } else { l.mod_(r) },
         BinOp::LogAnd => l.log_and(r),
         BinOp::LogOr => l.log_or(r),
         BinOp::BitAnd => l.clone() & r.clone(),
@@ -1023,14 +1048,14 @@ fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal) -> LogicVal {
         BinOp::Ne => l.ne(r),
         BinOp::CaseEq => l.case_eq(r),
         BinOp::CaseNe => l.case_ne(r),
-        BinOp::Lt => l.lt(r),
-        BinOp::Gt => l.gt(r),
-        BinOp::Le => l.le(r),
-        BinOp::Ge => l.ge(r),
+        BinOp::Lt => if both_signed { l.lt_signed(r) } else { l.lt(r) },
+        BinOp::Gt => if both_signed { l.gt_signed(r) } else { l.gt(r) },
+        BinOp::Le => if both_signed { l.le_signed(r) } else { l.le(r) },
+        BinOp::Ge => if both_signed { l.ge_signed(r) } else { l.ge(r) },
         BinOp::Shl => l.shl(r),
         BinOp::Shr => l.shr(r),
         BinOp::Ashl => l.ashl(r),
-        BinOp::Ashr => l.ashr(r),
+        BinOp::Ashr => if l_signed { l.ashr(r) } else { l.shr(r) },
     }
 }
 
@@ -1173,7 +1198,7 @@ mod format_tests {
     const LOW_NIBBLE: u64 = 0x0F;
 
     fn repr(spec: char, a: u64, b: u64) -> String {
-        apply_width_modifier(spec, 8, "", &natural_repr(spec, a, b, 8))
+        apply_width_modifier(spec, 8, "", &natural_repr(spec, a, b, 8, false), false)
     }
 
     // 既知値（幅修飾子なし）: /tmp/xz.v の iverilog実測"known: d=172 h=ac o=254 b=10101100"と一致。
@@ -1228,15 +1253,30 @@ mod format_tests {
     #[test]
     fn explicit_width_and_zero_modifier() {
         // iverilog実測: "width: d=  172 h=  ac o= 254 b=  10101100"
-        assert_eq!(apply_width_modifier('d', 8, "5", &natural_repr('d', A, 0, 8)), "  172");
-        assert_eq!(apply_width_modifier('h', 8, "4", &natural_repr('h', A, 0, 8)), "  ac");
-        assert_eq!(apply_width_modifier('o', 8, "4", &natural_repr('o', A, 0, 8)), " 254");
-        assert_eq!(apply_width_modifier('b', 8, "10", &natural_repr('b', A, 0, 8)), "  10101100");
+        assert_eq!(apply_width_modifier('d', 8, "5", &natural_repr('d', A, 0, 8, false), false), "  172");
+        assert_eq!(apply_width_modifier('h', 8, "4", &natural_repr('h', A, 0, 8, false), false), "  ac");
+        assert_eq!(apply_width_modifier('o', 8, "4", &natural_repr('o', A, 0, 8, false), false), " 254");
+        assert_eq!(apply_width_modifier('b', 8, "10", &natural_repr('b', A, 0, 8, false), false), "  10101100");
         // iverilog実測: "zpad: d=00172 h=00ac"
-        assert_eq!(apply_width_modifier('d', 8, "05", &natural_repr('d', A, 0, 8)), "00172");
-        assert_eq!(apply_width_modifier('h', 8, "04", &natural_repr('h', A, 0, 8)), "00ac");
+        assert_eq!(apply_width_modifier('d', 8, "05", &natural_repr('d', A, 0, 8, false), false), "00172");
+        assert_eq!(apply_width_modifier('h', 8, "04", &natural_repr('h', A, 0, 8, false), false), "00ac");
         // iverilog実測: "zero: d=172 h=ac"（%0d/%0h は最小桁数）
-        assert_eq!(apply_width_modifier('d', 8, "0", &natural_repr('d', A, 0, 8)), "172");
-        assert_eq!(apply_width_modifier('h', 8, "0", &natural_repr('h', A, 0, 8)), "ac");
+        assert_eq!(apply_width_modifier('d', 8, "0", &natural_repr('d', A, 0, 8, false), false), "172");
+        assert_eq!(apply_width_modifier('h', 8, "0", &natural_repr('h', A, 0, 8, false), false), "ac");
+    }
+
+    #[test]
+    fn signed_decimal_negative_value() {
+        // 8bit 0b1010_1100 = 172 (unsigned) / -84 (signed, MSB=1)
+        assert_eq!(natural_repr('d', A, 0, 8, true), "-84");
+        assert_eq!(natural_repr('d', A, 0, 8, false), "172");
+        // %h/%o/%b はsignedでもビットパターン表示のまま変化しない
+        assert_eq!(natural_repr('h', A, 0, 8, true), "ac");
+    }
+
+    #[test]
+    fn signed_decimal_positive_value_unaffected() {
+        let positive: u64 = 0b0101_0000; // MSB=0
+        assert_eq!(natural_repr('d', positive, 0, 8, true), "80");
     }
 }

@@ -43,6 +43,8 @@ pub struct ElaboratedDesign {
     pub top: ScopeId,
     /// net.0 → [process.0] sensitivity reverse table
     pub sensitivity_table: IndexMap<u32, Vec<u32>>,
+    /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）
+    pub expr_signed: Vec<bool>,
 }
 
 impl ElaboratedDesign {
@@ -69,6 +71,7 @@ pub struct NetInfo {
     pub kind: NetKind,
     pub scope: ScopeId,
     pub name: SmolStr,
+    pub is_signed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

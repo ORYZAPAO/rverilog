@@ -320,13 +320,17 @@ M1 完了後のコードレビュー結果。アーキテクチャ（HIR→elab�
 
 ### 重大（シミュレーション結果が誤りになる）
 
-| # | 課題 | 箇所 | 内容 |
+| # | 課題 | 箇所 | 状態 |
 |---|---|---|---|
-| 1 | signed 演算が全面未実装 | `mir/src/ir.rs`, `elab/` | `NetInfo` に `is_signed` がなく符号情報が MIR に伝播しない。`integer` の負数比較、`>>>`、signed の `%d` がすべて unsigned 扱い |
-| 2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
-| 3 | $monitor が $display と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
-| 4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
-| 5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
+| A1 | signed 演算 | `hir::design.rs`/`mir::ir.rs`（`signed`/`is_signed`フィールド）、`elab::elaborate.rs`（`expr_signed`伝搬）、`mir::logicval.rs`（`*_signed`演算群） | **対応済み（2026-07-09）**。net/reg/port/integer/function/task 引数の `signed` 宣言、符号無し10進即値と `'s` 基数リテラルの既定signed扱い、signed比較（`<`/`>`/`<=`/`>=`）・signed除算/剰余・`>>>`の左辺signedness依存・signed `%d` 表示を実装。iverilogとのbit-exact比較テスト`tests/integration/cases/signed/`で検証済み。既知の残課題: 式の最終signednessは子ExprIdからの単純な機械的伝搬（IEEE 4.5.1のcontext-determined規則の一部簡略化）、`width.rs`自体は未着手のまま |
+| A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
+| A3 | $monitor が $display と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
+| A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
+| A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
+| A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
+| A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
+| A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
+| A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
 
 ### 設計と実装の乖離
 
@@ -346,9 +350,16 @@ M1 完了後のコードレビュー結果。アーキテクチャ（HIR→elab�
 
 ### 対応方針
 
-推奨着手順: 課題 1（signed + 幅推論再設計）→ 課題 2 → 課題 3・4（イベントループ
-再構成として一括）→ 課題 7。課題 1 と 3・4 はデータ構造に触るため後回しにするほど
-手戻りが大きい。課題 6 はどのタイミングでも安価。
+1. ~~A1: signed 対応~~ 完了（2026-07-09）
+2. A2: エッジ検出の IEEE 準拠化
+3. A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正（イベントループ再構成として一括）
+4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
+5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
+6. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
 
-課題 2・3・4・7 は、修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0`
-レース、発振検出）を iverilog 比較 CI へ追加してから直すこと。
+補足: A1 で `width.rs` 自体の context-determined 幅推論再設計は見送った（signedness 伝搬のみ
+`ElabCtx.expr_signed` として別経路で実装し、幅計算は既存の elaborate.rs 分散実装のまま）。
+width.rs のスタブ化（D 参照）は依然未解消。
+
+修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0` レース、発振検出）を
+iverilog 比較 CI へ追加してから直すこと（テスト先行）。
