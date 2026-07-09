@@ -1169,3 +1169,67 @@ PLAN.md の設計方針と現行実装の乖離・IEEE 1364 セマンティク�
   disable/fork, $readmem/$random, iverilog 比較 CI）と残タスク優先順を明記
 - 新セクション「実装レビューと課題（2026-07-02）」を追加:
   重大 5 件 / 乖離 3 件 / 軽微 5 件の課題表と対応方針（テスト先行で修正）
+
+## 2026-07-09
+
+### Task
+
+2026-07-02 レビューの実装課題リストを再確認し、推奨着手順の最優先項目である
+signed 演算対応（課題1 / A1）を実装。
+
+### What was done
+
+#### データ構造の拡張
+- `hir::design.rs`: `NetDecl`/`RegDecl`/`PortDecl`/`TfArg`/`FunctionDecl` に `signed: bool` を追加
+- `mir::ir.rs`: `NetInfo` に `is_signed: bool`、`ElaboratedDesign` に `expr_signed: Vec<bool>`
+  （ExprId ごとの signed 文脈フラグ）を追加
+
+#### frontend: signed キーワードのパース
+- `sv_parser::Signing::Signed` ノードを検出する `has_signed()` ヘルパを追加し、
+  net/reg/port/function戻り値/tf引数の各宣言箇所に適用
+- `integer` 宣言は IEEE 1364 通り常に signed=true
+- **重要な追加修正**: 符号無し10進即値（`-7`, `2` 等、基数指定なし）と `'s` 基数指定
+  （`4'sd5` 等）が IEEE 4.8 上 signed 文脈になることが未実装だったため、
+  `HirExpr::SignedConst` バリアントを新設して対応。また `'s` マーカーの
+  パースが未実装で `4'sd5` が常に0になっていたバグも修正
+
+#### elaboration: signedness 伝搬
+- `ElabCtx.expr_signed: Vec<bool>` を追加し、`alloc_expr()` が子 ExprId の
+  signedness から自動計算（IEEE 1364-2001 4.5.1 簡易版: 算術/ビット演算は両辺
+  signed のとき signed、比較/論理演算は常に1bit unsigned、シフトは左辺の
+  signedness を伝播）
+- `SignedConst` は自動計算をバイパスする `alloc_expr_signed()` で明示登録
+
+#### mir::logicval.rs: signed 演算プリミティブ
+- `extend_sign()`（符号拡張）、`sign_bit()`、`as_i64()`（64bit以内のsigned変換）
+- `lt_signed`/`gt_signed`/`le_signed`/`ge_signed`（符号拡張後の二の補数比較）
+- `div_signed`/`mod_signed`（0への切り捨て、Rustの`%`と同じ符号規則）
+- 単体テスト6件追加（符号拡張・signed比較・signed除算/剰余・ashr vs shr）
+
+#### sim::interp.rs: 演算子選択と%dフォーマット
+- `apply_binop` が `l_signed`/`r_signed` を受け取り、Div/Mod/Lt/Gt/Le/Ge は
+  両辺signedのときのみsigned版を、`>>>`は左辺のsignednessのみを見て
+  `ashr`/`shr`を選択（IEEE: シフト量の符号は結果に影響しない）
+- `%d`表示: `natural_repr`が`signed`引数を受け取りMSB=1なら二の補数を負の
+  10進数として表示。`apply_width_modifier`のデフォルト幅計算もsigned時は
+  「最大正値の桁数+1（符号分）」に修正（iverilog実測: 32bit signedで11桁、
+  以前のunsigned式(10桁)から+1個の差分をiverilog比較テストで検出して修正）
+
+#### テスト
+- `tests/integration/cases/signed/`を新設。signed比較・signed除算/剰余・
+  `>>>`のsigned/unsigned切替・signed `%d`表示を検証する`dut.v`を作成し、
+  iverilogの実行結果をそのまま`expected.stdout`として採用
+- `test_signed`（integration.rs）・`compare_signed`（iverilog_compare.rs）を追加
+
+### Result
+
+✅ `cargo build --workspace` 成功
+✅ `cargo clippy --workspace --all-targets` エラーなし
+✅ `cargo test --workspace` 全41テスト通過（新規signed単体テスト8件・
+   integration 1件・iverilog比較1件を含む）
+✅ `compare_signed`（iverilog実行環境との bit-exact 比較）通過
+
+### Next
+
+- 実装課題 A2: エッジ検出の IEEE 準拠化（X→1 posedge 検出）
+- `elab/src/width.rs` の context-determined 幅推論再設計は今回見送り（別課題として残存）
