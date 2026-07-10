@@ -1174,8 +1174,71 @@ PLAN.md の設計方針と現行実装の乖離・IEEE 1364 セマンティク�
 
 ### Task
 
-2026-07-02 レビューの実装課題リストを再確認し、推奨着手順の最優先項目である
-signed 演算対応（課題1 / A1）を実装。
+master ベースで実装課題の棚卸しを行い、PLAN.md に「実装課題」セクションとして追記。
+
+### What was done
+
+- コードベース全体（frontend/elab/mir/sim/vcd_out/cli）を調査し、未対応構文・
+  コードレベルの負債（TODO/スタブ）・既知の近似・システムタスク不足・幅/符号推論の
+  ギャップを洗い出した
+- 未マージブランチ（`feat/func-task-gates`、`feat/generate-disable-fork`、
+  `docs/implementation-review`）と突合し、ブランチ側で解決済みの項目
+  （function/task、generate/genvar、disable/fork-join、gate primitive、
+  $readmemh/$readmemb/$random、iverilog 比較 CI）には「※未マージ」と注記
+- PLAN.md 末尾に「実装課題（2026-07-09 時点、master ベース）」を追記。
+  正確性 9 件（A1-A9）・未対応言語機能・システムタスク不足・設計乖離/死コード 4 件・
+  テスト/CI・軽微 5 件の 6 分類と推奨着手順を記録
+- `docs/implementation-review` ブランチの PLAN.md に既存の
+  「実装レビューと課題（2026-07-02）」があるため、マージ時に統合する旨を明記
+
+### Notes
+
+- 最優先は signed 対応（A1、width.rs 再設計とセット）。データ構造に触るため
+  後回しにするほど手戻りが大きい
+- 修正前に iverilog 比較 CI へテストケースを追加するテスト先行方針
+
+---
+
+## 2026-07-09 (続き)
+
+### Task
+
+未マージ 3 ブランチ（`feat/func-task-gates`、`feat/generate-disable-fork`、
+`docs/implementation-review`）を master に統合。実装課題の推奨着手順 0 番。
+
+### What was done
+
+- ブランチ間の祖先関係を確認: `docs/implementation-review` が他 2 ブランチを
+  完全に含む単一の直列統合ブランチであることが判明（マージは 1 回で済んだ）
+- `git merge --no-ff docs/implementation-review` を実行。PLAN.md/DIARY.md が
+  コンフリクト（両ブランチが独立に追記していたため）
+  - DIARY.md: ブランチ側のエントリ（2026-06-18〜07-02）を自分の 07-09 エントリの
+    前に時系列で並べ替えて統合
+  - PLAN.md: 「実装課題（2026-07-09）」と「実装レビューと課題（2026-07-02）」の
+    重複 2 セクションを 1 つに統合。「※未マージ」注記を解消し、branch 側のみに
+    あった軽微課題（disable の同一プロセス制限、$random の iverilog 非互換）を
+    軽微セクションへ統合。テスト/CI セクションを現状（iverilog 比較 CI 導入済み、
+    統合テスト 8 ケース）に更新
+- `cargo build --workspace` / `cargo test --workspace` で検証
+
+### Result
+
+✅ マージ成功、コンフリクト解消
+✅ `cargo build --workspace` 成功（dead-code warning 3 件のみ）
+✅ `cargo test --workspace` 全 39 テスト通過（unit 22 + integration 8 + iverilog_compare 7 +
+   frontend 1 + doc-tests 0、iverilog 実行環境あり）
+
+### Next
+
+- 実装課題 A1: signed 演算対応（`elab/src/width.rs` の幅・符号推論再設計とセット）
+
+---
+
+## 2026-07-09 (続き2)
+
+### Task
+
+実装課題リストの推奨着手順1番、signed 演算対応（A1）を実装。
 
 ### What was done
 

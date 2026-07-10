@@ -313,18 +313,21 @@ CLI 引数:
 - **vcd クレートの十分性**: 書込のみなので恐らく問題なし、不足時は自前 writer 化
 - **決定論性**: HashMap 順序による非決定論を避けるため `IndexMap` または `Vec` 経由で走査
 
-## 実装レビューと課題（2026-07-02）
+## 実装課題（2026-07-09 マージ後）
 
-M1 完了後のコードレビュー結果。アーキテクチャ（HIR→elab→MIR→イベント駆動 interp、
-4 値 aval/bval、sv-parser）自体は健全で方針変更は不要。ただし以下の乖離・課題がある。
+M1 マージ後のコードベース全体の棚卸し結果。2026-07-02 レビュー（旧 `docs/implementation-review`
+ブランチ）と 2026-07-09 の再調査を統合。`feat/func-task-gates` / `feat/generate-disable-fork` /
+`docs/implementation-review` の 3 ブランチは本セクション執筆時点で master にマージ済み
+（function/task/gate primitive/generate/genvar/disable/fork-join/$readmemh/$readmemb/$random/
+iverilog 出力比較 CI 導入済み）。
 
-### 重大（シミュレーション結果が誤りになる）
+### A. 正確性（シミュレーション結果が誤りになる）
 
 | # | 課題 | 箇所 | 状態 |
 |---|---|---|---|
 | A1 | signed 演算 | `hir::design.rs`/`mir::ir.rs`（`signed`/`is_signed`フィールド）、`elab::elaborate.rs`（`expr_signed`伝搬）、`mir::logicval.rs`（`*_signed`演算群） | **対応済み（2026-07-09）**。net/reg/port/integer/function/task 引数の `signed` 宣言、符号無し10進即値と `'s` 基数リテラルの既定signed扱い、signed比較（`<`/`>`/`<=`/`>=`）・signed除算/剰余・`>>>`の左辺signedness依存・signed `%d` 表示を実装。iverilogとのbit-exact比較テスト`tests/integration/cases/signed/`で検証済み。既知の残課題: 式の最終signednessは子ExprIdからの単純な機械的伝搬（IEEE 4.5.1のcontext-determined規則の一部簡略化）、`width.rs`自体は未着手のまま |
 | A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
-| A3 | $monitor が $display と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
+| A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
 | A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
 | A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
 | A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
@@ -332,23 +335,53 @@ M1 完了後のコードレビュー結果。アーキテクチャ（HIR→elab�
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
 | A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
 
-### 設計と実装の乖離
+### B. 未対応の言語機能
 
-| # | 課題 | 箇所 | 内容 |
-|---|---|---|---|
-| 6 | scheduler.rs が死んだコード | `sim/src/scheduler.rs` | `run_step` は TODO スタブのまま、実ループは `Interpreter::run` に別実装。未使用の `future: VecDeque` は時刻順ソートされないバグも内包。削除または interp ループの移設で一本化する |
-| 7 | 連続代入が総当たり固定点ループ | `sim/src/interp.rs` `eval_conts` | 毎 δ サイクル全 assign を最大 200 回再評価。本計画の「NetId→プロセス逆引きテーブル」方式と乖離、規模で性能劣化。200 回打ち切りは発振回路で黙って誤結果（最低限、警告を出す） |
-| 8 | width.rs が実質スタブ | `elab/src/width.rs` | 幅推論は elaborate.rs に分散し、IEEE の context-determined width ルールが体系実装されていない。MIR の Expr に幅情報が載らず、signed 対応（課題 1）の障害になる |
+- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: `defparam`、`specify`、UDP は
+  `lower.rs` の `_ => {}` catch-all で無言スキップされる。最低限 `UnsupportedConstruct` エラーに
+  すべき
+- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子、
+  式中の関数呼び出し
+- `real`/`realtime` が型検査なしで 1bit reg として解釈される
+- `disable` は同一プロセス内のみ対応、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
 
-### 軽微（既知の割り切り）
+### C. システムタスク・関数の不足
+
+- 未実装: `$stop`、`$strobe`、`$fopen`/`$fclose`/`$fwrite` 等ファイル I/O、
+  `$value$plusargs`/`$test$plusargs`、`$realtime`、`$signed`/`$unsigned`、`$dumpoff`/`$dumpon`
+- 式の中の `$time` が未対応（`eval_expr` に SysFunc 分岐がない。`$clog2` は elaboration 時の
+  定数畳み込みでのみ動作）
+- `$random` は iverilog と数値非互換（固定シード xorshift64*、bit-exact 一致は目標外）
+
+### D. 設計と実装の乖離・死コード
+
+- `sim/src/scheduler.rs` が TODO スタブのまま死コード。実イベントループは `Interpreter::run` に
+  別実装されており、未使用の `future: VecDeque` は時刻順ソートされないバグも内包。
+  削除するか interp ループを移設して一本化する
+- `sim/src/systask.rs` も全関数 TODO スタブで `interp.rs::exec_syscall` と重複（`lib.rs` で
+  pub use されたまま）
+- 連続代入が計画の「NetId→プロセス逆引きテーブル」方式でなく総当たり固定点ループ
+  （`interp.rs` `eval_conts`、最大 200 回打ち切り）。規模で性能劣化し、発振回路で黙って誤結果
+  （最低限、打ち切り時に警告を出す）
+- `elab/src/width.rs` が実質スタブ（14 行）。IEEE の context-determined 幅推論が体系実装されず
+  幅処理が elaborate.rs に分散。A1（signed 対応）の障害になる
+
+### E. テスト・CI
+
+- iverilog 出力比較 CI 導入済み（`.github/workflows/ci.yml`、`crates/cli/tests/iverilog_compare.rs`）
+- fmt/clippy ジョブは未導入
+- 統合テストは 8 ケース（counter4/fifo_sync/disable_fork/format_xz/func_task/gates/generate/
+  readmem_random）。サブセット外構文のエラーを確認する負パステストはまだない
+
+### F. 軽微
 
 - `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
-- `casez`/`casex` が `case_eq` と同一実装（ワイルドカードマッチ未実装の可能性、要確認）
-- `disable` は同一プロセス内のみ、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
-- `$display("%s", "文字列引数")` が動作しない（StringLit の eval が ZERO を返す）
-- 64bit 超の乗除算は常に X、`$random` は iverilog と数値非互換（固定シード xorshift64*）
+- `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
+- `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
+- 連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）
+- リポジトリの CLAUDE.md が空、`tests/rtl/fifo_counter.v` が未使用
 
-### 対応方針
+### 推奨着手順
 
 1. ~~A1: signed 対応~~ 完了（2026-07-09）
 2. A2: エッジ検出の IEEE 準拠化
