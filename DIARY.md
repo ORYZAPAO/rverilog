@@ -1342,3 +1342,37 @@ VCD 波形が全く出力されない不具合を調査・修正。
 
 - 実装課題 A2: エッジ検出の IEEE 準拠化（X→1 posedge 検出）
 - `elab/src/width.rs` の context-determined 幅推論再設計は今回見送り（別課題として残存）
+
+## 2026-07-10 (2)
+
+### Task
+
+「このシミュレータの SystemVerilog 仕様の準拠程度」について調査依頼を受け、
+コードベース実地調査を実施。結果を PLAN.md に反映。
+
+### What was done
+
+#### 調査
+- `crates/frontend/src/lower.rs` の SV 構文分岐（`always_ff` 等の未対応確認）、
+  `crates/mir/src/ir.rs` の `SysTask`/`BinOp`/`Stmt` 列挙、
+  `crates/sim/src/interp.rs::exec_syscall` の実装済みシステムタスクを直接調査
+- `lower_loop_stmt` が `LS::For` のみ対応し、`while`/`repeat`/`forever` は
+  明示エラーになることをコードで確認
+- `lower.rs` 内の複数の `_ => {}` catch-all（`defparam`/`specify`/UDP 等が
+  無言スキップされる箇所）を再確認。既存の実装課題 B 節と同一問題であることを確認
+- PLAN.md の Context 節に「Verilog-2001 サブセット」が当初からの目標として
+  明記されていることを再確認し、SV 準拠評価はスコープ外である旨を結論に含めた
+
+#### 反映
+- PLAN.md に「SystemVerilog 準拠度調査（2026-07-10）」節を追加。
+  SV 固有機能の対応状況表、Verilog-2001 サブセットとしての評価、
+  既存の実装課題節（特に B: 無言スキップ診断化）との関連付けを記載
+
+### Result
+
+✅ 実コード（frontend/mir/sim の3クレート）を根拠に調査完了、PLAN.md 反映済み
+✅ 既存の実装課題節との重複を避け、関連箇所への参照リンクとして記述
+
+### Next
+
+- 実装課題節の推奨着手順（A2 → A3/A4 → D → B）は変更なし。優先度は据え置き
