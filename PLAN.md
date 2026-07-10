@@ -329,7 +329,7 @@ iverilog 出力比較 CI 導入済み）。
 | A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
 | A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
 | A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
-| A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue` | ビット/部分選択の書き込みパスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
+| A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
 | A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
 | A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |

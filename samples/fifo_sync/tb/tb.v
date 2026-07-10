@@ -25,7 +25,8 @@ fifo_sync #(.WIDTH(WIDTH), .DEPTH(DEPTH)) dut (
 );
 
 initial begin
-    $display("Starting FIFO test");
+  $dumpvars(0);
+  $display("Starting FIFO test");
     clk = 0;
     rst = 1;
     wr_en = 0;
