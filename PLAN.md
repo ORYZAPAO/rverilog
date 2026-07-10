@@ -396,3 +396,58 @@ width.rs のスタブ化（D 参照）は依然未解消。
 
 修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0` レース、発振検出）を
 iverilog 比較 CI へ追加してから直すこと（テスト先行）。
+
+## SystemVerilog 準拠度調査（2026-07-10）
+
+コードベース全体（`crates/frontend/src/lower.rs` の SV 構文分岐、`crates/mir/src/ir.rs` の
+`SysTask`/`BinOp`/`Stmt` 列挙、`crates/sim/src/interp.rs` のシステムタスク実装）を実地調査した
+結果。「SystemVerilog 準拠シミュレータ」としての評価であり、本プロジェクトの目標である
+Verilog-2001 サブセットとしての評価とは分けて記録する。
+
+### 結論
+
+このプロジェクトは **SystemVerilog(IEEE 1800) 準拠を目標にしていない**（Context 節に明記の
+通り目標は Verilog-2001 サブセット）。SV 固有機能はほぼ全て未対応で、SV 準拠度としては
+5% 未満。パーサに `sv-parser` を使うため SV 構文の**構文解析自体は通る**ことがあるが、
+frontend lowering 段でサブセット外として弾かれる・無言スキップされる・`reg` に縮退する、
+のいずれかになる。Verilog-2001 サブセットとしては M1+M2 で主要機能を実装済みで実用域にある。
+
+### SystemVerilog 固有機能の対応状況
+
+| 機能 | 状態 | 根拠 |
+|---|---|---|
+| `logic`/`bit` 型 | ❌ 非対応 | 専用分岐なし。`integer` 判定（`has_integer_type`）以外は `reg` 相当に縮退 |
+| `always_ff`/`always_comb`/`always_latch` | ❌ 非対応 | `lower_always` は `always @(...)` のみ想定 |
+| `typedef`/`struct`/`union`/`enum` | ❌ 非対応 | lowering に分岐なし |
+| `interface`/`modport`/`class`/`package`/`import` | ❌ 非対応 | Context 節で明示的に対象外 |
+| assertion（`assert`/`property`/`sequence`） | ❌ 非対応 | 同上 |
+| `unique`/`priority` case、`final` block | ❌ 非対応 | 分岐なし |
+| `$signed`/`$unsigned`/`$stop`/`$strobe`/ファイル I/O | ❌ 非対応 | `SysTask` 列挙に存在せず |
+
+実装済みシステムタスクは `SysTask` 列挙 (`crates/mir/src/ir.rs`) と
+`crates/sim/src/interp.rs::exec_syscall` の実装ベースで
+`$display`/`$write`/`$monitor`（実体は `$display` と同一動作）/`$finish`/`$time`/
+`$dumpfile`/`$dumpvars`/`$readmemh`/`$readmemb`/`$random`/`$clog2`（elaboration 時定数畳込みのみ）
+の11個のみ。
+
+### Verilog-2001 サブセットとしての対応状況（本来の評価軸）
+
+対応済み: `module`/ANSI・non-ANSI ポート、`parameter`/`localparam`、`wire`/`reg`/`integer`、
+`assign`/`initial`/`always`、`if`/`case`/`casez`/`casex`、`for` ループ、階層インスタンス、
+主要演算子群、signed 演算、`function`/`task`、`generate`/`genvar`、ゲートプリミティブ、
+`disable`/`fork`-`join`（いずれも M1/M2 で実装済み、上記マイルストーン節参照）。
+
+Verilog-2001 の範囲でも未対応:
+- `while`/`repeat`/`forever`（`for` のみ。`lower_loop_stmt` で `LS::For` 以外は
+  `unsupported("loop statement variant")` として明示エラー）
+- `**`（べき乗）演算子、式中の関数呼び出し
+- `defparam`/`specify`/UDP が `lower.rs` 内の複数箇所の `_ => {}` catch-all で
+  診断なく無言スキップされる（実装課題 B 節と同一問題。最優先で診断化すべき）
+
+### 推奨
+
+SV 対応そのものを追うより、実装課題節の推奨着手順（A2 エッジ検出 → A3/A4 monitor・`#0` →
+D 連続代入 sensitivity 化 → B 無言スキップの診断化）を優先する方が費用対効果が高い。
+`logic`/`always_ff` 等の SV 拡張受け入れは M2 残タスク5「SystemVerilog 拡張」として
+ロードマップ上に既に位置づけられており、着手する場合は `width.rs` の
+context-determined 幅推論再設計（実装課題 D 節）とセットで行う必要がある。
