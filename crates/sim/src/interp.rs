@@ -422,8 +422,11 @@ impl Interpreter {
                 }
             }
             SysTask::DumpVars => {
-                // $dumpvars — activate VCD recording
-                if let Some(path) = self.vcd_path.take() {
+                // $dumpvars — activate VCD recording.
+                // $dumpfile が未呼び出しの場合、IEEE 1364-2005 §17.2 に従い
+                // カレントディレクトリの "dump.vcd" を既定の出力先とする。
+                if self.vcd.is_none() {
+                    let path = self.vcd_path.take().unwrap_or_else(|| PathBuf::from("dump.vcd"));
                     self.init_vcd_from_path(path);
                 }
             }
@@ -823,6 +826,10 @@ impl Interpreter {
 
         match VcdWriter::new(&path, &scopes_ref, &nets_ref, &root_ids) {
             Ok(mut vcd) => {
+                let msg = format!("VCD info: dumpfile {} opened for output.", path.display());
+                println!("{}", msg);
+                self.output_buf.push_str(&msg);
+                self.output_buf.push('\n');
                 let initial: HashMap<u32, (u64, u64)> = self.net_values.iter()
                     .map(|(id, val)| (id.0, (
                         val.pad_to_width(val.width()),
