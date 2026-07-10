@@ -1233,3 +1233,49 @@ signed 演算対応（課題1 / A1）を実装。
 
 - 実装課題 A2: エッジ検出の IEEE 準拠化（X→1 posedge 検出）
 - `elab/src/width.rs` の context-determined 幅推論再設計は今回見送り（別課題として残存）
+
+## 2026-07-10
+
+### Task
+
+`$dumpvars(0);` だけ呼び出して `$dumpfile(...)` を呼ばない testbench で
+VCD 波形が全く出力されない不具合を調査・修正。
+
+### What was done
+
+#### 原因調査
+- `samples/fifo_sync/tb/tb.v` の initial ブロック冒頭に `$dumpvars(0);` を
+  追加して再現。VCD ファイルが一切生成されないことを確認。
+- `crates/sim/src/interp.rs` の `SysTask::DumpVars` ハンドラを確認したところ、
+  `self.vcd_path`（`$dumpfile` 呼び出しでのみ設定される）が `None` の場合は
+  何もせず無言でスキップする実装になっていた。
+- IEEE 1364-2005 §17.2 では `$dumpfile` 未呼び出し時、既定で
+  カレントディレクトリの `dump.vcd` に出力する仕様。実機 iverilog で
+  `$dumpfile` なしの `$dumpvars` を実行し、`dump.vcd` が生成され
+  かつ起動時に `VCD info: dumpfile dump.vcd opened for output.` が
+  stdout に出力されることを確認、既定動作を裏付けた。
+
+#### 修正
+- `SysTask::DumpVars`: `vcd_path` が未設定の場合 `PathBuf::from("dump.vcd")`
+  にフォールバックするよう修正。二重初期化防止のため `self.vcd.is_none()`
+  ガードも追加。
+- `init_vcd_from_path` に、iverilog と同じ `VCD info: dumpfile <path>
+  opened for output.` を stdout / `output_buf` へ出力する処理を追加
+  （既存の iverilog 差分比較テストとの bit-exact 一致を維持するため）。
+- `tests/integration/cases/fifo_sync/expected.stdout` に上記メッセージ行を
+  追加し、`samples/fifo_sync/tb/tb.v` に追加された `$dumpvars(0);`
+  （`$dumpfile` なし）に対応させた。
+
+### Result
+
+✅ `cargo build --workspace` 成功
+✅ `cargo clippy --workspace --all-targets` エラーなし
+✅ `cargo test --workspace` 全テスト通過（`compare_fifo_sync` の
+   iverilog差分比較含む）
+✅ 実際に `dump.vcd` が生成され、`$dumpvars` 以降の信号変化が
+   記録されていることを目視確認
+
+### Next
+
+- 実装課題 A2: エッジ検出の IEEE 準拠化（X→1 posedge 検出）
+- `elab/src/width.rs` の context-determined 幅推論再設計は今回見送り（別課題として残存）
