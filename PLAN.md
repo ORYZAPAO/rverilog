@@ -379,6 +379,7 @@ iverilog 出力比較 CI 導入済み）。
 - `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
 - `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
 - 連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）
+  → $signed 対応作業（2026-07-12 節参照）の Task 2d として対応中
 - リポジトリの CLAUDE.md が空、`tests/rtl/fifo_counter.v` が未使用
 
 ### 推奨着手順
@@ -451,3 +452,49 @@ D 連続代入 sensitivity 化 → B 無言スキップの診断化）を優先�
 `logic`/`always_ff` 等の SV 拡張受け入れは M2 残タスク5「SystemVerilog 拡張」として
 ロードマップ上に既に位置づけられており、着手する場合は `width.rs` の
 context-determined 幅推論再設計（実装課題 D 節）とセットで行う必要がある。
+
+## $signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）
+
+picorv32.v（`$signed` を25箇所使用）のシミュレーションを目標とした対応。
+設計書: `docs/superpowers/specs/2026-07-12-signed-support-design.md`
+実装プラン: `docs/superpowers/plans/2026-07-12-signed-support.md`
+作業ブランチ: `feat/signed-impl`
+
+### 完了（コミット済み）
+
+- **Task 1**: `signed_cast` 統合テストケース追加（`tests/integration/cases/signed_cast/`）。
+  期待値は iverilog 実出力から作成。TDD アンカーとして**意図的に FAIL 状態**
+  （符号拡張の実装完了で全行一致する設計）
+- **Task 2**: `$signed`/`$unsigned` のパイプライン貫通。`SysFuncKind::Signed/Unsigned`
+  追加、frontend パース（引数1個検証）、elab は inner のトップ `Expr` を
+  `alloc_expr_signed` で複製登録（アプローチB: MIR ノード追加なし）
+- **Task 2a**: 連結 lowering のバグ修正。`{imm[11], x}` で全子孫走査により
+  インデックス式が parts に混入していた（`P::Concatenation` を直接の子のみ走査に修正）
+- **Task 2b**: RHS 式の部分選択を実装。`imm[10:5]` が**全ビット値に化けていた**
+  （式コンテキストの `PartSel` lowering が未実装だった）。`ConstantRange` を
+  `HirExpr::PartSel` へ lowering、`+:`/`-:` は明示エラー
+
+### 作業中に発見した既存バグ（$signed とは独立、いずれも黙って誤値になる）
+
+| # | 問題 | 状態 |
+|---|---|---|
+| 1 | RHS 式の部分選択が全ビット値に化ける | ✅ 修正済み（Task 2b） |
+| 2 | 連結 parts にネストした式が混入 | ✅ 修正済み（Task 2a） |
+| 3 | LHS 部分選択 `q[31:20] <= x` が全ビット代入になる | ⏳ Task 2c（frontend のみ、elab/sim は対応済み） |
+| 4 | LHS 連結 `{a,b} <= x` が先頭要素のみ（F 節既知） | ⏳ Task 2d（HIR/MIR に `LValue::Concat` 追加＋sim 分割書き込みが必要） |
+
+### 残タスク
+
+- **Task 2c**: LHS 部分選択（frontend `lower_var_lvalue` の part-select 対応）
+- **Task 2d**: LHS 連結（HIR/MIR `LValue::Concat`、sim `write_lvalue` 分割書き込み）
+- **Task 3**: 代入時の符号拡張（`write_lvalue` に `rhs_signed` 追加、NBA キューにフラグ。
+  picorv32 の `decoded_imm <= $signed(...)` の本丸）
+- **Task 4**: 演算オペランドの符号拡張（`apply_binop` で幅が異なる signed 同士を
+  max 幅へ `extend_sign`）
+- **Task 5**: picorv32.v parse/elab スモークチェック、PR 仕上げ
+
+### 検証状態（2026-07-12 時点）
+
+- 既存テスト全パス（iverilog 比較 8/8 含む）、リグレッションなし
+- `signed_cast` テストのみ FAIL（意図的な TDD アンカー。値は全行正しく、
+  符号拡張のみ未対応: 例 `cat=00000040` ← 期待 `ffffffc0`）

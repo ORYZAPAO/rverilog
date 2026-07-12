@@ -1376,3 +1376,62 @@ VCD 波形が全く出力されない不具合を調査・修正。
 ### Next
 
 - 実装課題節の推奨着手順（A2 → A3/A4 → D → B）は変更なし。優先度は据え置き
+
+## 2026-07-12
+
+### Task
+
+`$signed`/`$unsigned` システム関数対応（picorv32.v シミュレーションが目標）。
+設計書 `docs/superpowers/specs/2026-07-12-signed-support-design.md` を実装。
+作業ブランチ: `feat/signed-impl`
+
+### What was done
+
+#### $signed/$unsigned のパイプライン貫通（Task 2）
+
+- `SysFuncKind` に `Signed`/`Unsigned` を追加（`hir/src/design.rs`）
+- frontend の `SystemTfCall` に `$signed`/`$unsigned` の腕を追加。引数1個を検証、
+  不正なら `FrontendError::ParseError`（`frontend/src/lower.rs`）
+- elab は inner のトップ `Expr` を `alloc_expr_signed` で複製登録する
+  「アプローチB」（MIR に cast ノードを追加しない）。定数式パスにも素通し腕を追加
+  （`elab/src/elaborate.rs`）
+
+#### 作業中に発見した既存バグ2件を修正（Task 2a/2b）
+
+いずれも `$signed` と独立で、**エラーにならず黙って誤値になる**タイプ:
+
+1. 連結 `{imm[11], x}` の lowering が subtree 全走査
+   （`c.as_ref()` の全 `RefNode::Expression`）だったため、ビット選択の
+   インデックス式 `11` などが parts に混入 → `Brace<List>` の直接の子のみ走査に修正
+2. 式コンテキストの部分選択 `imm[10:5]` が **全ビット値** に化けていた
+   （`lower_primary` の `P::Hierarchical` がビット選択しか処理せず、
+   part-select は無言で `Net` にフォールバック）→ `PartSelectRange::ConstantRange`
+   を `HirExpr::PartSel` へ lowering。`+:`/`-:`（IndexedRange）は明示エラーに。
+   elab/sim 側は元々 `PartSel` 対応済みで frontend のみの修正
+
+#### テスト（Task 1、TDD）
+
+- `tests/integration/cases/signed_cast/` を追加（picorv32 型の NBA/継続代入/
+  比較/除算/`$unsigned`/幅違い signed 加算を網羅）。期待値は iverilog 実出力から作成
+- `integration.rs` に `test_signed_cast`、`iverilog_compare.rs` に
+  `compare_signed_cast` を追加
+
+### Result
+
+✅ 既存テスト全パス（iverilog 比較 8/8）、リグレッションなし
+✅ 連結・部分選択の値が正しくなった（`{imm[11], imm[10:5]}` = `1000000` 等）
+⏳ `signed_cast` テストは意図的に FAIL 中（TDD アンカー）。値は全行正しく、
+   残るは符号拡張のみ（`cat=00000040` ← 期待 `ffffffc0`、`add=17` ← 期待 `1`）
+
+### Remaining
+
+- Task 2c: LHS 部分選択 `q[31:20] <= x`（現状**全ビット代入に化ける**バグ。
+  frontend `lower_var_lvalue` のみの修正で済む見込み）
+- Task 2d: LHS 連結 `{a,b} <= x`（現状先頭要素のみ。HIR/MIR に `LValue::Concat`
+  追加と sim の分割書き込みが必要）
+- Task 3: 代入時の符号拡張（`write_lvalue` に `rhs_signed`、NBA キューにフラグ）
+- Task 4: 演算オペランドの符号拡張（`apply_binop` で max 幅へ `extend_sign`）
+- Task 5: picorv32.v parse/elab スモークチェック
+
+詳細は PLAN.md「$signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）」
+節および `docs/superpowers/plans/2026-07-12-signed-support.md` を参照。
