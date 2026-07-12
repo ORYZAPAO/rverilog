@@ -108,6 +108,12 @@ fn compare_signed() {
 }
 
 #[test]
+fn compare_signed_cast() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/signed_cast/dut.v")]);
+}
+
+#[test]
 fn compare_fifo_sync() {
     let root = workspace_root();
     compare_case("tb_fifo_sync", &[

@@ -802,6 +802,15 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
             let seed_id = args.first().map(|a| lower_expr(ctx, scope, a)).transpose()?;
             Expr::Random(seed_id)
         }
+        // $signed/$unsigned: inner のトップ Expr を複製し signedness を明示して再登録する
+        // （MIR に cast ノードは追加しない。幅は inner と同じ = self-determined）
+        HirExpr::SysFunc(kind @ (SysFuncKind::Signed | SysFuncKind::Unsigned), args) => {
+            let arg = args.first().ok_or_else(|| ElabError::UnsupportedConstruct(
+                "$signed/$unsigned requires exactly 1 argument".into()))?;
+            let inner_id = lower_expr(ctx, scope, arg)?;
+            let expr = ctx.exprs[inner_id.0 as usize].clone();
+            return Ok(ctx.alloc_expr_signed(expr, *kind == SysFuncKind::Signed));
+        }
         HirExpr::Call(name, args) => {
             let info = ctx.resolve_func(scope, name.as_str())
                 .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))?;
@@ -1098,6 +1107,12 @@ fn eval_const_hir_with(
                 eval_const_hir_with(ctx, scope, &args[0], extra).unwrap_or(0)
             };
             Ok(clog2(v))
+        }
+        // 定数文脈の $signed/$unsigned は u64 値としては素通し（幅情報を持たないため）
+        HirExpr::SysFunc(SysFuncKind::Signed | SysFuncKind::Unsigned, args) => {
+            let a = args.first().ok_or_else(|| ElabError::UnsupportedConstruct(
+                "$signed/$unsigned requires exactly 1 argument".into()))?;
+            eval_const_hir_with(ctx, scope, a, extra)
         }
         _ => Err(ElabError::UnsupportedConstruct("non-const expression in param context".into())),
     }

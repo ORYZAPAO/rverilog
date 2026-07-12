@@ -12,6 +12,8 @@ pub enum NetKind {
 pub enum SysFuncKind {
     Clog2,
     Random,
+    Signed,
+    Unsigned,
 }
 
 #[derive(Debug, Clone)]
