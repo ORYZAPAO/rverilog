@@ -1,0 +1,12 @@
+sext=fffff800
+zext=00000800
+cat=ffffffc0
+cmp: neg
+ucmp: pos
+usx=0000000f
+ssx=ffffffff
+div=          0
+add=   1
+nba=ffffff80
+cont=fffffff8
+$finish at time 2

@@ -85,6 +85,16 @@ fn test_signed() {
 }
 
 #[test]
+fn test_signed_cast() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/signed_cast/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("signed_cast");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![
