@@ -5,7 +5,7 @@ use rverilog_hir::{
     AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, EdgeType, Expr, FunctionDecl,
     GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems,
     HirModule, InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl,
-    NetKind, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, RegDecl,
+    NetKind, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, Range, RegDecl,
     Sensitivity, SensitivityItem, Stmt, SysTask, SysFuncKind, TaskDecl, TfArg, UnOp,
 };
 use rverilog_mir::LogicVal;
@@ -1600,6 +1600,10 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
                     let idx_expr = lower_expression(tree, &bracket.nodes.1)?;
                     return Ok(Expr::IndexSel(name, Box::new(idx_expr)));
                 }
+                // part select: net[hi:lo] (h.nodes.2.nodes.2 = Option<Bracket<PartSelectRange>>)
+                if let Some(bracket) = &h.nodes.2.nodes.2 {
+                    return lower_part_select(tree, name, &bracket.nodes.1);
+                }
                 Ok(Expr::Net(name))
             } else {
                 Err(FrontendError::ParseError("identifier in expression missing".into()))
@@ -1607,11 +1611,13 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
         }
         P::PrimaryLiteral(lit) => lower_primary_literal(tree, lit),
         P::Concatenation(c) => {
+            // Brace<List<Symbol, Expression>> の直接の子 Expression のみを parts にする。
+            // （subtree 全走査ではビット選択のインデックス式などネストした式まで混入する）
+            let brace = &c.nodes.0;
+            let list = &brace.nodes.0.nodes.1;
             let mut parts = Vec::new();
-            for inner in c.as_ref() {
-                if let RefNode::Expression(e) = inner {
-                    parts.push(lower_expression(tree, e)?);
-                }
+            for e in list.contents() {
+                parts.push(lower_expression(tree, e)?);
             }
             Ok(Expr::Concat(parts))
         }
@@ -1644,6 +1650,16 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
                             let args = collect_syscall_args(tree, sys);
                             Ok(Expr::SysFunc(SysFuncKind::Random, args))
                         }
+                        "$signed" | "$unsigned" => {
+                            let args = collect_syscall_args(tree, sys);
+                            if args.len() != 1 {
+                                return Err(FrontendError::ParseError(
+                                    format!("{} requires exactly 1 argument", name_text)));
+                            }
+                            let kind = if name_text == "$signed" { SysFuncKind::Signed }
+                                       else { SysFuncKind::Unsigned };
+                            Ok(Expr::SysFunc(kind, args))
+                        }
                         n => Err(unsupported(&format!("system function {} in expression", n))),
                     }
                 }
@@ -1659,6 +1675,24 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
             }
         }
         _ => Err(unsupported("primary")),
+    }
+}
+
+/// `net[hi:lo]` の定数レンジ部分選択を HIR の PartSel に落とす。
+/// `+:` / `-:`（IndexedRange）は未対応（黙って全ビットにフォールバックさせない）。
+fn lower_part_select(tree: &SyntaxTree, name: SmolStr, psr: &sv_parser::PartSelectRange) -> Result<Expr, FrontendError> {
+    match psr {
+        sv_parser::PartSelectRange::ConstantRange(cr) => {
+            let left = lower_const_expr(tree, &cr.nodes.0)?;
+            let right = lower_const_expr(tree, &cr.nodes.2)?;
+            Ok(Expr::PartSel(
+                Box::new(Expr::Net(name)),
+                Box::new(Range { left: Box::new(left), right: Box::new(right) }),
+            ))
+        }
+        sv_parser::PartSelectRange::IndexedRange(_) => {
+            Err(unsupported("indexed part-select (+:/-:) in expression"))
+        }
     }
 }
 
