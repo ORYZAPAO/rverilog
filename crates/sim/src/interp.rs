@@ -722,11 +722,22 @@ impl Interpreter {
             LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
         };
 
-        // Determine edge type of the change
-        let old_bit = old.map(|v| v.pad_to_width(1) & 1).unwrap_or(0);
-        let new_bit = new.pad_to_width(1) & 1;
-        let posedge = old_bit == 0 && new_bit == 1;
-        let negedge = old_bit == 1 && new_bit == 0;
+        // Determine edge type of the change per IEEE 1364: bit 0 is aval, bit 1 is bval
+        // (0,0)=0 (1,0)=1 (0,1)=Z (1,1)=X. posedge: 0->1, 0->X, X->1. negedge: 1->0, 1->X, X->0.
+        // Z is treated like X for edge detection (matches iverilog behavior).
+        fn edge_bits(v: &LogicVal) -> (u64, u64) {
+            (v.pad_to_width(1) & 1, v.pad_to_width_b(1) & 1)
+        }
+        let (old_a, old_b) = old.map(edge_bits).unwrap_or((0, 1)); // no previous value: treat as X
+        let (new_a, new_b) = edge_bits(new);
+        let old_is_0 = old_a == 0 && old_b == 0;
+        let old_is_1 = old_a == 1 && old_b == 0;
+        let old_is_unknown = old_b == 1;
+        let new_is_1 = new_a == 1 && new_b == 0;
+        let new_is_0 = new_a == 0 && new_b == 0;
+        let new_is_unknown = new_b == 1;
+        let posedge = (old_is_0 && (new_is_1 || new_is_unknown)) || (old_is_unknown && new_is_1);
+        let negedge = (old_is_1 && (new_is_0 || new_is_unknown)) || (old_is_unknown && new_is_0);
         let any_change = old.map(|o| o != new).unwrap_or(true);
 
         let mut to_wake = Vec::new();
