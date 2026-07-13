@@ -105,6 +105,26 @@ fn test_edge_x() {
 }
 
 #[test]
+fn test_monitor() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/monitor/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("monitor");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
+fn test_delay0() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/delay0/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("delay0");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![

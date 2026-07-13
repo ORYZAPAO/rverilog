@@ -1485,3 +1485,72 @@ VCD 波形が全く出力されない不具合を調査・修正。
 
 詳細は PLAN.md「$signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）」
 節および `docs/superpowers/plans/2026-07-12-signed-support.md` を参照。
+
+## 2026-07-14 (2)
+
+### Task
+
+実装課題リストの推奨着手順3番、`$monitor` 専用リージョン実装 + `#0`
+（inactive）順序修正（A3・A4）をイベントループ再構成として一括実装。
+
+### What was done
+
+#### 原因調査
+- `crates/sim/src/interp.rs::run()`（87-173行）が active drain と NBA 適用を
+  1つのループで交互に行い、両方が空になって初めて `future` ヒープを見に行く
+  構造であることを確認。`#0` は他の `#N` と同じ `future` に
+  `wake = now + 0` として積まれるが、このループ構造だとNBA適用より後にしか
+  拾われないため、IEEEの `active → inactive → NBA` 順が逆転していた（A4）。
+- `exec_syscall` の `SysTask::Monitor`（406-411行）が `$display` と
+  バイト単位で同一実装で、印字時に値変化の判定を一切行っていないことを確認（A3）。
+
+#### テスト先行
+- `tests/integration/cases/monitor/dut.v`: `$monitor("t=%0t cnt=%d", $time, cnt)`
+  を一度登録し `cnt` を複数回変化（一部は無変化）させるケースを作成。
+  iverilog実測値（`t=0 cnt=0`, `t=1 cnt=1`, `t=3 cnt=2` の3回のみ印字、
+  無変化のt=2はスキップ）を `expected.stdout` に採用。
+- `tests/integration/cases/delay0/dut.v`: `initial a=0;` / `initial a<=1;`
+  （NBA登録）/ `initial begin #0; $display(...) end`（inactiveで再開）を
+  並べたケースを作成。iverilog実測値（`#0`再開時点でNBA適用前の
+  `a=0`が見える）を `expected.stdout` に採用。
+- 修正前のrverilogでは monitor が最初の1回（`t=0`）しか印字せず、
+  delay0 では `#0` 再開時に既にNBA適用後の `a=1` が見える（バグを再現）
+  ことを `cargo test` で確認してから修正に着手。
+- `test_monitor`/`test_delay0`（integration.rs）・`compare_monitor`/
+  `compare_delay0`（iverilog_compare.rs）を追加。
+
+#### 修正
+- `Interpreter` に `monitor_args: Option<Vec<ExprId>>`・
+  `monitor_last: Option<Vec<LogicVal>>` を追加。`$monitor` はIEEE 1364通り
+  シミュレーション全体で1つだけアクティブ（新規呼び出しが前の登録を置き換え、
+  `monitor_last` もリセットして次回flush時に必ず再印字させる）。
+- `SysTask::Monitor` ハンドラは登録のみ行うよう変更（即印字しない）。
+- 新設 `flush_monitor()`: 登録済み引数（`args[1..]`、`args[0]`はフォーマット
+  文字列）を評価した `Vec<LogicVal>` を前回スナップショットと比較し、
+  異なる場合（初回含む）のみ `format_args` で整形して印字。`%t`/`%T` は
+  `self.now` を直接参照し `ExprId` を消費しないため、このスナップショットは
+  時刻ノイズを含まない。
+- `run()` のメインループを再構成: 従来の「active drain + NBA適用」の
+  内側ループから、active region（`eval_conts`含む完全収束）→
+  inactiveリージョン（同時刻`#0`待ちプロセスをNBA適用前に`active`へ復帰、
+  復帰があれば`continue`でactive regionへ戻る）→ NBAリージョン（適用後
+  `continue`）→ monitorリージョン（`flush_monitor`、3リージョンとも
+  完全収束した時のみ到達）→ 次時刻への前進、の順に分離。
+
+### Result
+
+✅ `cargo build --workspace` 成功
+✅ `cargo clippy --workspace --all-targets` 新規警告なし（既存の
+   frontend/elab/sim内の他行の警告は本修正と無関係で対象外）
+✅ `cargo test --workspace` 全通過（新規 `test_monitor`・`test_delay0`・
+   `compare_monitor`・`compare_delay0` を含む。`fifo_sync`/`counter4`/
+   `signed` 等既存テストに回帰なし）
+✅ `compare_monitor`・`compare_delay0`（iverilogとのbit-exact比較）通過
+
+### Next
+
+- 実装課題 D: 連続代入の sensitivity 駆動化（`eval_conts` の総当たり
+  固定点ループを `NetId→ContId` 逆引きテーブル方式に）。
+  scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価
+- 実装課題 B: サイレントスキップ（`defparam`/`specify`/UDP等）の診断化
+- 実装課題 E: fmt/clippy ジョブの CI 追加、負パステストの拡充

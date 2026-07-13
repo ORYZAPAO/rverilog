@@ -120,6 +120,18 @@ fn compare_edge_x() {
 }
 
 #[test]
+fn compare_monitor() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/monitor/dut.v")]);
+}
+
+#[test]
+fn compare_delay0() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/delay0/dut.v")]);
+}
+
+#[test]
 fn compare_fifo_sync() {
     let root = workspace_root();
     compare_case("tb_fifo_sync", &[
