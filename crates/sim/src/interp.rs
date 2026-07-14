@@ -48,6 +48,11 @@ pub struct Interpreter {
     fork_waiters: HashMap<u32, ProcState>,
     /// `$random` 用の固定シードPRNG状態（テストの決定性を保つため固定シード）。
     rng_state: u64,
+    /// `$monitor` の現在の登録（IEEE 1364: シミュレーション全体で1つだけアクティブ、
+    /// 新しい呼び出しが前の登録を置き換える）。
+    monitor_args: Option<Vec<ExprId>>,
+    /// 前回monitorが印字した際の監視対象値スナップショット（`args[1..]`の評価結果）。
+    monitor_last: Option<Vec<LogicVal>>,
 }
 
 impl Interpreter {
@@ -81,6 +86,8 @@ impl Interpreter {
             fork_remaining: HashMap::new(),
             fork_waiters: HashMap::new(),
             rng_state: 0x2545_F491_4F6C_DD1D,
+            monitor_args: None,
+            monitor_last: None,
         }
     }
 
@@ -121,26 +128,13 @@ impl Interpreter {
                 break;
             }
 
-            // Run all active events + cont-assign propagation until quiescent
+            // ACTIVE region: 完全収束するまでdrain（連続代入の伝播含む）
             loop {
-                // Drain active processes and NBA
-                loop {
+                while !self.active.is_empty() {
                     let procs: Vec<ProcState> = std::mem::take(&mut self.active);
-                    if procs.is_empty() && self.nba_queue.is_empty() { break; }
-
                     for proc in procs {
                         self.exec_proc(proc);
                         if self.finished { break 'outer; }
-                    }
-
-                    // Apply NBA at end of active cycle
-                    if !self.nba_queue.is_empty() {
-                        let nba: Vec<_> = std::mem::take(&mut self.nba_queue);
-                        for (lval, val) in nba {
-                            let old = self.get_lval_val(&lval);
-                            self.write_lvalue(&lval, val.clone());
-                            self.trigger_sensitivity(&lval, old.as_ref(), &val);
-                        }
                     }
                 }
 
@@ -150,6 +144,33 @@ impl Interpreter {
                 // If cont assigns triggered new active processes, loop again
                 if self.active.is_empty() { break; }
             }
+
+            // INACTIVE region: 同時刻(#0)で待っているプロセスをNBA適用前に再開する
+            // （IEEE 1364: active → inactive → NBA の順序）
+            let mut moved_inactive = false;
+            while let Some(&Reverse((t, _))) = self.future.peek() {
+                if t != self.now { break; }
+                let Reverse((_, seq)) = self.future.pop().unwrap();
+                if let Some(p) = self.future_procs.remove(&seq) {
+                    self.active.push(p);
+                    moved_inactive = true;
+                }
+            }
+            if moved_inactive { continue 'outer; }
+
+            // NBA region
+            if !self.nba_queue.is_empty() {
+                let nba: Vec<_> = std::mem::take(&mut self.nba_queue);
+                for (lval, val) in nba {
+                    let old = self.get_lval_val(&lval);
+                    self.write_lvalue(&lval, val.clone());
+                    self.trigger_sensitivity(&lval, old.as_ref(), &val);
+                }
+                continue 'outer;
+            }
+
+            // MONITOR region: active/inactive/NBAが完全収束した時点で1回だけ評価
+            self.flush_monitor();
 
             // Advance to next future event
             if self.future.is_empty() { break; }
@@ -404,10 +425,12 @@ impl Interpreter {
                 self.output_buf.push_str(&s);
             }
             SysTask::Monitor => {
-                let s = self.format_args(args);
-                println!("{}", s);
-                self.output_buf.push_str(&s);
-                self.output_buf.push('\n');
+                // IEEE 1364: $monitorはシミュレーション全体で1つだけアクティブ。
+                // 新しい呼び出しが前の登録を置き換える。ここでは登録のみ行い、
+                // 実際の印字はmonitorリージョン（flush_monitor）でリージョン
+                // 収束後にまとめて行う。
+                self.monitor_args = Some(args.to_vec());
+                self.monitor_last = None;
             }
             SysTask::Finish => {
                 self.finished = true;
@@ -782,6 +805,22 @@ impl Interpreter {
                 }
             }
             if !changed { break; }
+        }
+    }
+
+    /// monitorリージョン: active/inactive/NBAが完全収束した後、時刻を進める前に
+    /// 1回だけ呼ぶ。登録済みの$monitor引数を評価し、前回印字時から値が変化して
+    /// いた場合（初回登録直後を含む）のみ印字する。
+    fn flush_monitor(&mut self) {
+        let Some(args) = self.monitor_args.clone() else { return; };
+        if args.is_empty() { return; }
+        let vals: Vec<LogicVal> = args[1..].iter().map(|&id| self.eval_expr(id)).collect();
+        if self.monitor_last.as_ref() != Some(&vals) {
+            let s = self.format_args(&args);
+            println!("{}", s);
+            self.output_buf.push_str(&s);
+            self.output_buf.push('\n');
+            self.monitor_last = Some(vals);
         }
     }
 

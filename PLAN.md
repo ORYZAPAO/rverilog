@@ -327,8 +327,8 @@ iverilog 出力比較 CI 導入済み）。
 |---|---|---|---|
 | A1 | signed 演算 | `hir::design.rs`/`mir::ir.rs`（`signed`/`is_signed`フィールド）、`elab::elaborate.rs`（`expr_signed`伝搬）、`mir::logicval.rs`（`*_signed`演算群） | **対応済み（2026-07-09）**。net/reg/port/integer/function/task 引数の `signed` 宣言、符号無し10進即値と `'s` 基数リテラルの既定signed扱い、signed比較（`<`/`>`/`<=`/`>=`）・signed除算/剰余・`>>>`の左辺signedness依存・signed `%d` 表示を実装。iverilogとのbit-exact比較テスト`tests/integration/cases/signed/`で検証済み。既知の残課題: 式の最終signednessは子ExprIdからの単純な機械的伝搬（IEEE 4.5.1のcontext-determined規則の一部簡略化）、`width.rs`自体は未着手のまま |
 | A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | **対応済み（2026-07-14）**。aval/bval 両プレーンから `{0,1,X,Z}` を分類し、IEEE 表（posedge: `0→1`/`0→X`/`X→1`、negedge: `1→0`/`1→X`/`X→0`、Z は edge 判定上 X 相当）で判定するよう修正。iverilogとのbit-exact比較テスト`tests/integration/cases/edge_x/`で検証済み |
-| A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
-| A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
+| A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | **対応済み（2026-07-14）**。`$monitor`はシミュレーション全体で1つだけアクティブ（IEEE 1364通り、新規呼び出しが前の登録を置き換える）とし、`monitor_args`/`monitor_last`で登録・前回印字値を保持。呼び出し時は登録のみ行い、実際の印字は新設のmonitorリージョン（`flush_monitor`、active/inactive/NBA完全収束後・時刻前進前に1回）で、前回印字時から値が変化していた場合（初回登録直後を含む）のみ行うよう修正。iverilogとのbit-exact比較テスト`tests/integration/cases/monitor/`で検証済み |
+| A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | **対応済み（2026-07-14）**。`run()`のメインループにinactiveリージョンを新設し、同時刻(`#0`)で待っているプロセスをNBA適用より前に再開するよう修正（IEEE 1364のactive→inactive→NBA順に準拠）。iverilogとのbit-exact比較テスト`tests/integration/cases/delay0/`で検証済み |
 | A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
 | A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
 | A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
@@ -386,7 +386,7 @@ iverilog 出力比較 CI 導入済み）。
 
 1. ~~A1: signed 対応~~ 完了（2026-07-09）
 2. ~~A2: エッジ検出の IEEE 準拠化~~ 完了（2026-07-14）
-3. A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正（イベントループ再構成として一括）
+3. ~~A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正~~ 完了（2026-07-14、イベントループ再構成として一括対応）
 4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
 5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
 6. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
