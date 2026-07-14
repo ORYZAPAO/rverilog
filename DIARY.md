@@ -1297,6 +1297,56 @@ master ベースで実装課題の棚卸しを行い、PLAN.md に「実装課�
 - 実装課題 A2: エッジ検出の IEEE 準拠化（X→1 posedge 検出）
 - `elab/src/width.rs` の context-determined 幅推論再設計は今回見送り（別課題として残存）
 
+## 2026-07-14
+
+### Task
+
+実装課題リストの推奨着手順2番、エッジ検出の IEEE 準拠化（A2）を実装。
+
+### What was done
+
+#### 原因調査
+- `crates/sim/src/interp.rs` の `trigger_sensitivity`（719-756行）が
+  posedge/negedge 判定に `LogicVal` の a-plane（aval）ビットのみを見ており、
+  b-plane（bval）を無視していることを確認。X（a=1,b=1）は 1（a=1,b=0）と、
+  Z（a=0,b=1）は 0（a=0,b=0）と区別できず、IEEE 1364 が定める
+  `0→X`/`X→1`（posedge）や `1→X`/`X→0`（negedge）を検出できなかった。
+- 4つの呼び出し元（interp.rs:142, 301, 599, 770）はいずれも完全な
+  `LogicVal` old/new を渡しており、バグは `trigger_sensitivity` 内部の
+  分類ロジックに限局していることを確認。
+
+#### テスト先行
+- `tests/integration/cases/edge_x/dut.v` を新設。`reg sig`（初期値X）を
+  `0→X→1→X→0→1→0` と遷移させ、`always @(posedge sig)`/`always @(negedge sig)`
+  でそれぞれカウンタをインクリメントし `$display` する自己完結モジュール。
+- 実機 iverilog を実行し `pos_count=3 neg_count=4` を確認、これを
+  `expected.stdout` に採用（手書きの期待値ではなく実機オラクル）
+- 修正前の rverilog は `pos_count=2 neg_count=3`（バグを再現）だったことを
+  `cargo test` で確認してから修正に着手
+- `test_edge_x`（integration.rs）・`compare_edge_x`（iverilog_compare.rs）を追加
+
+#### 修正
+- `trigger_sensitivity` を、old/new それぞれの a/b ビットから `{0,1,X,Z}` を
+  分類し、IEEE 表（posedge: `0→1`/`0→X`/`X→1`、negedge: `1→0`/`1→X`/`X→0`）で
+  判定するよう書き換え。Z は edge 判定上 X 相当として扱う（iverilog実機の
+  挙動と一致することをテストオラクルで確認）
+- `Sensitivity::All`（`@*`）が使う `any_change`（LogicVal全体の等価比較）は
+  元々正しいため変更なし
+
+### Result
+
+✅ `cargo build --workspace` 成功
+✅ `cargo clippy --workspace --all-targets` 新規警告なし（既存の
+   frontend/elab警告は本修正と無関係で対象外）
+✅ `cargo test --workspace` 全50テスト通過（新規 `test_edge_x`・
+   `compare_edge_x` を含む。`signed`/`fifo_sync`/`counter4` 等
+   posedge依存の既存テストに回帰なし）
+
+### Next
+
+- 実装課題 A3・A4: `$monitor` の専用リージョン実装 + `#0`（inactive）
+  順序修正（イベントループ再構成として一括対応、PLAN.md 対応方針の次項）
+
 ## 2026-07-10
 
 ### Task

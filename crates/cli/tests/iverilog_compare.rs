@@ -114,6 +114,12 @@ fn compare_signed_cast() {
 }
 
 #[test]
+fn compare_edge_x() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/edge_x/dut.v")]);
+}
+
+#[test]
 fn compare_fifo_sync() {
     let root = workspace_root();
     compare_case("tb_fifo_sync", &[
