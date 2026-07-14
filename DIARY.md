@@ -1435,3 +1435,62 @@ VCD 波形が全く出力されない不具合を調査・修正。
 
 詳細は PLAN.md「$signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）」
 節および `docs/superpowers/plans/2026-07-12-signed-support.md` を参照。
+
+## 2026-07-15
+
+### Task
+
+2026-07-02 レビューの残課題のうち優先度2位、A2「エッジ検出が IEEE 非準拠」を実装。
+`trigger_sensitivity`（`sim/src/interp.rs`）が aval のみで edge 判定しており、
+X/Z が絡む遷移（X→1 の posedge 等）を検出できていなかった問題を修正。
+
+### What was done
+
+#### 事前調査（テスト先行）
+- DIARY の方針通り、修正前に `tests/integration/cases/edge_detect/dut.v` を作成し、
+  `posedge`/`negedge` 双方の always ブロックで X/Z を含む一連の遷移
+  （X→X, X→1, 1→Z, Z→0, 0→X, X→1, 1→0）を発生させるテストケースを用意。
+- iverilog v13 で実行し、実際の edge 判定結果を確認。当初 IEEE 1364-2005 の
+  edge テーブルを記憶ベースで実装しようとしたところ、`0→X/Z` が posedge、
+  `1→X/Z` が negedge になるという記憶と逆の非対称な結果が出た。
+  iverilog の実測結果を正とし、Table 9-2 を再確認して以下の対応関係を確定:
+  - posedge: `0→1`, `0→X/Z`, `X/Z→1`
+  - negedge: `1→0`, `1→X/Z`, `X/Z→0`
+  - それ以外（`0→0`, `1→1`, `X/Z→X/Z`）は no edge
+
+#### 実装
+- `sim/src/interp.rs` に 3 値 `BitState { Zero, One, Unknown }` を追加。
+  X と Z は edge 判定上区別しないため同一の `Unknown` に畳み込む
+  `bit_state(a, b)` ヘルパを新設。
+- `trigger_sensitivity` の posedge/negedge 判定を aval のみの比較から
+  `(BitState, BitState)` のパターンマッチに置き換え。旧 `old` が `None`
+  （未初期化）の場合も `Unknown` 扱いに統一（net 初期値は元々 X/Z のため
+  実害は薄いが、意味的に正しい状態にした）。
+
+#### テスト
+- `tests/integration/cases/edge_detect/`: dut.v・expected.stdout
+  （iverilog 実測値をそのまま採用）を追加。
+- `crates/cli/tests/integration.rs` に `test_edge_detect`、
+  `crates/cli/tests/iverilog_compare.rs` に `compare_edge_detect` を追加。
+
+### Result
+
+✅ `cargo build --workspace` 成功
+✅ `cargo clippy -p rverilog-sim --all-targets`: 新規コードに起因する警告なし
+   （既存の `div_ceil` 等の警告は変更前から存在するものでスコープ外）
+✅ `cargo test --workspace` 全テスト通過（`test_edge_detect`・
+   `compare_edge_detect` の iverilog bit-exact 比較含む、失敗0件）
+✅ `samples/fifo_sync`・`samples/counter4` 含む既存 iverilog 比較テストに
+   回帰なし
+
+### PLAN.md へ反映
+
+- 「実装課題（2026-07-09 マージ後）」節 A 表の A2 を「対応済み（2026-07-15）」に更新、
+  詳細（3値判定・IEEE Table 9-2 の非対称性）を追記
+- 「推奨着手順」の A2 行にも完了マークを付記
+
+### Next
+
+- 実装課題 A3・A4: `$monitor` の値変化時再表示（monitor リージョン実装）
+  + `#0`（inactive）順序修正をイベントループ再構成として一括対応
+- `elab/src/width.rs` の context-determined 幅推論再設計は依然未着手

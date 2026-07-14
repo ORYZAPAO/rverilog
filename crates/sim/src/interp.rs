@@ -7,6 +7,23 @@ use rverilog_vcd::VcdWriter;
 // Execution frame: (stmt_list, next_index, block_id of NamedBlock this frame represents, for `disable`)
 type Frame = (Vec<StmtId>, usize, Option<u32>);
 
+/// 1bit の実効値。X と Z は edge 検出上区別しないため同一の `Unknown` に畳み込む
+/// （IEEE 1364-2005 Table 9-2）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BitState {
+    Zero,
+    One,
+    Unknown,
+}
+
+fn bit_state(a: u64, b: u64) -> BitState {
+    match (a & 1, b & 1) {
+        (0, 0) => BitState::Zero,
+        (1, 0) => BitState::One,
+        _ => BitState::Unknown,
+    }
+}
+
 struct ProcState {
     id: ProcessId,
     kind: ProcessKind,
@@ -722,11 +739,21 @@ impl Interpreter {
             LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
         };
 
-        // Determine edge type of the change
-        let old_bit = old.map(|v| v.pad_to_width(1) & 1).unwrap_or(0);
-        let new_bit = new.pad_to_width(1) & 1;
-        let posedge = old_bit == 0 && new_bit == 1;
-        let negedge = old_bit == 1 && new_bit == 0;
+        // Determine edge type of the change (IEEE 1364-2005 Table 9-2: X/Z treated
+        // as a single "unknown" state; 0<->1 transitions via unknown still count as
+        // an edge, e.g. X->1 is posedge, 1->X is negedge, but 0->X is posedge and
+        // X->0 is negedge too since any move away from a known 0 counts as posedge
+        // and any move away from a known 1 counts as negedge).
+        let old_bit = old.map(|v| bit_state(v.pad_to_width(1) & 1, v.pad_to_width_b(1) & 1)).unwrap_or(BitState::Unknown);
+        let new_bit = bit_state(new.pad_to_width(1) & 1, new.pad_to_width_b(1) & 1);
+        let posedge = matches!(
+            (old_bit, new_bit),
+            (BitState::Zero, BitState::One) | (BitState::Zero, BitState::Unknown) | (BitState::Unknown, BitState::One)
+        );
+        let negedge = matches!(
+            (old_bit, new_bit),
+            (BitState::One, BitState::Zero) | (BitState::One, BitState::Unknown) | (BitState::Unknown, BitState::Zero)
+        );
         let any_change = old.map(|o| o != new).unwrap_or(true);
 
         let mut to_wake = Vec::new();

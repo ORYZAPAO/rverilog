@@ -1,0 +1,7 @@
+posedge clk at 2
+negedge clk at 3
+negedge clk at 4
+posedge clk at 5
+posedge clk at 6
+negedge clk at 7
+$finish at time 8

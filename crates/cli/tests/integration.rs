@@ -95,6 +95,16 @@ fn test_signed_cast() {
 }
 
 #[test]
+fn test_edge_detect() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/edge_detect/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("edge_detect");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_fifo_sync() {
     let root = workspace_root();
     let files = vec![
