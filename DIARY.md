@@ -1554,3 +1554,85 @@ VCD 波形が全く出力されない不具合を調査・修正。
   scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価
 - 実装課題 B: サイレントスキップ（`defparam`/`specify`/UDP等）の診断化
 - 実装課題 E: fmt/clippy ジョブの CI 追加、負パステストの拡充
+
+## 2026-07-15
+
+### Task
+
+A2（エッジ検出のIEEE準拠化）を実装するよう依頼を受けたが、作業中に
+「同じ課題に対して複数のPRが並行して存在し、マージ時にコンフリクトが
+起きる」という状態が発覚。まず自前でA2を実装したところ、実は
+**別セッションが2026-07-13〜14に同じA2、および後続のA3・A4を
+先に実装しPR化していた**（PR #13 `fix/edge-detection-ieee`、
+PR #14 `fix/monitor-region-inactive-order`）ことが判明。両PRは
+signed対応（PR #7〜#12）がマージされる前の古い `feat/m1-milestone`
+から分岐しており、ベースが進んだことでマージ時にコンフリクトする
+状態になっていた。
+
+### What was done
+
+#### 状況把握
+- 自分で実装したA2修正をPR #15として一旦作成した後、`gh pr list`で
+  同一課題を扱う未マージPRが他に2件（#13, #14）存在することを発見
+- 各PRの `mergeable`/`mergeStateStatus` を確認し、#13・#14が
+  `CONFLICTING`（ベースの `feat/m1-milestone` が signed 対応の
+  マージ（#7〜#12）で先に進んでいたため）である一方、自分の#15は
+  最新ベースから作成したため単体では `MERGEABLE` だが内容が
+  #13と重複している状態であることを確認
+- ユーザーに「#13・#14を活かす／#15を活かす／中身を精査してから判断」の
+  3択で方針を確認 → 「#13・#14を活かす」を選択
+
+#### PR #13・#14 のリベースによるコンフリクト解消
+- `fix/edge-detection-ieee`（PR #13、A2）を最新の `origin/feat/m1-milestone`
+  （commit `0ea32bf`、signed対応マージ済み）に `git rebase` し、
+  DIARY.md/PLAN.md/`integration.rs`/`iverilog_compare.rs` の
+  コンフリクト（いずれも独立した追記同士がテキスト上隣接しただけで
+  実質的な衝突ではない）を解消。`crates/sim/src/interp.rs` は
+  自動マージで解決（A2の変更が `trigger_sensitivity` 内、A3・A4は
+  別関数のため衝突なし）
+- `fix/monitor-region-inactive-order`（PR #14、A3・A4）は、
+  `git rebase --onto fix/edge-detection-ieee 7a9571c
+  fix/monitor-region-inactive-order` で、リベース後の#13ブランチの
+  上に積み直す形で適用（A3・A4はA2の上に構築される前提のため、
+  スタックドPRとして扱った）。同様にドキュメント/テストファイルの
+  コンフリクトを解消、`interp.rs` は自動マージ
+- 各リベース後に `cargo build --workspace` / `cargo test --workspace`
+  で全体を再検証。新規テスト（`test_edge_x`/`compare_edge_x`、
+  `test_monitor`/`compare_monitor`/`test_delay0`/`compare_delay0`）
+  含め通過を確認
+- `test_signed_cast` のみ失敗するが、これはDIARY 2026-07-12節に
+  記載の**既知の意図的なTDDアンカー失敗**（符号拡張未実装、Task 3/4）
+  であり、`origin/feat/m1-milestone` 単体でも同一の失敗が再現する
+  ことを確認済み。本セッションの変更とは無関係
+- `git push --force-with-lease` で両PRのリモートブランチを更新。
+  `gh pr view` で両方とも `mergeable: MERGEABLE` に変化したことを確認
+  （CI `test` ジョブは上記の既知failureにより赤のままだが、
+  マージ可能性とは別問題）
+
+#### 重複PRの後始末
+- 自分が作成したPR #15はPR #13と内容が重複するため、経緯を
+  コメントに残した上で `gh pr close` でクローズ
+- 重複していたローカル/リモートの `fix/edge-detection` ブランチを削除
+- ローカルの `feat/m1-milestone` ブランチが実験中の余分なコミットで
+  origin から乖離していたため、`git reset --hard origin/feat/m1-milestone`
+  でクリーンな状態に戻した（余分だったコミットの内容は #13 に
+  リベース済みで保全されているため損失なし）
+
+### Result
+
+✅ PR #13・#14 とも `mergeable: MERGEABLE` に変化（コンフリクト解消）
+✅ 各リベース後に `cargo build --workspace`・`cargo test --workspace` で
+   回帰なしを確認（`test_signed_cast` の既知failureを除く）
+✅ PR #15 クローズ、重複ブランチ削除、ローカル `feat/m1-milestone` を
+   origin と同期
+⏳ CI `test` ジョブは `test_signed_cast`（既知のTDDアンカー、本セッション
+   無関係）により両PRとも赤のまま。マージ自体は可能
+
+### Next
+
+- PR #13 → PR #14 の順でマージを推奨（#14が#13に依存するスタック構成のため）
+- `test_signed_cast` の残タスク（Task 3: 代入時の符号拡張、Task 4: 演算
+  オペランドの符号拡張）に着手すればCIも green になる見込み
+- マージ後の実装課題節の残タスク（D: 連続代入のsensitivity駆動化、
+  B: サイレントスキップの診断化、E: fmt/clippyジョブのCI追加）は
+  従来通り
