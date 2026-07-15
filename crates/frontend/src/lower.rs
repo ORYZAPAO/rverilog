@@ -1542,6 +1542,10 @@ fn lower_var_lvalue(tree: &SyntaxTree, lv: &sv_parser::VariableLvalue) -> Result
                     let idx_expr = lower_expression(tree, &bracket.nodes.1)?;
                     return Ok(LValue::IndexSel(name, Box::new(idx_expr)));
                 }
+                // part select: net[hi:lo] (h.nodes.2.nodes.2 = Option<Bracket<PartSelectRange>>)
+                if let Some(bracket) = &h.nodes.2.nodes.2 {
+                    return lower_lvalue_part_select(tree, name, &bracket.nodes.1);
+                }
                 return Ok(LValue::Net(name));
             }
             Err(FrontendError::ParseError("lvalue identifier missing".into()))
@@ -1553,10 +1557,34 @@ fn lower_var_lvalue(tree: &SyntaxTree, lv: &sv_parser::VariableLvalue) -> Result
             for lv_inner in list.contents() {
                 parts.push(lower_var_lvalue(tree, lv_inner)?);
             }
-            parts.into_iter().next()
-                .ok_or_else(|| FrontendError::ParseError("empty concat lvalue".into()))
+            if parts.is_empty() {
+                return Err(FrontendError::ParseError("empty concat lvalue".into()));
+            }
+            Ok(LValue::Concat(parts))
         }
         _ => Err(unsupported("variable lvalue")),
+    }
+}
+
+/// `net[hi:lo] <= ...` の定数レンジ部分選択を HIR の lvalue `PartSelect` に落とす。
+/// `+:` / `-:`（IndexedRange）は未対応（黙って全ビットにフォールバックさせない）。
+fn lower_lvalue_part_select(
+    tree: &SyntaxTree,
+    name: SmolStr,
+    psr: &sv_parser::PartSelectRange,
+) -> Result<LValue, FrontendError> {
+    match psr {
+        sv_parser::PartSelectRange::ConstantRange(cr) => {
+            let left = lower_const_expr(tree, &cr.nodes.0)?;
+            let right = lower_const_expr(tree, &cr.nodes.2)?;
+            Ok(LValue::PartSelect(
+                Box::new(LValue::Net(name)),
+                Range { left: Box::new(left), right: Box::new(right) },
+            ))
+        }
+        sv_parser::PartSelectRange::IndexedRange(_) => {
+            Err(unsupported("indexed part-select (+:/-:) in lvalue"))
+        }
     }
 }
 

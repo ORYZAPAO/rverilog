@@ -114,6 +114,12 @@ fn compare_signed_cast() {
 }
 
 #[test]
+fn compare_lvalue_select() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/lvalue_select/dut.v")]);
+}
+
+#[test]
 fn compare_edge_x() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/edge_x/dut.v")]);

@@ -208,6 +208,7 @@ pub enum LValue {
     BitSelect(Box<LValue>, u32),
     PartSelect(Box<LValue>, Range),
     IndexSel(SmolStr, Box<Expr>),
+    Concat(Vec<LValue>),
 }
 
 #[derive(Debug, Clone)]

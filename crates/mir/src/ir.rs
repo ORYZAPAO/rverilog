@@ -129,6 +129,8 @@ pub enum LValue {
     DynBitSelect(NetId, ExprId),
     PartSelect(NetId, u32, u32), // net, hi, lo
     MemWrite(MemId, ExprId),
+    /// LHS連結 `{a,b} <= x`。先頭要素がMSB。
+    Concat(Vec<LValue>),
 }
 
 #[derive(Debug, Clone)]

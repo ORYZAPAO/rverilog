@@ -1666,3 +1666,68 @@ PR #13・#14 マージ後、PR #16（`docs/pr-conflict-resolution-2026-07-15`、
 ### Next
 
 - PR #16のCI完了後、マージ可能
+
+## 2026-07-16 (2)
+
+### Task
+
+PLAN.md「$signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）」節の
+残タスク（Task 2c・2d・3・4）を実装。`test_signed_cast` が意図的なTDDアンカーとして
+FAIL状態のままだったのを解消するのが主目的。
+
+### What was done
+
+#### Task 3: 代入時の符号拡張
+- `crates/sim/src/interp.rs` の `write_lvalue` に `signed: bool` 引数を追加。
+  `LValue::Net` アームで signed なら `extend_sign`、そうでなければ従来通り `resize`
+- 呼び出し元4箇所（`step()`のBlockingAssign/NbaAssign、`exec_sync_stmt()`の統合アーム、
+  `eval_conts()`）で `ElaboratedDesign::expr_signed[expr_id]` から signed を取得して伝搬。
+  `nba_queue: Vec<(LValue, LogicVal)>` は `Vec<(LValue, LogicVal, bool)>` に変更し、
+  NBA適用（`run()`）まで signed を保持
+
+#### Task 4: 演算オペランドの符号拡張
+- `apply_binop` で `both_signed` かつ両辺の幅が異なる場合、演算前に共通の最大幅へ
+  `extend_sign` で揃えるよう修正。シフト演算（`Shl`/`Shr`/`Ashl`/`Ashr`。右辺の
+  シフト量は IEEE 上 self-determined unsigned のため対象外にする必要がある）と
+  `===`/`!==`（暗黙のコンテキスト拡張をしないビット厳密比較）は除外
+- `sa(4bit signed, -2) + sb(8bit signed, 3)` が zero-extend のまま加算されて
+  `17` になっていたバグ（期待値 `1`）を修正
+
+#### Task 2c: LHS部分選択（frontend）
+- `crates/frontend/src/lower.rs` の `lower_var_lvalue` に、既存の式側
+  `lower_primary`/`lower_part_select` と同型のパターンで part-select 分岐を追加
+  （`lower_lvalue_part_select` 新設）。`elab::lower_lvalue` の
+  `HirLValue::PartSelect` アームは元から実装済みだったため変更不要だった
+  （frontend が生成していなかっただけ）
+
+#### Task 2d: LHS連結
+- `hir::LValue`/`mir::LValue` に `Concat(Vec<LValue>)` を追加
+- `lower_var_lvalue` の `VL::Lvalue` アーム（`{a,b} <= x` で従来は先頭要素のみ返し
+  残りを無言で捨てていた既知バグ、PLAN.md F節）を修正し `LValue::Concat` を返すよう変更
+- `elab::lower_lvalue` に `HirLValue::Concat` → 再帰変換アームを追加
+- sim側: 新設 `lvalue_width`（lvalueの合計ビット幅を再帰計算）を軸に、
+  `write_lvalue`（合計幅へ resize/extend_sign → MSBから幅で切り出して各部分へ再帰書込）・
+  `get_lval_val`（各部分の値をMSB順にconcat、欠損はX埋め）・`trigger_sensitivity`
+  （合計幅でold/newを揃えてから各部分へ再帰分割）に `Concat` アームを追加
+
+#### テスト
+- 新規 `tests/integration/cases/lvalue_select/`（LHS部分選択・LHS連結を
+  blocking/nonblocking 双方でカバー）を追加。期待値は iverilog 実出力から作成
+- 既存 `test_signed_cast`/`compare_signed_cast`（Task 3・4 のTDDアンカー、
+  2026-07-12 に用意済み）が新規追加なしで FAIL→PASS に変化することを確認
+
+### Result
+
+✅ `cargo build --workspace` 成功
+✅ `cargo test --workspace` 全通過（新規 `test_lvalue_select`/`compare_lvalue_select` 含む、
+   既存テストへの回帰なし。`test_signed_cast`/`compare_signed_cast` が FAIL→PASS）
+✅ `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行し、VCD生成・
+   正常終了を確認（回帰なし）
+⏳ Task 5（picorv32.v の parse/elab スモークチェック）は実ファイル未入手のため
+   ユーザー判断でスキップ。PLAN.md に残タスクとして明記
+
+### Next
+
+- Task 5: picorv32.v を入手した場合にスモークチェックを実施
+- 実装課題節の残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
+  E: fmt/clippyジョブのCI追加）は従来通り

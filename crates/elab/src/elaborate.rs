@@ -891,6 +891,12 @@ fn lower_lvalue(ctx: &mut ElabCtx, scope: ScopeId, lval: &HirLValue) -> Result<L
                 Err(ElabError::UnresolvedName(name.to_string()))
             }
         }
+        HirLValue::Concat(parts) => {
+            let lowered = parts.iter()
+                .map(|p| lower_lvalue(ctx, scope, p))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(LValue::Concat(lowered))
+        }
     }
 }
 

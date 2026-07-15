@@ -35,7 +35,7 @@ pub struct Interpreter {
     future: BinaryHeap<Reverse<(u64, u32)>>,
     future_procs: HashMap<u32, ProcState>,
     event_waiters: Vec<(Sensitivity, ProcState)>,
-    nba_queue: Vec<(LValue, LogicVal)>,
+    nba_queue: Vec<(LValue, LogicVal, bool)>,
     finished: bool,
     vcd: Option<VcdWriter>,
     vcd_path: Option<PathBuf>,   // set by $dumpfile
@@ -161,9 +161,9 @@ impl Interpreter {
             // NBA region
             if !self.nba_queue.is_empty() {
                 let nba: Vec<_> = std::mem::take(&mut self.nba_queue);
-                for (lval, val) in nba {
+                for (lval, val, signed) in nba {
                     let old = self.get_lval_val(&lval);
-                    self.write_lvalue(&lval, val.clone());
+                    self.write_lvalue(&lval, val.clone(), signed);
                     self.trigger_sensitivity(&lval, old.as_ref(), &val);
                 }
                 continue 'outer;
@@ -316,16 +316,18 @@ impl Interpreter {
             }
 
             Stmt::BlockingAssign(lval, expr_id) => {
+                let signed = self.design.expr_signed[expr_id.0 as usize];
                 let val = self.eval_expr(expr_id);
                 let old = self.get_lval_val(&lval);
-                self.write_lvalue(&lval, val.clone());
+                self.write_lvalue(&lval, val.clone(), signed);
                 self.trigger_sensitivity(&lval, old.as_ref(), &val);
                 StepResult::Continue
             }
 
             Stmt::NbaAssign(lval, expr_id) => {
+                let signed = self.design.expr_signed[expr_id.0 as usize];
                 let val = self.eval_expr(expr_id);
-                self.nba_queue.push((lval, val));
+                self.nba_queue.push((lval, val, signed));
                 StepResult::Continue
             }
 
@@ -616,9 +618,10 @@ impl Interpreter {
                 }
             }
             Stmt::BlockingAssign(lval, expr_id) | Stmt::NbaAssign(lval, expr_id) => {
+                let signed = self.design.expr_signed[expr_id.0 as usize];
                 let val = self.eval_expr(expr_id);
                 let old = self.get_lval_val(&lval);
-                self.write_lvalue(&lval, val.clone());
+                self.write_lvalue(&lval, val.clone(), signed);
                 self.trigger_sensitivity(&lval, old.as_ref(), &val);
             }
             Stmt::Delay(_, body) | Stmt::EventCtl(_, body) => {
@@ -660,6 +663,17 @@ impl Interpreter {
         })
     }
 
+    /// lvalue が指す値の幅（ビット数）。`Concat` の書き込み分割・センシティビティ分割で使う。
+    fn lvalue_width(&self, lval: &LValue) -> u32 {
+        match lval {
+            LValue::Net(id) => self.design.get_net(*id).width,
+            LValue::BitSelect(_, _) | LValue::DynBitSelect(_, _) => 1,
+            LValue::PartSelect(_, hi, lo) => hi - lo + 1,
+            LValue::MemWrite(mem_id, _) => self.design.get_mem(*mem_id).elem_width,
+            LValue::Concat(parts) => parts.iter().map(|p| self.lvalue_width(p)).sum(),
+        }
+    }
+
     fn get_lval_val(&mut self, lval: &LValue) -> Option<LogicVal> {
         match lval {
             LValue::Net(id) => self.net_values.get(id).cloned(),
@@ -670,15 +684,31 @@ impl Interpreter {
                 let idx = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 self.mem_values.get(&(mem_id.0, idx)).cloned()
             }
+            LValue::Concat(parts) => {
+                let vals: Vec<LogicVal> = parts.iter().map(|p| {
+                    self.get_lval_val(p).unwrap_or_else(|| {
+                        let w = self.lvalue_width(p);
+                        let xm = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+                        LogicVal::new(w as u16, xm, xm)
+                    })
+                }).collect();
+                Some(vals[1..].iter().fold(vals[0].clone(), |acc, v| acc.concat(v)))
+            }
         }
     }
 
-    fn write_lvalue(&mut self, lval: &LValue, val: LogicVal) {
+    fn write_lvalue(&mut self, lval: &LValue, val: LogicVal, signed: bool) {
         match lval {
             LValue::Net(id) => {
                 let net_id = *id;
                 let w = self.design.get_net(net_id).width;
-                let val = if val.width() == w { val } else { val.resize(w) };
+                let val = if val.width() == w {
+                    val
+                } else if signed {
+                    val.extend_sign(w)
+                } else {
+                    val.resize(w)
+                };
                 self.net_values.insert(net_id, val.clone());
                 self.vcd_record_net_change(net_id, &val);
             }
@@ -736,13 +766,41 @@ impl Interpreter {
                 let idx = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 self.mem_values.insert((mem_id.0, idx), val);
             }
+            LValue::Concat(parts) => {
+                let total_w: u32 = parts.iter().map(|p| self.lvalue_width(p)).sum();
+                let full = if signed { val.extend_sign(total_w) } else { val.resize(total_w) };
+                let mut hi = total_w;
+                for p in parts {
+                    let w = self.lvalue_width(p);
+                    let lo = hi - w;
+                    let slice = full.part_select(hi - 1, lo).unwrap_or(LogicVal::X);
+                    self.write_lvalue(p, slice, false);
+                    hi = lo;
+                }
+            }
         }
     }
 
     fn trigger_sensitivity(&mut self, lval: &LValue, old: Option<&LogicVal>, new: &LogicVal) {
+        if let LValue::Concat(parts) = lval {
+            let total_w: u32 = parts.iter().map(|p| self.lvalue_width(p)).sum();
+            let new_full = new.resize(total_w);
+            let old_full = old.map(|o| o.resize(total_w));
+            let mut hi = total_w;
+            for p in parts {
+                let w = self.lvalue_width(p);
+                let lo = hi - w;
+                let part_new = new_full.part_select(hi - 1, lo).unwrap_or(LogicVal::X);
+                let part_old = old_full.as_ref().and_then(|o| o.part_select(hi - 1, lo).ok());
+                self.trigger_sensitivity(p, part_old.as_ref(), &part_new);
+                hi = lo;
+            }
+            return;
+        }
         let net_id = match lval {
             LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => *id,
             LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
+            LValue::Concat(_) => unreachable!("handled by the early return above"),
         };
 
         // Determine edge type of the change per IEEE 1364: bit 0 is aval, bit 1 is bval
@@ -794,13 +852,14 @@ impl Interpreter {
             let mut changed = false;
             let conts = self.design.conts.clone();
             for cont in &conts {
+                let signed = self.design.expr_signed[cont.expr.0 as usize];
                 let val = self.eval_expr(cont.expr);
                 let old = self.get_lval_val(&cont.lval);
                 if old.as_ref() != Some(&val) {
                     changed = true;
                     let lval = cont.lval.clone();
                     let ov = old;
-                    self.write_lvalue(&lval, val.clone());
+                    self.write_lvalue(&lval, val.clone(), signed);
                     self.trigger_sensitivity(&lval, ov.as_ref(), &val);
                 }
             }
@@ -1087,6 +1146,21 @@ fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &st
 /// （IEEE 1364-2001 4.5.1: shift 量の符号は結果に影響しない）。
 fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal, l_signed: bool, r_signed: bool) -> LogicVal {
     let both_signed = l_signed && r_signed;
+    // 幅の異なる signed オペランド同士は、演算前に共通の最大幅へ符号拡張して bit pattern を
+    // 揃える（例: 4bit -2 + 8bit 3 を zero-extend のまま加算すると値が壊れる）。
+    // shift 量（右辺）は self-determined unsigned のため対象外、===/!== は IEEE 上
+    // 暗黙のコンテキスト拡張を行わない厳密ビット比較のため対象外。
+    let is_shift = matches!(op, BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr);
+    let is_case = matches!(op, BinOp::CaseEq | BinOp::CaseNe);
+    let (l_ext, r_ext);
+    let (l, r) = if both_signed && !is_shift && !is_case && l.width() != r.width() {
+        let w = l.width().max(r.width());
+        l_ext = l.extend_sign(w);
+        r_ext = r.extend_sign(w);
+        (&l_ext, &r_ext)
+    } else {
+        (l, r)
+    };
     match op {
         BinOp::Add => l.add(r),
         BinOp::Sub => l.sub(r),

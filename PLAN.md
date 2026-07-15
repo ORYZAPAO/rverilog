@@ -378,8 +378,8 @@ iverilog 出力比較 CI 導入済み）。
 - `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
 - `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
 - `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
-- 連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）
-  → $signed 対応作業（2026-07-12 節参照）の Task 2d として対応中
+- ~~連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）~~
+  **対応済み（2026-07-16）**。$signed 対応作業（2026-07-12 節参照）の Task 2d として修正
 - リポジトリの CLAUDE.md が空、`tests/rtl/fifo_counter.v` が未使用
 
 ### 推奨着手順
@@ -453,7 +453,7 @@ D 連続代入 sensitivity 化 → B 無言スキップの診断化）を優先�
 ロードマップ上に既に位置づけられており、着手する場合は `width.rs` の
 context-determined 幅推論再設計（実装課題 D 節）とセットで行う必要がある。
 
-## $signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）
+## $signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12開始、2026-07-16 Task2c/2d/3/4完了）
 
 picorv32.v（`$signed` を25箇所使用）のシミュレーションを目標とした対応。
 設計書: `docs/superpowers/specs/2026-07-12-signed-support-design.md`
@@ -480,21 +480,43 @@ picorv32.v（`$signed` を25箇所使用）のシミュレーションを目標�
 |---|---|---|
 | 1 | RHS 式の部分選択が全ビット値に化ける | ✅ 修正済み（Task 2b） |
 | 2 | 連結 parts にネストした式が混入 | ✅ 修正済み（Task 2a） |
-| 3 | LHS 部分選択 `q[31:20] <= x` が全ビット代入になる | ⏳ Task 2c（frontend のみ、elab/sim は対応済み） |
-| 4 | LHS 連結 `{a,b} <= x` が先頭要素のみ（F 節既知） | ⏳ Task 2d（HIR/MIR に `LValue::Concat` 追加＋sim 分割書き込みが必要） |
+| 3 | LHS 部分選択 `q[31:20] <= x` が全ビット代入になる | ✅ 修正済み（Task 2c、2026-07-16） |
+| 4 | LHS 連結 `{a,b} <= x` が先頭要素のみ（F 節既知） | ✅ 修正済み（Task 2d、2026-07-16） |
 
-### 残タスク
+### Task 2c・2d・3・4（2026-07-16 完了）
 
-- **Task 2c**: LHS 部分選択（frontend `lower_var_lvalue` の part-select 対応）
-- **Task 2d**: LHS 連結（HIR/MIR `LValue::Concat`、sim `write_lvalue` 分割書き込み）
-- **Task 3**: 代入時の符号拡張（`write_lvalue` に `rhs_signed` 追加、NBA キューにフラグ。
-  picorv32 の `decoded_imm <= $signed(...)` の本丸）
-- **Task 4**: 演算オペランドの符号拡張（`apply_binop` で幅が異なる signed 同士を
-  max 幅へ `extend_sign`）
-- **Task 5**: picorv32.v parse/elab スモークチェック、PR 仕上げ
+- **Task 2c**: `frontend/src/lower.rs` の `lower_var_lvalue` に part-select 分岐を追加
+  （`lower_lvalue_part_select` 新設、`lower_part_select`（式版）と同型）。elab の
+  `lower_lvalue`（`HirLValue::PartSelect` アーム）は元々対応済みだったため変更不要
+- **Task 2d**: `hir::LValue`/`mir::LValue` に `Concat(Vec<LValue>)` を追加。
+  `lower_var_lvalue` の `VL::Lvalue` アーム（従来は先頭要素のみ返す既知バグ）を修正し
+  `LValue::Concat` を返すよう変更。elab の `lower_lvalue` に再帰変換アームを追加。
+  sim側は新設 `lvalue_width`（lvalue の合計ビット幅を再帰計算するヘルパー）を軸に、
+  `write_lvalue`（MSBから幅で切り出して各部分へ再帰書き込み）・`get_lval_val`
+  （各部分の値をMSB順に concat）・`trigger_sensitivity`（合計幅で old/new を揃えてから
+  各部分へ再帰分割）にそれぞれ `Concat` アームを追加
+- **Task 3**: `write_lvalue` に `signed: bool` 引数を追加。`LValue::Net` アームで
+  signed なら `extend_sign`、そうでなければ従来通り `resize`（切り詰め/ゼロ拡張）。
+  呼び出し元4箇所（`BlockingAssign`/`NbaAssign`×2＋`ContAssign`）で
+  `ElaboratedDesign::expr_signed` から signed を取得して渡す。`nba_queue` の要素も
+  `(LValue, LogicVal, bool)` に変更しNBA適用時までsignedを保持
+- **Task 4**: `apply_binop` で `both_signed` かつ幅が異なる場合、演算前に両辺を
+  共通の最大幅へ `extend_sign` で揃えるよう修正。シフト演算（右辺は self-determined
+  unsigned）と `===`/`!==`（暗黙のコンテキスト拡張をしない厳密比較）は対象外
+- 新規テスト `tests/integration/cases/lvalue_select/`（LHS部分選択・LHS連結、
+  blocking/nonblocking 双方）を追加、iverilog 実出力から期待値作成
+- 既存の `signed_cast`/`compare_signed_cast`（Task 3・4 の TDD アンカー）が
+  新規追加なしで FAIL→PASS に変化することを確認
 
-### 検証状態（2026-07-12 時点）
+### Task 5（未着手・スキップ）
 
-- 既存テスト全パス（iverilog 比較 8/8 含む）、リグレッションなし
-- `signed_cast` テストのみ FAIL（意図的な TDD アンカー。値は全行正しく、
-  符号拡張のみ未対応: 例 `cat=00000040` ← 期待 `ffffffc0`）
+- picorv32.v の parse/elab スモークチェックは、実ファイルがリポジトリに存在しないため
+  2026-07-16 時点でユーザー判断により見送り。picorv32.v を別途入手した際に実施すること
+
+### 検証状態（2026-07-16 時点）
+
+- `cargo build --workspace` / `cargo test --workspace` 全通過（新規
+  `test_lvalue_select`/`compare_lvalue_select` 含む）、既存テストへの回帰なし
+- `signed_cast`/`compare_signed_cast` が FAIL→PASS に変化（Task 3・4 のTDDアンカー達成）
+- `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行し VCD 生成・
+  正常終了を確認（回帰なし）
