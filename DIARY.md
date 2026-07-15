@@ -1636,3 +1636,33 @@ signed対応（PR #7〜#12）がマージされる前の古い `feat/m1-mileston
 - マージ後の実装課題節の残タスク（D: 連続代入のsensitivity駆動化、
   B: サイレントスキップの診断化、E: fmt/clippyジョブのCI追加）は
   従来通り
+
+## 2026-07-16
+
+### Task
+
+PR #13・#14 マージ後、PR #16（`docs/pr-conflict-resolution-2026-07-15`、
+本DIARY記録PRそのもの）がベースの `feat/m1-milestone` に対して
+コンフリクトしている、との報告を受け調査。
+
+### What was done
+
+- `gh pr view 16` で `mergeable: CONFLICTING` を確認。原因は
+  DIARY.md末尾への追記が両側（PR #16のブランチと、#13・#14マージ後の
+  `feat/m1-milestone`）で隣接していたための機械的な衝突で、実質的な
+  内容衝突ではないことを diff で確認。
+- `git rebase origin/feat/m1-milestone` を実行し、DIARY.md の
+  コンフリクトを「2026-07-14 (2)」→「2026-07-15」の時系列順に
+  並べる形で解消。他ファイルの変更なし（DIARY.mdへの82行追加のみ、
+  という元PRの差分内容も rebase 後に一致することを確認）。
+- `git push --force-with-lease` でPR #16のリモートブランチを更新。
+
+### Result
+
+✅ PR #16: `mergeable: CONFLICTING` → `MERGEABLE` に変化
+⏳ `mergeStateStatus: UNSTABLE` はCI `test` ジョブが pending
+   のためで、コンフリクトとは無関係
+
+### Next
+
+- PR #16のCI完了後、マージ可能
