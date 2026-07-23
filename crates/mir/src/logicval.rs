@@ -671,6 +671,12 @@ impl LogicVal {
         }
         Ok(Self::from_chunks(out_width, &a, &b))
     }
+
+    /// 指定幅の全ビットX値を生成する（範囲外indexed part-selectのフォールバック用）
+    pub fn x_of_width(width: u32) -> LogicVal {
+        let n = num_chunks(width);
+        Self::from_chunks(width, &vec![u64::MAX; n], &vec![u64::MAX; n])
+    }
 }
 
 // ── Display ───────────────────────────────────────────────────────────────────

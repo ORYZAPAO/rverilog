@@ -95,6 +95,26 @@ fn test_signed_cast() {
 }
 
 #[test]
+fn test_lvalue_select() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/lvalue_select/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("lvalue_select");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
+fn test_indexed_part_select() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/indexed_part_select/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("indexed_part_select");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_edge_x() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/edge_x/dut.v")];

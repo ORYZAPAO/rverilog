@@ -334,6 +334,8 @@ iverilog 出力比較 CI 導入済み）。
 | A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
 | A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
+| A10 | **二項演算子の結合順序が壊れている（重大）** | `frontend/src/lower.rs` `lower_expression` の `E::Binary`、根本原因は `sv-parser` クレート側 | 2026-07-23発見。`a-b+c` や `a*b+c` のような3項以上の二項演算チェーンが、演算子の優先順位・結合則を無視して常に右結合（`a-(b+c)`、`a*(b+c)`）で評価される。`sv_parser::Expression::Binary` の生ノード自体が `(lhs="a", op="-", rhs="b+c")` という誤った木を返しており（`tree.get_str`で確認済み）、`lower_expression`はそれをそのまま辿っているだけで再結合はしていない。`7+i*8`（加算が先・乗算が後）のように「後続演算子の優先順位が高い」順序はたまたま正しい木と一致するため気づかれにくい。picorv32.vのような複雑な算術式を含む実RTLでは高確率で誤動作する。修正には `lower_expression`側で優先順位に基づく再結合（shunting-yard等）を行うか、`sv-parser`側の不具合であれば別クレートへの切替を検討する必要がある |
+| A11 | `localparam`宣言がモジュール本体途中にあると名前解決されない | `elab/src/elaborate.rs`（param登録パス） | 2026-07-23発見。picorv32.vの `localparam cpu_state_fetch = 8'b01000000;` のようにalwaysブロック等に挟まれてモジュール中盤で宣言されたlocalparamが `unresolved net/param` 警告となり `LogicVal::X` にフォールバックする。この結果、状態機械のcase文がすべてX比較になり、シミュレーションが收束せず無限ループ/ハングする（`--max-time`指定でも停止しない）ことを確認。モジュール冒頭のparameter/localparamは正常に解決される模様で、宣言位置に依存した登録パスの抜けが疑われる（未調査、原因箇所未特定） |
 
 ### B. 未対応の言語機能
 
@@ -378,8 +380,8 @@ iverilog 出力比較 CI 導入済み）。
 - `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
 - `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
 - `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
-- 連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）
-  → $signed 対応作業（2026-07-12 節参照）の Task 2d として対応中
+- ~~連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）~~
+  **対応済み（2026-07-16）**。$signed 対応作業（2026-07-12 節参照）の Task 2d として修正
 - リポジトリの CLAUDE.md が空、`tests/rtl/fifo_counter.v` が未使用
 
 ### 推奨着手順
@@ -387,9 +389,14 @@ iverilog 出力比較 CI 導入済み）。
 1. ~~A1: signed 対応~~ 完了（2026-07-09）
 2. ~~A2: エッジ検出の IEEE 準拠化~~ 完了（2026-07-14）
 3. ~~A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正~~ 完了（2026-07-14、イベントループ再構成として一括対応）
-4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
-5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
-6. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
+4. ~~indexed part-select (`+:`/`-:`) 対応~~ 完了（2026-07-23、picorv32.v スモークチェックの
+   ブロッカー解消のため）
+5. **A10: 二項演算子の結合順序バグ（最優先候補）**: 2026-07-23発見、重大。既存の全算術式の
+   正しさに関わる根本的な問題で、picorv32.v含む複雑な式を持つRTL全般に影響する可能性が高い
+6. A11: モジュール中盤の `localparam` 名前解決の調査・修正
+7. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
+8. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
+9. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
 
 補足: A1 で `width.rs` 自体の context-determined 幅推論再設計は見送った（signedness 伝搬のみ
 `ElabCtx.expr_signed` として別経路で実装し、幅計算は既存の elaborate.rs 分散実装のまま）。
@@ -453,7 +460,7 @@ D 連続代入 sensitivity 化 → B 無言スキップの診断化）を優先�
 ロードマップ上に既に位置づけられており、着手する場合は `width.rs` の
 context-determined 幅推論再設計（実装課題 D 節）とセットで行う必要がある。
 
-## $signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12、進行中）
+## $signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12開始、2026-07-16 Task2c/2d/3/4完了）
 
 picorv32.v（`$signed` を25箇所使用）のシミュレーションを目標とした対応。
 設計書: `docs/superpowers/specs/2026-07-12-signed-support-design.md`
@@ -480,21 +487,86 @@ picorv32.v（`$signed` を25箇所使用）のシミュレーションを目標�
 |---|---|---|
 | 1 | RHS 式の部分選択が全ビット値に化ける | ✅ 修正済み（Task 2b） |
 | 2 | 連結 parts にネストした式が混入 | ✅ 修正済み（Task 2a） |
-| 3 | LHS 部分選択 `q[31:20] <= x` が全ビット代入になる | ⏳ Task 2c（frontend のみ、elab/sim は対応済み） |
-| 4 | LHS 連結 `{a,b} <= x` が先頭要素のみ（F 節既知） | ⏳ Task 2d（HIR/MIR に `LValue::Concat` 追加＋sim 分割書き込みが必要） |
+| 3 | LHS 部分選択 `q[31:20] <= x` が全ビット代入になる | ✅ 修正済み（Task 2c、2026-07-16） |
+| 4 | LHS 連結 `{a,b} <= x` が先頭要素のみ（F 節既知） | ✅ 修正済み（Task 2d、2026-07-16） |
 
-### 残タスク
+### Task 2c・2d・3・4（2026-07-16 完了）
 
-- **Task 2c**: LHS 部分選択（frontend `lower_var_lvalue` の part-select 対応）
-- **Task 2d**: LHS 連結（HIR/MIR `LValue::Concat`、sim `write_lvalue` 分割書き込み）
-- **Task 3**: 代入時の符号拡張（`write_lvalue` に `rhs_signed` 追加、NBA キューにフラグ。
-  picorv32 の `decoded_imm <= $signed(...)` の本丸）
-- **Task 4**: 演算オペランドの符号拡張（`apply_binop` で幅が異なる signed 同士を
-  max 幅へ `extend_sign`）
-- **Task 5**: picorv32.v parse/elab スモークチェック、PR 仕上げ
+- **Task 2c**: `frontend/src/lower.rs` の `lower_var_lvalue` に part-select 分岐を追加
+  （`lower_lvalue_part_select` 新設、`lower_part_select`（式版）と同型）。elab の
+  `lower_lvalue`（`HirLValue::PartSelect` アーム）は元々対応済みだったため変更不要
+- **Task 2d**: `hir::LValue`/`mir::LValue` に `Concat(Vec<LValue>)` を追加。
+  `lower_var_lvalue` の `VL::Lvalue` アーム（従来は先頭要素のみ返す既知バグ）を修正し
+  `LValue::Concat` を返すよう変更。elab の `lower_lvalue` に再帰変換アームを追加。
+  sim側は新設 `lvalue_width`（lvalue の合計ビット幅を再帰計算するヘルパー）を軸に、
+  `write_lvalue`（MSBから幅で切り出して各部分へ再帰書き込み）・`get_lval_val`
+  （各部分の値をMSB順に concat）・`trigger_sensitivity`（合計幅で old/new を揃えてから
+  各部分へ再帰分割）にそれぞれ `Concat` アームを追加
+- **Task 3**: `write_lvalue` に `signed: bool` 引数を追加。`LValue::Net` アームで
+  signed なら `extend_sign`、そうでなければ従来通り `resize`（切り詰め/ゼロ拡張）。
+  呼び出し元4箇所（`BlockingAssign`/`NbaAssign`×2＋`ContAssign`）で
+  `ElaboratedDesign::expr_signed` から signed を取得して渡す。`nba_queue` の要素も
+  `(LValue, LogicVal, bool)` に変更しNBA適用時までsignedを保持
+- **Task 4**: `apply_binop` で `both_signed` かつ幅が異なる場合、演算前に両辺を
+  共通の最大幅へ `extend_sign` で揃えるよう修正。シフト演算（右辺は self-determined
+  unsigned）と `===`/`!==`（暗黙のコンテキスト拡張をしない厳密比較）は対象外
+- 新規テスト `tests/integration/cases/lvalue_select/`（LHS部分選択・LHS連結、
+  blocking/nonblocking 双方）を追加、iverilog 実出力から期待値作成
+- 既存の `signed_cast`/`compare_signed_cast`（Task 3・4 の TDD アンカー）が
+  新規追加なしで FAIL→PASS に変化することを確認
 
-### 検証状態（2026-07-12 時点）
+### Task 5（2026-07-23 実施）
 
-- 既存テスト全パス（iverilog 比較 8/8 含む）、リグレッションなし
-- `signed_cast` テストのみ FAIL（意図的な TDD アンカー。値は全行正しく、
-  符号拡張のみ未対応: 例 `cat=00000040` ← 期待 `ffffffc0`）
+picorv32.v が入手できたため実施。1回目の実行で `picorv32_pcpi_fast_mul` モジュール内の
+indexed part-select（`next_rd[j +: CARRY_CHAIN]`等）が `Unsupported construct` で
+パースを止めていたことが判明し、`+:`/`-:` indexed part-select 対応を実装（下記
+「indexed part-select 対応」節参照）。実装後の再実行結果は以下の通り:
+
+- パースは8モジュールすべて成功（indexed part-selectのブロッカーは解消）
+- elaboration も `picorv32` トップまで到達するが、モジュール中盤で宣言された
+  `localparam`（`cpu_state_fetch`等）が名前解決できず大量の `unresolved net/param` 警告
+  → **新規発見 A11**（PLAN.md 実装課題A節参照）
+- シミュレーション開始後、`--max-time 10` を指定してもハングし停止しない
+  （state machine の case 文がすべてX比較になるため、A11が原因と推定、未確定）
+- 調査の過程で **A10（二項演算子の結合順序が壊れている、重大）** を発見。
+  `a-b+c`や`a*b+c`のような3項以上の演算子チェーンが優先順位・結合則を無視して
+  常に右結合で評価される、`sv-parser`クレート由来の不具合。picorv32.vのような
+  実RTLでは高確率で誤動作すると見られる
+
+Task 5自体（parse/elabスモークチェック）は「エラー内容を明らかにする」という目的は
+達成したが、A10・A11という新たな重大課題が見つかったため、picorv32.vのフル
+シミュレーションはまだ未達成。次の一手はユーザーと相談（A10優先が妥当と推測: 影響範囲が
+広く、算術式を含む既存の全機能の正しさに関わるため）。
+
+### indexed part-select (`+:` / `-:`) 対応（2026-07-23 実装）
+
+Task 5のブロッカー解消のため実装。`DynBitSelect`（既存の動的1bitビット選択）と同型の
+パターンで、「base は実行時式、width は定数」の part-select を追加:
+
+- HIR: `Expr::IndexedPartSel`/`LValue::IndexedPartSelect`（net, base式, width式, plus_dir）
+- MIR: `Expr::DynPartSel`/`LValue::DynPartSelect`（NetId, base ExprId, 定数width, plus_dir）
+- frontend: `lower_part_select`/`lower_lvalue_part_select` の `IndexedRange` 明示エラー
+  分岐を実装に置換
+- elab: `lower_expr`/`lower_lvalue` に新アーム追加、baseは定数畳み込みせずExprIdのまま
+  伝搬、widthのみ`eval_const_hir`で確定。`compute_expr_signed`にself-determined
+  unsignedとして追加
+- sim: `eval_expr`/`write_lvalue`/`lvalue_width`/`get_lval_val`/`trigger_sensitivity`に
+  新アーム追加。範囲外アクセス（負のbase、ネット幅超過）は既存の`PartSelect`と同水準の
+  簡略化（読み出しは全体X、書き込みは無視）
+- `LogicVal::x_of_width`ヘルパーを新設（範囲外アクセス時の正しい幅のX値生成用）
+- 新規テスト `tests/integration/cases/indexed_part_select/`（RHS `+:`/`-:`、LHS
+  `+:`/`-:`のblocking/nonblocking、実行時変数をbaseに使用）。iverilog実出力から
+  期待値作成
+- テスト作成中にA10（二項演算子結合順序バグ）を発見したため、`i*8+7`のような
+  「乗算の後に加算」の順序を避け`7+i*8`（数学的に等価、バグの影響を受けない順序）で
+  記述した
+
+### 検証状態（2026-07-23 時点）
+
+- `cargo build --workspace` / `cargo test --workspace` 全通過（新規
+  `test_indexed_part_select`/`compare_indexed_part_select` 含む、既存テストへの回帰なし）
+- `signed_cast`/`compare_signed_cast` は引き続きPASS
+- `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行し VCD 生成・
+  正常終了を確認（回帰なし）
+- picorv32.v: パース成功（indexed part-selectブロッカー解消）、ただしA10・A11により
+  フルシミュレーションは未達成（上記Task 5節参照）

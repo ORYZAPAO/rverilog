@@ -128,7 +128,12 @@ pub enum LValue {
     /// 動的インデックスでのビット選択（genvar 等、実行時に決まるインデックス）
     DynBitSelect(NetId, ExprId),
     PartSelect(NetId, u32, u32), // net, hi, lo
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数、bool は true=`+:` / false=`-:`
+    DynPartSelect(NetId, ExprId, u32, bool),
     MemWrite(MemId, ExprId),
+    /// LHS連結 `{a,b} <= x`。先頭要素がMSB。
+    Concat(Vec<LValue>),
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +171,9 @@ pub enum Expr {
     Net(NetId),
     BitSel(NetId, ExprId),
     PartSel(NetId, u32, u32), // net, hi, lo
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数、bool は true=`+:` / false=`-:`
+    DynPartSel(NetId, ExprId, u32, bool),
     Concat(Vec<ExprId>),
     Repeat(u32, ExprId),
     Bin(BinOp, ExprId, ExprId),
