@@ -7,6 +7,13 @@ use rverilog_vcd::VcdWriter;
 // Execution frame: (stmt_list, next_index, block_id of NamedBlock this frame represents, for `disable`)
 type Frame = (Vec<StmtId>, usize, Option<u32>);
 
+/// indexed part-select (`base +: width` / `base -: width`) の (hi, lo) を計算する。
+/// base が負、または hi < lo となる不正な範囲の場合は None。
+fn indexed_part_select_bounds(base: i64, width: u32, plus_dir: bool) -> Option<(i64, i64)> {
+    let (hi, lo) = if plus_dir { (base + width as i64 - 1, base) } else { (base, base - width as i64 + 1) };
+    if lo < 0 || hi < lo { None } else { Some((hi, lo)) }
+}
+
 struct ProcState {
     id: ProcessId,
     kind: ProcessKind,
@@ -511,6 +518,16 @@ impl Interpreter {
                 let net_val = self.read_net(net_id);
                 net_val.part_select(hi, lo).unwrap_or(LogicVal::X)
             }
+            Expr::DynPartSel(net_id, base_id, width, plus_dir) => {
+                let net_val = self.read_net(net_id);
+                let base = self.eval_expr(base_id).pad_to_width(32) as i64;
+                match indexed_part_select_bounds(base, width, plus_dir) {
+                    Some((hi, lo)) if (hi as u32) < net_val.width() => {
+                        net_val.part_select(hi as u32, lo as u32).unwrap_or_else(|_| LogicVal::x_of_width(width))
+                    }
+                    _ => LogicVal::x_of_width(width),
+                }
+            }
             Expr::Concat(parts) => {
                 if parts.is_empty() { return LogicVal::ZERO; }
                 let vals: Vec<LogicVal> = parts.iter().map(|&id| self.eval_expr(id)).collect();
@@ -669,6 +686,7 @@ impl Interpreter {
             LValue::Net(id) => self.design.get_net(*id).width,
             LValue::BitSelect(_, _) | LValue::DynBitSelect(_, _) => 1,
             LValue::PartSelect(_, hi, lo) => hi - lo + 1,
+            LValue::DynPartSelect(_, _, width, _) => *width,
             LValue::MemWrite(mem_id, _) => self.design.get_mem(*mem_id).elem_width,
             LValue::Concat(parts) => parts.iter().map(|p| self.lvalue_width(p)).sum(),
         }
@@ -677,7 +695,8 @@ impl Interpreter {
     fn get_lval_val(&mut self, lval: &LValue) -> Option<LogicVal> {
         match lval {
             LValue::Net(id) => self.net_values.get(id).cloned(),
-            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => {
+            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _)
+            | LValue::DynPartSelect(id, _, _, _) => {
                 self.net_values.get(id).cloned()
             }
             LValue::MemWrite(mem_id, idx_id) => {
@@ -762,6 +781,32 @@ impl Interpreter {
                 self.net_values.insert(net_id, new_val.clone());
                 self.vcd_record_net_change(net_id, &new_val);
             }
+            LValue::DynPartSelect(id, base_id, width, plus_dir) => {
+                let net_id = *id;
+                let w = self.design.get_net(net_id).width;
+                let base = self.eval_expr(*base_id).pad_to_width(32) as i64;
+                // 範囲外（負のbase等）は書き込みを無視する。ネット幅を超える場合も
+                // 無視する（PartSelect の書き込みと同水準の割り切り、部分的な
+                // ビット単位書き込みまではやらない）
+                if let Some((hi, lo)) = indexed_part_select_bounds(base, *width, *plus_dir) {
+                    if hi >= 0 && (hi as u32) < w {
+                        let (hi, lo) = (hi as u32, lo as u32);
+                        let old = self.net_values.get(&net_id).cloned()
+                            .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
+                        let oa = old.pad_to_width(w);
+                        let ob = old.pad_to_width_b(w);
+                        let sel_w = hi - lo + 1;
+                        let m = if sel_w >= 64 { u64::MAX } else { (1u64 << sel_w) - 1 };
+                        let va = val.pad_to_width(sel_w);
+                        let vb = val.pad_to_width_b(sel_w);
+                        let na = (oa & !(m << lo)) | (va << lo);
+                        let nb = (ob & !(m << lo)) | (vb << lo);
+                        let new_val = LogicVal::new(w as u16, na, nb);
+                        self.net_values.insert(net_id, new_val.clone());
+                        self.vcd_record_net_change(net_id, &new_val);
+                    }
+                }
+            }
             LValue::MemWrite(mem_id, idx_id) => {
                 let idx = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 self.mem_values.insert((mem_id.0, idx), val);
@@ -798,7 +843,8 @@ impl Interpreter {
             return;
         }
         let net_id = match lval {
-            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _) => *id,
+            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _)
+            | LValue::DynPartSelect(id, _, _, _) => *id,
             LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
             LValue::Concat(_) => unreachable!("handled by the early return above"),
         };

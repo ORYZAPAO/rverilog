@@ -114,7 +114,8 @@ impl<'a> ElabCtx<'a> {
             Expr::Const(_) => false,
             Expr::Net(id) => self.nets[id.0 as usize].is_signed,
             // ビット選択/部分選択/連結/リピート/メモリ読み出しは self-determined unsigned（IEEE準拠）
-            Expr::BitSel(..) | Expr::PartSel(..) | Expr::Concat(..) | Expr::Repeat(..) | Expr::MemRead(..) => false,
+            Expr::BitSel(..) | Expr::PartSel(..) | Expr::DynPartSel(..)
+            | Expr::Concat(..) | Expr::Repeat(..) | Expr::MemRead(..) => false,
             Expr::StringLit(_) => false,
             Expr::Random(_) => false,
             Expr::CallResult(_, ret_net) => self.nets[ret_net.0 as usize].is_signed,
@@ -750,6 +751,12 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
             let lo = eval_const_hir(ctx, scope, &range.right).unwrap_or(0) as u32;
             Expr::PartSel(net_id, hi, lo)
         }
+        HirExpr::IndexedPartSel(base, idx, width_e, plus_dir) => {
+            let net_id = extract_net_id(ctx, scope, base)?;
+            let idx_id = lower_expr(ctx, scope, idx)?;
+            let width = eval_const_hir(ctx, scope, width_e).unwrap_or(1) as u32;
+            Expr::DynPartSel(net_id, idx_id, width, *plus_dir)
+        }
         HirExpr::Concat(parts) => {
             let ids: Result<Vec<_>, _> = parts.iter().map(|p| lower_expr(ctx, scope, p)).collect();
             Expr::Concat(ids?)
@@ -879,6 +886,16 @@ fn lower_lvalue(ctx: &mut ElabCtx, scope: ScopeId, lval: &HirLValue) -> Result<L
             let hi = eval_const_hir(ctx, scope, &range.left).unwrap_or(0) as u32;
             let lo = eval_const_hir(ctx, scope, &range.right).unwrap_or(0) as u32;
             Ok(LValue::PartSelect(base_id, hi, lo))
+        }
+        HirLValue::IndexedPartSelect(base, idx, width_e, plus_dir) => {
+            let base_id = match base.as_ref() {
+                HirLValue::Net(n) => ctx.resolve_net(scope, n.as_str())
+                    .ok_or_else(|| ElabError::UnresolvedName(n.to_string()))?,
+                _ => return Err(ElabError::UnsupportedConstruct("nested lvalue".into())),
+            };
+            let idx_id = lower_expr(ctx, scope, idx)?;
+            let width = eval_const_hir(ctx, scope, width_e).unwrap_or(1) as u32;
+            Ok(LValue::DynPartSelect(base_id, idx_id, width, *plus_dir))
         }
         HirLValue::IndexSel(name, idx) => {
             let idx_id = lower_expr(ctx, scope, idx)?;

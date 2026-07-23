@@ -207,6 +207,9 @@ pub enum LValue {
     Net(SmolStr),
     BitSelect(Box<LValue>, u32),
     PartSelect(Box<LValue>, Range),
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数式、bool は true=`+:` / false=`-:`
+    IndexedPartSelect(Box<LValue>, Box<Expr>, Box<Expr>, bool),
     IndexSel(SmolStr, Box<Expr>),
     Concat(Vec<LValue>),
 }
@@ -260,6 +263,9 @@ pub enum Expr {
     StringLit(SmolStr),
     BitSel(Box<Expr>, Box<Expr>),
     PartSel(Box<Expr>, Box<Range>),
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数式、bool は true=`+:` / false=`-:`
+    IndexedPartSel(Box<Expr>, Box<Expr>, Box<Expr>, bool),
     Concat(Vec<Expr>),
     Repeat(Box<Expr>, Vec<Expr>),
     Bin(BinOp, Box<Expr>, Box<Expr>),

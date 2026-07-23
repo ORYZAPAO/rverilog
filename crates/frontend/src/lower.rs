@@ -1582,8 +1582,17 @@ fn lower_lvalue_part_select(
                 Range { left: Box::new(left), right: Box::new(right) },
             ))
         }
-        sv_parser::PartSelectRange::IndexedRange(_) => {
-            Err(unsupported("indexed part-select (+:/-:) in lvalue"))
+        sv_parser::PartSelectRange::IndexedRange(ir) => {
+            // ir.nodes = (Expression /*base*/, Symbol /*"+:" or "-:"*/, ConstantExpression /*width*/)
+            let base = lower_expression(tree, &ir.nodes.0)?;
+            let width = lower_const_expr(tree, &ir.nodes.2)?;
+            let plus_dir = tree.get_str(&ir.nodes.1).unwrap_or("+:").trim() == "+:";
+            Ok(LValue::IndexedPartSelect(
+                Box::new(LValue::Net(name)),
+                Box::new(base),
+                Box::new(width),
+                plus_dir,
+            ))
         }
     }
 }
@@ -1718,8 +1727,17 @@ fn lower_part_select(tree: &SyntaxTree, name: SmolStr, psr: &sv_parser::PartSele
                 Box::new(Range { left: Box::new(left), right: Box::new(right) }),
             ))
         }
-        sv_parser::PartSelectRange::IndexedRange(_) => {
-            Err(unsupported("indexed part-select (+:/-:) in expression"))
+        sv_parser::PartSelectRange::IndexedRange(ir) => {
+            // ir.nodes = (Expression /*base*/, Symbol /*"+:" or "-:"*/, ConstantExpression /*width*/)
+            let base = lower_expression(tree, &ir.nodes.0)?;
+            let width = lower_const_expr(tree, &ir.nodes.2)?;
+            let plus_dir = tree.get_str(&ir.nodes.1).unwrap_or("+:").trim() == "+:";
+            Ok(Expr::IndexedPartSel(
+                Box::new(Expr::Net(name)),
+                Box::new(base),
+                Box::new(width),
+                plus_dir,
+            ))
         }
     }
 }

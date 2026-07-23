@@ -120,6 +120,12 @@ fn compare_lvalue_select() {
 }
 
 #[test]
+fn compare_indexed_part_select() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/indexed_part_select/dut.v")]);
+}
+
+#[test]
 fn compare_edge_x() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/edge_x/dut.v")]);

@@ -1731,3 +1731,126 @@ FAIL状態のままだったのを解消するのが主目的。
 - Task 5: picorv32.v を入手した場合にスモークチェックを実施
 - 実装課題節の残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
   E: fmt/clippyジョブのCI追加）は従来通り
+
+## 2026-07-23
+
+### Task
+
+`feat/signed-lvalue-assign-ext` ブランチ（Task 2c/2d/3/4 実装コミット `5cdae32` 済み、
+`feat/m1-milestone` からの差分はこの1コミットのみ）で、作業ディレクトリに `picorv32.v`
+が入手できたため、PLAN.md に残タスクとして記録されていた Task 5
+（picorv32.v の parse/elab スモークチェック）を実施。
+
+### What was done
+
+- `cargo build --workspace` / `cargo build -p rverilog-cli --release` が成功することを確認
+- `rverilog --top picorv32 -o /tmp/picorv32_smoke.vcd --max-time 100 picorv32.v` を実行
+- 結果: パースエラーで停止。`Unsupported construct: indexed part-select (+:/-:) in lvalue`
+- 原因箇所を特定: `picorv32_pcpi_fast_mul` モジュール（2318行目〜、高速乗算器、
+  `ENABLE_FAST_MUL` パラメータで選択的に使われる非デフォルト実装）内、2264〜2265行目
+  ```verilog
+  {next_rdt[j+CARRY_CHAIN-1], next_rd[j +: CARRY_CHAIN]} =
+          next_rd[j +: CARRY_CHAIN] + next_rdx[j +: CARRY_CHAIN] + this_rs2[j +: CARRY_CHAIN];
+  ```
+  が LHS（連結内の part-select）・RHS 双方で indexed part-select (`+:`) を使用
+- frontend の collection パスは**全モジュール定義を無条件に lowering する**設計のため、
+  `picorv32` トップが `picorv32_pcpi_fast_mul` を実際にインスタンス化するか
+  （`ENABLE_FAST_MUL` の既定値）とは無関係にこのエラーで停止する
+- picorv32.v 全体を `while`/`repeat`/`forever`/`**`/`defparam`/`specify`/`real` について
+  grep 走査した限り、他の明示的サブセット外構文は検出されず。indexed part-select が
+  唯一のブロッカーと推定（ただしこの箇所を越えた先で新たな未対応構文に遭遇する可能性はある）
+
+### Result
+
+⏳ Task 5: picorv32.v は現状パース不可。ブロッカーは indexed part-select (`+:`/`-:`) 未対応
+   （PLAN.md 実装課題 B 節「明示エラーになるもの」に記載済みの既知の未対応構文）
+✅ 未対応構文の検出自体は「受理ホワイトリスト方式」の設計通り正しく機能している
+   （サイレントスキップではなく明示エラー）
+
+### Next
+
+- indexed part-select (`+:`/`-:`) の実装要否をユーザーと相談。実装する場合は
+  HIR/MIR に「動的base式＋定数width＋方向」を持つ新バリアントが必要になる見込みで、
+  現行の `PartSel(NetId, Range)`（range が定数 msb/lsb 前提）とは別設計が要る
+  （調査中）
+
+## 2026-07-23 (2)
+
+### Task
+
+ユーザー承認により indexed part-select (`+:`/`-:`) 対応を実装（Planモードで設計後、
+承認を得て着手）。picorv32.v スモークチェックのブロッカー解消が目的。
+
+### What was done
+
+- 既存アーキテクチャ調査（サブエージェント使用）: 定数レンジ part-select は
+  frontend/HIR/MIR/elab/simの5層すべてで「コンパイル時定数(hi,lo)」前提。一方、動的な
+  単一ビット選択は既に `Expr::BitSel`/`LValue::DynBitSelect` という並行パターンが
+  存在（`crates/mir/src/ir.rs:129`）。indexed part-selectはこれを「1bit→定数幅Nビットの
+  ウィンドウ」に拡張したものとして実装する方針を確定
+- MIR (`crates/mir/src/ir.rs`): `Expr::DynPartSel(NetId, ExprId, u32, bool)`、
+  `LValue::DynPartSelect(NetId, ExprId, u32, bool)` を追加（net, base式, 定数width, plus_dir）
+- HIR (`crates/hir/src/design.rs`): `Expr::IndexedPartSel`/`LValue::IndexedPartSelect`
+  を追加。widthは`Box<Expr>`のまま保持し、elabの`eval_const_hir`で確定させる二段階方式
+  （既存の`Range.left/right`と同型）
+- frontend (`crates/frontend/src/lower.rs`): `lower_part_select`/
+  `lower_lvalue_part_select`の`IndexedRange`明示エラー分岐を実装に置換。
+  `tree.get_str(&ir.nodes.1)`で`+:`/`-:`の方向を判定（既存の`lower_binary_op`等と同じ
+  文字列比較パターン）
+- elab (`crates/elab/src/elaborate.rs`): `lower_expr`/`lower_lvalue`に新アーム追加。
+  baseは定数畳み込みせずExprIdとして伝搬、widthのみ`eval_const_hir`で確定。
+  `compute_expr_signed`に`Expr::DynPartSel(..) => false`を追加（BitSel/PartSelと同じ
+  self-determined unsigned）
+- `LogicVal::x_of_width`ヘルパーを新設（`crates/mir/src/logicval.rs`、範囲外アクセス時に
+  正しい幅の全X値を生成。既存のprivate `num_chunks`/`from_chunks`を再利用）
+- sim (`crates/sim/src/interp.rs`): 共通ヘルパー`indexed_part_select_bounds`（base/width/
+  方向から(hi,lo)を計算、不正範囲はNone）を新設し、`eval_expr`・`lvalue_width`・
+  `get_lval_val`・`write_lvalue`・`trigger_sensitivity`の5箇所に`DynPartSel`/
+  `DynPartSelect`アームを追加。範囲外アクセスは既存の`PartSelect`と同水準の簡略化
+  （読み出しは全体X、書き込みは無視）
+- 新規テスト`tests/integration/cases/indexed_part_select/`を追加（RHS `+:`/`-:`、LHS
+  `+:`/`-:`のblocking/nonblocking、実行時for変数をbaseに使用）。iverilog実出力から
+  期待値作成
+
+#### 実装中に発見した重大な既存バグ（A10・A11、indexed part-selectとは独立）
+
+テストケース作成中、`src[i*8+7 -: 8]`（乗算の後に加算）というよくあるパターンの結果が
+iverilogと食い違うことに気づき調査した結果:
+
+- **A10（重大）**: `crates/frontend/src/lower.rs`の`lower_expression`の`E::Binary`は
+  `sv_parser`が返す生の`Expression::Binary`ノードをそのまま辿っているだけだが、
+  その生ノード自体が演算子の優先順位・結合則を無視した木になっていることを
+  `tree.get_str`で直接確認（`a-b+c`が`Binary(lhs="a", op="-", rhs="b+c")`という
+  誤った木として返る）。常に右結合で評価されるため、`a*b+c`のような「高優先順位演算子の
+  後に低優先順位演算子が続く」パターンで誤った結果になる（`7+i*8`のように逆順なら
+  たまたま正しい木と一致するため見過ごされやすい）。picorv32.vのような複雑な算術式を
+  含む実RTL全般に影響する可能性が高い、根本的な正しさの問題。PLAN.md 実装課題A節に
+  A10として記録、次の最優先候補として明記
+- **A11**: picorv32.vのモジュール中盤で宣言された`localparam`（状態機械の状態名等）が
+  elabで名前解決できず`unresolved net/param`警告→`LogicVal::X`にフォールバックする
+  ことを発見。case文の状態比較がすべてXになり、シミュレーションが`--max-time`指定でも
+  停止せずハングすることを確認。原因箇所は未特定（未調査、A11として記録のみ）
+- 両バグとも今回のスコープ外と判断し深追いせず、テスト自体は`7+i*8`のようにA10の
+  影響を受けない順序で記述して実装を完了させた
+
+### Result
+
+✅ `cargo build --workspace`成功
+✅ `cargo test --workspace`全通過（新規`test_indexed_part_select`/
+   `compare_indexed_part_select`含む、既存テストへの回帰なし、計29テスト）
+✅ `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行しVCD生成・
+   正常終了を確認（回帰なし）
+✅ picorv32.vスモークチェック再実行: indexed part-selectのパースエラーは解消、
+   8モジュール全てパース成功、elaborationも`picorv32`トップまで到達
+⏳ picorv32.vのフルシミュレーションはA10・A11により未達成（シミュレーションが
+   ハングして停止しない）
+🔴 A10（二項演算子結合順序バグ）・A11（localparam名前解決）を新規発見、PLAN.mdに記録
+
+### Next
+
+- A10（二項演算子結合順序、重大）の修正をユーザーと相談。影響範囲が広いため優先度高いと
+  判断
+- A11（モジュール中盤のlocalparam名前解決）の原因調査・修正
+- 上記2件の修正後、picorv32.vスモークチェックを再実行してフルシミュレーション到達を確認
+- 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
+  E: fmt/clippyジョブのCI追加）
