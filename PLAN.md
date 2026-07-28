@@ -334,7 +334,7 @@ iverilog 出力比較 CI 導入済み）。
 | A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
 | A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
-| A10 | **二項演算子の結合順序が壊れている（重大）** | `frontend/src/lower.rs` `lower_expression` の `E::Binary`、根本原因は `sv-parser` クレート側 | 2026-07-23発見。`a-b+c` や `a*b+c` のような3項以上の二項演算チェーンが、演算子の優先順位・結合則を無視して常に右結合（`a-(b+c)`、`a*(b+c)`）で評価される。`sv_parser::Expression::Binary` の生ノード自体が `(lhs="a", op="-", rhs="b+c")` という誤った木を返しており（`tree.get_str`で確認済み）、`lower_expression`はそれをそのまま辿っているだけで再結合はしていない。`7+i*8`（加算が先・乗算が後）のように「後続演算子の優先順位が高い」順序はたまたま正しい木と一致するため気づかれにくい。picorv32.vのような複雑な算術式を含む実RTLでは高確率で誤動作する。修正には `lower_expression`側で優先順位に基づく再結合（shunting-yard等）を行うか、`sv-parser`側の不具合であれば別クレートへの切替を検討する必要がある |
+| A10 | 二項演算子の結合順序が壊れている（重大） | `frontend/src/lower.rs` `lower_expression` の `E::Binary`、根本原因は `sv-parser` クレート側 | **対応済み（2026-07-29）**。`sv_parser::Expression::Binary`（パックラット左再帰の種growingにより常に右結合の木を返す、`sv-parser`側の設計上の制約）を `lower_expression` 側で修正。新設した `flatten_binary_chain` で木を in-order にフラットな (オペランド列, 演算子列) へ展開し直し、`build_binop_tree` で IEEE 1364-2001 Table 5-4 の優先順位表（`binop_precedence`）に基づく演算子優先順位法（shunting-yard、全演算子左結合）で正しい二分木を再構築するよう変更。回帰テスト `tests/integration/cases/binop_precedence/` を追加（同一優先順位の左結合、`*`>`+`、`&`>`\|`、`&&`>`\|\|`、`+`>`==`、4項混合の各ケース）、iverilog実出力とbit-exact一致を確認 |
 | A11 | `localparam`宣言がモジュール本体途中にあると名前解決されない | `elab/src/elaborate.rs`（param登録パス） | 2026-07-23発見。picorv32.vの `localparam cpu_state_fetch = 8'b01000000;` のようにalwaysブロック等に挟まれてモジュール中盤で宣言されたlocalparamが `unresolved net/param` 警告となり `LogicVal::X` にフォールバックする。この結果、状態機械のcase文がすべてX比較になり、シミュレーションが收束せず無限ループ/ハングする（`--max-time`指定でも停止しない）ことを確認。モジュール冒頭のparameter/localparamは正常に解決される模様で、宣言位置に依存した登録パスの抜けが疑われる（未調査、原因箇所未特定） |
 
 ### B. 未対応の言語機能
@@ -391,9 +391,8 @@ iverilog 出力比較 CI 導入済み）。
 3. ~~A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正~~ 完了（2026-07-14、イベントループ再構成として一括対応）
 4. ~~indexed part-select (`+:`/`-:`) 対応~~ 完了（2026-07-23、picorv32.v スモークチェックの
    ブロッカー解消のため）
-5. **A10: 二項演算子の結合順序バグ（最優先候補）**: 2026-07-23発見、重大。既存の全算術式の
-   正しさに関わる根本的な問題で、picorv32.v含む複雑な式を持つRTL全般に影響する可能性が高い
-6. A11: モジュール中盤の `localparam` 名前解決の調査・修正
+5. ~~A10: 二項演算子の結合順序バグ~~ 完了（2026-07-29）
+6. **A11: モジュール中盤の `localparam` 名前解決の調査・修正（次の最優先候補）**
 7. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
 8. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
 9. E: fmt/clippy ジョブの CI 追加、負パステストの拡充

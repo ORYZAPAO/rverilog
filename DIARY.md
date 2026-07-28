@@ -1854,3 +1854,64 @@ iverilogと食い違うことに気づき調査した結果:
 - 上記2件の修正後、picorv32.vスモークチェックを再実行してフルシミュレーション到達を確認
 - 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
   E: fmt/clippyジョブのCI追加）
+
+## 2026-07-29
+
+### Task
+
+PLAN.md / DIARY.md を読み直し、残タスク中で最優先とされていた
+**A10（二項演算子の結合順序バグ、重大）** に着手・修正。
+
+### What was done
+
+- `sv-parser`（0.13.5）のソース (`~/.cargo/registry/.../sv-parser-parser-0.13.5/
+  src/expressions/expressions.rs`) を直接確認し、根本原因を構造的に特定:
+  `expression_binary`（`#[recursive_parser]`）は `expression op expression` を
+  そのままパースするだけで演算子優先順位の概念を持たず、パックラット左再帰の
+  種growingアルゴリズムにより、LHS側は常に最小seed（単一primary等、Binaryでは
+  ない）に固定され、RHS側だけが再帰的に伸びていく。この結果、`a op1 b op2 c op3 d`
+  のような二項演算チェーンは演算子の優先順位・結合則に関係なく常に
+  `a op1 (b op2 (c op3 d))`という右結合の木になる（既存の
+  PLAN.md記載の`tree.get_str`確認結果と整合）
+- 修正方針: 個々の`Expression::Binary`ノードは壊れているが、in-order走査で得られる
+  オペランド・演算子の並び自体は正しい（sv-parserは左から右へパースするため）ことを
+  利用し、`lower_expression`側で「フラット化 → 優先順位法で正しい木に再構築」する
+  アプローチを採用（`sv-parser`自体の差し替えは工数・リスクが大きいため見送り）
+- `crates/frontend/src/lower.rs`:
+  - `flatten_binary_chain`: `Expression::Binary`の木をin-orderにたどり、
+    オペランド列（`Vec<Expr>`）と演算子列（`Vec<BinOp>`）にフラット化する新関数。
+    `E::Binary`以外に到達した時点でリーフとして`lower_expression`に委譲するため、
+    括弧で明示的にグループ化された部分式（`Primary::MintypmaxExpression`として
+    リーフ扱いになる）はフラット化の対象にならず、1オペランドとして正しく扱われる
+    （かつ内部は再帰的に同じ修正が適用される）
+  - `binop_precedence`: IEEE 1364-2001 Table 5-4に基づく優先順位表
+    （`*`/`/`/`%` > `+`/`-` > シフト > 比較 > `==`系 > `&` > `^`系 > `\|` >
+    `&&` > `\|\|`。`**`は本サブセット未対応のため対象外）
+  - `build_binop_tree`: フラット化されたオペランド列・演算子列から、優先順位法
+    （shunting-yard、全演算子左結合）で正しい二分木を再構築する新関数
+  - `lower_expression`の`E::Binary`アームを上記3関数を使う形に置換
+- 回帰テスト`tests/integration/cases/binop_precedence/`を新規追加。
+  同一優先順位の左結合連鎖（`a-b-c`/`a-b+c`）、`*`>`+`、`&`>`\|`、`&&`>`\|\|`、
+  `+`>`==`、4項混合（`a-b*c+d`）の各パターンで、バグ時と修正後で結果が食い違う
+  数値を選んで作成。iverilog実出力から`expected.stdout`を作成し、
+  `test_binop_precedence`（自前スナップショット比較）・`compare_binop_precedence`
+  （iverilogとのbit-exact比較）の両方に登録
+
+### Result
+
+✅ `cargo build --workspace`成功
+✅ `cargo test --workspace`全通過（新規`test_binop_precedence`/
+   `compare_binop_precedence`含む、既存テストへの回帰なし、計30テスト）
+✅ 新規テストケースの全パターンでrverilogとiverilogの出力がbit-exact一致
+   （`a-b-c=5`, `a-b+c=9`, `a*b+c=10`, `a+b*c=14`, `a&b|c=3`, `a&&b||c=1`,
+   `a+b==c=0`, `a-b*c+d=5`）
+✅ `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）に回帰なし
+   （既存の`test_counter4`/`test_fifo_sync`が引き続きPASS）
+✅ PLAN.md 実装課題A節のA10を対応済みに更新、推奨着手順から除去し次点をA11に変更
+
+### Next
+
+- A11（モジュール中盤の`localparam`名前解決）の原因調査・修正が次の最優先候補
+- A10・A11修正後、picorv32.vスモークチェックを再実行しフルシミュレーション到達を確認
+- 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
+  E: fmt/clippyジョブのCI追加）
