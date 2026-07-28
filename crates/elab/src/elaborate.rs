@@ -43,7 +43,7 @@ struct ElabCtx<'a> {
     sensitivity_table: IndexMap<u32, Vec<u32>>,
     scope_nets: IndexMap<u32, IndexMap<SmolStr, NetId>>,
     scope_mems: IndexMap<u32, IndexMap<SmolStr, MemId>>,
-    scope_params: IndexMap<u32, IndexMap<SmolStr, u64>>,
+    scope_params: IndexMap<u32, IndexMap<SmolStr, (u64, u32)>>,
     scope_funcs: IndexMap<u32, IndexMap<SmolStr, FunctionInfo>>,
     scope_tasks: IndexMap<u32, IndexMap<SmolStr, TaskInfo>>,
     scope_blocks: IndexMap<u32, IndexMap<SmolStr, u32>>,
@@ -169,14 +169,17 @@ impl<'a> ElabCtx<'a> {
         None
     }
 
-    fn register_param(&mut self, scope: ScopeId, name: SmolStr, val: u64) {
+    fn register_param(&mut self, scope: ScopeId, name: SmolStr, val: u64, width: u32) {
         self.scope_params
             .entry(scope.0)
             .or_default()
-            .insert(name, val);
+            .insert(name, (val, width));
     }
 
-    fn resolve_param(&self, scope: ScopeId, name: &str) -> Option<u64> {
+    /// パラメータ／localparamの値と幅を返す。幅は宣言側のリテラル幅から推定した
+    /// もので、複雑な式（三項演算等）の場合は既定の32ビットにフォールバックする
+    /// （IEEE context-determined幅推論の完全実装はPLAN.md D節の残タスク）。
+    fn resolve_param(&self, scope: ScopeId, name: &str) -> Option<(u64, u32)> {
         let mut cur = Some(scope);
         while let Some(s) = cur {
             if let Some(map) = self.scope_params.get(&s.0) {
@@ -312,7 +315,9 @@ fn elab_module(
 
     // Evaluate parameters (defaults, then overrides)
     let mut param_vals: IndexMap<SmolStr, u64> = IndexMap::new();
+    let mut param_widths: IndexMap<SmolStr, u32> = IndexMap::new();
     for p in &hir.params {
+        param_widths.insert(p.name.clone(), hir_const_width(&p.value));
         match eval_const_hir(ctx, scope, &p.value) {
             Ok(v) => { param_vals.insert(p.name.clone(), v); }
             Err(_) => { param_vals.insert(p.name.clone(), 0); }
@@ -322,13 +327,15 @@ fn elab_module(
         param_vals.insert(name.clone(), *val);
     }
     for lp in &hir.locals {
+        param_widths.insert(lp.name.clone(), hir_const_width(&lp.value));
         match eval_const_hir_with(ctx, scope, &lp.value, &param_vals) {
             Ok(v) => { param_vals.insert(lp.name.clone(), v); }
             Err(_) => {}
         }
     }
     for (name, val) in &param_vals {
-        ctx.register_param(scope, name.clone(), *val);
+        let width = param_widths.get(name).copied().unwrap_or(32);
+        ctx.register_param(scope, name.clone(), *val, width);
     }
 
     // Register ports
@@ -545,7 +552,7 @@ fn elab_generate_items(
 ) -> Result<(), ElabError> {
     for lp in &items.locals {
         if let Ok(v) = eval_const_hir(ctx, scope, &lp.value) {
-            ctx.register_param(scope, lp.name.clone(), v);
+            ctx.register_param(scope, lp.name.clone(), v, hir_const_width(&lp.value));
         }
     }
 
@@ -701,7 +708,7 @@ fn elab_generate_items(
                         name: SmolStr::from(format!("$gen_{}_{}", gf.var, i)),
                         module_name: module_name.clone(),
                     });
-                    ctx.register_param(iter_scope, gf.var.clone(), i);
+                    ctx.register_param(iter_scope, gf.var.clone(), i, 32);
                     if eval_const_hir(ctx, iter_scope, &gf.cond).unwrap_or(0) == 0 {
                         break;
                     }
@@ -733,8 +740,8 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
         HirExpr::Net(name) => {
             if let Some(id) = ctx.resolve_net(scope, name.as_str()) {
                 Expr::Net(id)
-            } else if let Some(val) = ctx.resolve_param(scope, name.as_str()) {
-                Expr::Const(LogicVal::new(32, val, 0))
+            } else if let Some((val, width)) = ctx.resolve_param(scope, name.as_str()) {
+                Expr::Const(LogicVal::new(width as u16, val, 0))
             } else {
                 eprintln!("elab warning: unresolved net/param '{}'", name);
                 Expr::Const(LogicVal::X)
@@ -1060,6 +1067,17 @@ fn lower_sensitivity(
 
 // ── const evaluation ──────────────────────────────────────────────────────────
 
+/// parameter/localparamの宣言側HIR式から幅を推定する。リテラル直書き
+/// （`8'b...`等）は自身の幅をそのまま使う。IEEE context-determined幅推論の
+/// 完全実装は見送り、それ以外（三項演算・関数呼び出し等）は既定の32ビットに
+/// フォールバックする（PLAN.md 実装課題D節「width.rsスタブ化」参照）。
+fn hir_const_width(e: &HirExpr) -> u32 {
+    match e {
+        HirExpr::Const(v) | HirExpr::SignedConst(v) => v.width(),
+        _ => 32,
+    }
+}
+
 fn eval_const_hir(ctx: &ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<u64, ElabError> {
     eval_const_hir_with(ctx, scope, e, &IndexMap::new())
 }
@@ -1083,6 +1101,7 @@ fn eval_const_hir_with(
                 return Ok(v);
             }
             ctx.resolve_param(scope, name.as_str())
+                .map(|(v, _)| v)
                 .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))
         }
         HirExpr::Bin(op, lhs, rhs) => {
