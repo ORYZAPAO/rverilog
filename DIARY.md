@@ -1907,14 +1907,13 @@ A11（モジュール中盤のlocalparam名前解決）の原因調査・修正�
 ⏳ picorv32.vのフルシミュレーションは未達成（`--max-time 1000`でも停止せずハング）。
    新たに判明した残課題: モジュール冒頭の`localparam integer irqregs_offset =
    ENABLE_REGS_16_31 ? 32 : 16;`等、三項演算子・`||`・`*`・parenを含む複雑な定数式は
-   `parse_simple_const_expr`の対応範囲外で依然`unresolved`のまま。加えてA10
-   （二項演算子結合順序、別ブランチ・未マージ）も未反映のため、いずれか一方だけでは
-   picorv32.vのフルシミュレーション到達には不十分と判断
+   `parse_simple_const_expr`の対応範囲外で依然`unresolved`のまま。A10 は同日に
+   `fix/binop-precedence-a10` から取り込み済みであり、残るフルシミュレーションの
+   ブロッカーはこの複雑な定数式の対応である
 - PLAN.md 実装課題A節のA11を対応済み（範囲限定）に更新、未解決の残課題を明記
 
 ### Next
 
-- A10（`fix/binop-precedence-a10`ブランチ）のマージ
 - localparamの複雑な定数式（三項演算子・論理演算子・乗算・括弧）対応。
   `parse_simple_const_expr`をこれ以上拡張するか、正式な`ConstantExpression`
   AST（sv-parserの`ConstantExpressionBinary`/`ConstantExpressionTernary`等、
