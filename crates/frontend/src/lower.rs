@@ -895,6 +895,13 @@ fn parse_simple_const_expr(s: &str) -> Expr {
         let inner = &s[7..s.len()-1];
         return Expr::SysFunc(SysFuncKind::Clog2, vec![parse_simple_const_expr(inner)]);
     }
+    // サイズ付き基数リテラル（`8'b10000000`等）。上の `+`/`-` 分割で拾われなかった
+    // 残りはここでのみ判定する（`'` を含む複合式を誤って丸ごと数値パースしない
+    // ため、識別子フォールバックの直前に置く）。
+    if s.contains('\'') {
+        let (v, signed) = parse_number_text(s);
+        return if signed { Expr::SignedConst(v) } else { Expr::Const(v) };
+    }
     Expr::Net(SmolStr::from(s))
 }
 
@@ -1608,11 +1615,17 @@ fn lower_expression(tree: &SyntaxTree, expr: &sv_parser::Expression) -> Result<E
             let inner = lower_primary(tree, &u.nodes.2)?;
             Ok(Expr::Un(op, Box::new(inner)))
         }
-        E::Binary(b) => {
-            let lhs = lower_expression(tree, &b.nodes.0)?;
-            let op = lower_binary_op(tree, &b.nodes.1)?;
-            let rhs = lower_expression(tree, &b.nodes.3)?;
-            Ok(Expr::Bin(op, Box::new(lhs), Box::new(rhs)))
+        E::Binary(_) => {
+            // sv-parser の Expression::Binary は演算子優先順位を考慮せず、パック
+            // ラット左再帰の種growingにより常に右結合の木（a op1 (b op2 c) ...）を
+            // 返す（`tree.get_str` で実機確認済み、PLAN.md 実装課題 A10 参照）。
+            // ここで一旦フラットな (演算子列, オペランド列) に展開し直し、
+            // Verilog の演算子優先順位表（IEEE 1364-2001 Table 5-4）に基づく
+            // 演算子優先順位法（shunting-yard 相当）で正しく再結合する。
+            let mut operands = Vec::new();
+            let mut ops = Vec::new();
+            flatten_binary_chain(tree, expr, &mut operands, &mut ops)?;
+            Ok(build_binop_tree(operands, ops))
         }
         E::ConditionalExpression(ce) => {
             // ConditionalExpression.nodes = (CondPredicate, "?", Vec<Attr>, Expression, ":", Expression)
@@ -1623,6 +1636,79 @@ fn lower_expression(tree: &SyntaxTree, expr: &sv_parser::Expression) -> Result<E
         }
         _ => Err(unsupported("expression kind")),
     }
+}
+
+/// `Expression::Binary` の木を in-order にたどり、オペランド列と演算子列に
+/// フラット化する。`E::Binary` 以外に到達した時点でリーフとして
+/// `lower_expression` に委譲する（括弧で明示的にグループ化された部分式は
+/// `Primary::MintypmaxExpression` としてリーフ扱いになるため、フラット化の
+/// 対象にならず正しく1オペランドとして扱われる）。
+fn flatten_binary_chain(
+    tree: &SyntaxTree,
+    expr: &sv_parser::Expression,
+    operands: &mut Vec<Expr>,
+    ops: &mut Vec<BinOp>,
+) -> Result<(), FrontendError> {
+    use sv_parser::Expression as E;
+    match expr {
+        E::Binary(b) => {
+            flatten_binary_chain(tree, &b.nodes.0, operands, ops)?;
+            ops.push(lower_binary_op(tree, &b.nodes.1)?);
+            flatten_binary_chain(tree, &b.nodes.3, operands, ops)?;
+            Ok(())
+        }
+        other => {
+            operands.push(lower_expression(tree, other)?);
+            Ok(())
+        }
+    }
+}
+
+/// IEEE 1364-2001 Table 5-4 の演算子優先順位（数値が大きいほど強く結合）。
+/// `**` は本サブセット未対応のためここには含まない。
+fn binop_precedence(op: BinOp) -> u8 {
+    use BinOp::*;
+    match op {
+        Mul | Div | Mod => 10,
+        Add | Sub => 9,
+        Shl | Shr | Ashl | Ashr => 8,
+        Lt | Le | Gt | Ge => 7,
+        Eq | Ne | CaseEq | CaseNe => 6,
+        BitAnd => 5,
+        BitXor | BitXnor | BitNand | BitNor => 4,
+        BitOr => 3,
+        LogAnd => 2,
+        LogOr => 1,
+    }
+}
+
+/// フラット化されたオペランド列・演算子列から、演算子優先順位法
+/// （全演算子は左結合）で正しい二分木を再構築する。
+/// 事前条件: `operands.len() == ops.len() + 1`。
+fn build_binop_tree(operands: Vec<Expr>, ops: Vec<BinOp>) -> Expr {
+    let mut operands = operands.into_iter();
+    let mut expr_stack: Vec<Expr> = vec![operands.next().expect("flatten always yields >=1 operand")];
+    let mut op_stack: Vec<BinOp> = Vec::new();
+    for op in ops {
+        while let Some(&top_op) = op_stack.last() {
+            if binop_precedence(top_op) >= binop_precedence(op) {
+                let top_op = op_stack.pop().unwrap();
+                let rhs = expr_stack.pop().unwrap();
+                let lhs = expr_stack.pop().unwrap();
+                expr_stack.push(Expr::Bin(top_op, Box::new(lhs), Box::new(rhs)));
+            } else {
+                break;
+            }
+        }
+        op_stack.push(op);
+        expr_stack.push(operands.next().expect("flatten operand/op count mismatch"));
+    }
+    while let Some(op) = op_stack.pop() {
+        let rhs = expr_stack.pop().unwrap();
+        let lhs = expr_stack.pop().unwrap();
+        expr_stack.push(Expr::Bin(op, Box::new(lhs), Box::new(rhs)));
+    }
+    expr_stack.pop().expect("expr_stack must have exactly one element")
 }
 
 fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, FrontendError> {

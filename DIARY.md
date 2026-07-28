@@ -1854,3 +1854,71 @@ iverilogと食い違うことに気づき調査した結果:
 - 上記2件の修正後、picorv32.vスモークチェックを再実行してフルシミュレーション到達を確認
 - 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
   E: fmt/clippyジョブのCI追加）
+
+## 2026-07-29 (2)
+
+### Task
+
+A11（モジュール中盤のlocalparam名前解決）の原因調査・修正。A10（別ブランチ
+`fix/binop-precedence-a10`で対応済み、未マージ）とは独立のため、`feat/m1-milestone`
+から新規ブランチ`fix/localparam-midmodule-a11`を切って着手。
+
+### What was done
+
+- 最小репro（`localparam cpu_state_trap = 8'b10000000;`等をalwaysブロックの後で宣言し、
+  case文で比較するpicorv32.v同型パターン）を作成し、`unresolved net/param`警告を再現
+- `eval_const_hir_with`に一時デバッグ出力を仕込んで原因を特定: 宣言位置は無関係で、
+  実際の原因は2つの独立バグの複合だった
+  1. **主因**: `lower_localparam`（`frontend/src/lower.rs`）が localparam の値を
+     `tree.get_str`で取り出した生テキストを自前の簡易パーサ`parse_simple_const_expr`で
+     解釈する設計になっており、このパーサは整数リテラル・`+`/`-`分割・`$clog2(...)`しか
+     認識せず、`8'b01000000`のようなサイズ付き基数リテラルを識別子として`Expr::Net("8'b...")`
+     に誤変換していた。elab側の`eval_const_hir_with`がこれを名前解決しようとして
+     `UnresolvedName`を返し、`Err(_) => {}`で黙って登録スキップされていた
+     （通常の10進値のlocalparamは`s.parse::<i64>()`で素通りするため気づかれなかった）
+  2. **副次バグ**: 1を修正しても、`lower_expr`の`HirExpr::Net`アームがparam/localparam
+     参照を`Expr::Const(LogicVal::new(32, val, 0))`で常に32bit固定生成していたため、
+     8bit `state`レジスタとのcase比較（`LogicVal::case_eq`は幅不一致だと無条件でZERO）が
+     常に不一致となり、default分岐に落ちていた（`unresolved`警告は消えたが値が一致しない
+     という新しい症状として顕在化）
+- 修正1: `parse_simple_const_expr`の末尾フォールバック（識別子扱い）の直前に、`'`を含む
+  文字列は既存の`parse_number_text`（`lower_number`等で使われている正式なサイズ付き
+  基数リテラルパーサ）に委譲する分岐を追加。`+`/`-`分割は既存のまま温存し、分割後の
+  各部分式が再帰的に本分岐へ到達する形なので複合式（`8'd3 + 8'd2`等）も壊さない
+- 修正2: `ElabCtx.scope_params`の値型を`u64`から`(u64, u32)`（値, 幅）に変更。
+  新設`hir_const_width`ヘルパー（宣言側HIR式が`Const`/`SignedConst`直書きならその幅、
+  それ以外は既定32bit）で幅を推定し、`register_param`呼び出し4箇所
+  （通常param/localparam、generate内local、genvar）を更新。`lower_expr`の
+  `HirExpr::Net`アームは推定幅で`LogicVal::new`するよう変更
+- 回帰テスト`tests/integration/cases/localparam_midmodule/`を新規追加。picorv32.vと
+  同じ「alwaysブロックの後でone-hot状態localparamを宣言→case文で比較」パターンを
+  2状態分（state_fetch/state_exec）用意。iverilog実出力から`expected.stdout`を作成し、
+  `test_localparam_midmodule`・`compare_localparam_midmodule`の両方に登録
+
+### Result
+
+✅ `cargo build --workspace`成功
+✅ `cargo test --workspace`全通過（新規`test_localparam_midmodule`/
+   `compare_localparam_midmodule`含む、既存テストへの回帰なし、計30テスト）
+✅ 最小repro・新規テストケース共にrverilogとiverilogの出力がbit-exact一致
+   （`fetch`→`exec`の順でstate遷移し、正しいcase分岐を通過）
+✅ picorv32.vスモークチェック: `cpu_state_*`（8箇所）を含む`unresolved net/param`警告が
+   解消したことを確認（11件→`WITH_PCPI`/`regfile_size`/`regindex_bits`/`irqregs_offset`のみに減少）
+⏳ picorv32.vのフルシミュレーションは未達成（`--max-time 1000`でも停止せずハング）。
+   新たに判明した残課題: モジュール冒頭の`localparam integer irqregs_offset =
+   ENABLE_REGS_16_31 ? 32 : 16;`等、三項演算子・`||`・`*`・parenを含む複雑な定数式は
+   `parse_simple_const_expr`の対応範囲外で依然`unresolved`のまま。A10 は同日に
+   `fix/binop-precedence-a10` から取り込み済みであり、残るフルシミュレーションの
+   ブロッカーはこの複雑な定数式の対応である
+- PLAN.md 実装課題A節のA11を対応済み（範囲限定）に更新、未解決の残課題を明記
+
+### Next
+
+- localparamの複雑な定数式（三項演算子・論理演算子・乗算・括弧）対応。
+  `parse_simple_const_expr`をこれ以上拡張するか、正式な`ConstantExpression`
+  AST（sv-parserの`ConstantExpressionBinary`/`ConstantExpressionTernary`等、
+  `Expression`とは別の並行文法）を使う`lower_constant_expression`を新設するか、
+  方針をユーザーと相談
+- 上記対応後、picorv32.vスモークチェックを再実行してフルシミュレーション到達を確認
+- 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
+  E: fmt/clippyジョブのCI追加）

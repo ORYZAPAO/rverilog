@@ -1,0 +1,9 @@
+a-b-c=5
+a-b+c=9
+a*b+c=10
+a+b*c=14
+a&b|c=3
+a&&b||c=1
+a+b==c=0
+a-b*c+d=5
+$finish at time 0
