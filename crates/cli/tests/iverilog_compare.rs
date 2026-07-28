@@ -126,6 +126,12 @@ fn compare_indexed_part_select() {
 }
 
 #[test]
+fn compare_localparam_midmodule() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/localparam_midmodule/dut.v")]);
+}
+
+#[test]
 fn compare_edge_x() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/edge_x/dut.v")]);

@@ -895,6 +895,13 @@ fn parse_simple_const_expr(s: &str) -> Expr {
         let inner = &s[7..s.len()-1];
         return Expr::SysFunc(SysFuncKind::Clog2, vec![parse_simple_const_expr(inner)]);
     }
+    // サイズ付き基数リテラル（`8'b10000000`等）。上の `+`/`-` 分割で拾われなかった
+    // 残りはここでのみ判定する（`'` を含む複合式を誤って丸ごと数値パースしない
+    // ため、識別子フォールバックの直前に置く）。
+    if s.contains('\'') {
+        let (v, signed) = parse_number_text(s);
+        return if signed { Expr::SignedConst(v) } else { Expr::Const(v) };
+    }
     Expr::Net(SmolStr::from(s))
 }
 

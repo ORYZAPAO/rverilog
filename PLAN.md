@@ -335,7 +335,7 @@ iverilog 出力比較 CI 導入済み）。
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
 | A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
 | A10 | **二項演算子の結合順序が壊れている（重大）** | `frontend/src/lower.rs` `lower_expression` の `E::Binary`、根本原因は `sv-parser` クレート側 | 2026-07-23発見。`a-b+c` や `a*b+c` のような3項以上の二項演算チェーンが、演算子の優先順位・結合則を無視して常に右結合（`a-(b+c)`、`a*(b+c)`）で評価される。`sv_parser::Expression::Binary` の生ノード自体が `(lhs="a", op="-", rhs="b+c")` という誤った木を返しており（`tree.get_str`で確認済み）、`lower_expression`はそれをそのまま辿っているだけで再結合はしていない。`7+i*8`（加算が先・乗算が後）のように「後続演算子の優先順位が高い」順序はたまたま正しい木と一致するため気づかれにくい。picorv32.vのような複雑な算術式を含む実RTLでは高確率で誤動作する。修正には `lower_expression`側で優先順位に基づく再結合（shunting-yard等）を行うか、`sv-parser`側の不具合であれば別クレートへの切替を検討する必要がある |
-| A11 | `localparam`宣言がモジュール本体途中にあると名前解決されない | `elab/src/elaborate.rs`（param登録パス） | 2026-07-23発見。picorv32.vの `localparam cpu_state_fetch = 8'b01000000;` のようにalwaysブロック等に挟まれてモジュール中盤で宣言されたlocalparamが `unresolved net/param` 警告となり `LogicVal::X` にフォールバックする。この結果、状態機械のcase文がすべてX比較になり、シミュレーションが收束せず無限ループ/ハングする（`--max-time`指定でも停止しない）ことを確認。モジュール冒頭のparameter/localparamは正常に解決される模様で、宣言位置に依存した登録パスの抜けが疑われる（未調査、原因箇所未特定） |
+| A11 | `localparam`宣言がモジュール本体途中にあると名前解決されない | `frontend/src/lower.rs`（`parse_simple_const_expr`）、`elab/src/elaborate.rs`（param登録パス） | **対応済み（2026-07-29、picorv32.vの`cpu_state_*`パターンの範囲）**。宣言位置は無関係で、実際の原因は2つ: (1) `lower_localparam`が値をraw text経由の簡易パーサ`parse_simple_const_expr`で解釈しており、`8'b01000000`のようなサイズ付き基数リテラルを認識できず識別子（`Expr::Net`）として誤扱いしていた（elabで`UnresolvedName`エラーとなり黙って登録スキップ）。(2) 修正後も、名前解決されたparam/localparamの参照が`lower_expr`の`HirExpr::Net`アームで常に32bit固定（`LogicVal::new(32, val, 0)`）で復元されていたため、8bit `state`レジスタとのcase比較（`case_eq`は幅不一致だと即ZERO）が常にdefault分岐に落ちていた。`scope_params`にvalとwidthのタプルを保持し、宣言側HIR式（`Const`/`SignedConst`直書きの場合のみ）から幅を推定する`hir_const_width`を追加して解決。回帰テスト`tests/integration/cases/localparam_midmodule/`（picorv32.vと同じ「alwaysブロックの後でone-hot状態localparamを宣言→case文で比較」パターン）でiverilogとのbit-exact一致を確認。**未解決の残課題**: picorv32.v冒頭の`localparam integer irqregs_offset = ENABLE_REGS_16_31 ? 32 : 16;`等、三項演算子・`\|\|`・`*`を含む複雑な定数式は`parse_simple_const_expr`が依然として解釈できず`unresolved net/param`のまま（`WITH_PCPI`/`regfile_size`/`regindex_bits`/`irqregs_offset`で確認済み）。picorv32.vのフルシミュレーションにはこの追加対応とA10（別ブランチ、未マージ）の両方が必要 |
 
 ### B. 未対応の言語機能
 
@@ -391,9 +391,11 @@ iverilog 出力比較 CI 導入済み）。
 3. ~~A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正~~ 完了（2026-07-14、イベントループ再構成として一括対応）
 4. ~~indexed part-select (`+:`/`-:`) 対応~~ 完了（2026-07-23、picorv32.v スモークチェックの
    ブロッカー解消のため）
-5. **A10: 二項演算子の結合順序バグ（最優先候補）**: 2026-07-23発見、重大。既存の全算術式の
-   正しさに関わる根本的な問題で、picorv32.v含む複雑な式を持つRTL全般に影響する可能性が高い
-6. A11: モジュール中盤の `localparam` 名前解決の調査・修正
+5. A10: 二項演算子の結合順序バグ。2026-07-23発見、重大。既存の全算術式の正しさに関わる
+   根本的な問題で、picorv32.v含む複雑な式を持つRTL全般に影響する可能性が高い
+   （別ブランチ`fix/binop-precedence-a10`で対応済み、本ブランチ作成時点で未マージ）
+6. ~~A11: モジュール中盤の `localparam` 名前解決~~ 対応済み（2026-07-29、`cpu_state_*`パターンの
+   範囲。三項演算子・`||`・`*`を含む複雑な定数式（`WITH_PCPI`等）は残課題、A11の表参照）
 7. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
 8. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
 9. E: fmt/clippy ジョブの CI 追加、負パステストの拡充

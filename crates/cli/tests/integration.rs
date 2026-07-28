@@ -115,6 +115,16 @@ fn test_indexed_part_select() {
 }
 
 #[test]
+fn test_localparam_midmodule() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/localparam_midmodule/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("localparam_midmodule");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_edge_x() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/edge_x/dut.v")];
