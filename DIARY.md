@@ -1922,3 +1922,89 @@ A11（モジュール中盤のlocalparam名前解決）の原因調査・修正�
 - 上記対応後、picorv32.vスモークチェックを再実行してフルシミュレーション到達を確認
 - 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの診断化、
   E: fmt/clippyジョブのCI追加）
+
+## 2026-07-30
+
+### Task
+
+A11残課題（localparamの複雑な定数式：三項演算子・`||`・`*`・括弧）対応。
+`feat/m1-milestone`から新規ブランチ`fix/localparam-const-expr-a11`を切って着手。
+ユーザー指示により実装はCodex（`codex:rescue`サブエージェント経由）に委任した。
+
+### 事前調査（サブエージェント使用）
+
+実装前にサブエージェントで根本原因を調査した結果、「専用パーサが無い」ことが原因ではなく
+**配線漏れ**と判明:
+
+- localparam/parameter宣言値は文法上すでにsv-parserの`ConstantParamExpression`
+  （正式なConstantExpression系AST）としてパースされている
+- 三項・二項・単項演算子を正しくHIRの`Expr::Cond`/`Bin`/`Un`へ変換する
+  `lower_constant_expr`/`lower_constant_primary`（`lower.rs:541-599`）は
+  genvar/generate文脈向けに**既に実装済み**で動いていた
+- しかしlocalparam宣言・parameterポートのデフォルト値・インスタンスのparam
+  override（計5箇所）はこの専用ラダーを使わず、生テキストを自前の簡易パーサ
+  `parse_simple_const_expr`に丸投げしており、整数リテラル・`+`/`-`分割・
+  `$clog2(...)`しか認識できず三項演算子等を識別子と誤解釈していた
+- 加えて`lower_constant_expr`のCE::Binaryアーム自体もA10と同型の演算子優先順位
+  バグ（sv-parserの`constant_expression_binary`が`expression_binary`と同じ
+  非優先順位パーサ構造）を内包していた
+- elab側`eval_const_hir_with`の`HirBinOp`畳み込みも`LogAnd`/`LogOr`/`CaseEq`/
+  `CaseNe`/`BitNand`/`BitNor`/`BitXnor`が未対応だった
+
+この調査結果から、新規ConstantExpression専用パーサは作らず「既存の
+`lower_constant_expr`系を5つの未配線箇所に繋ぐ」方針をユーザーと確認し、
+Planモードで詳細な実装計画（変更箇所・行番号・コード）を作成、承認を得た。
+
+### What was done（Codexに委任・実装完了を確認）
+
+- `crates/frontend/src/lower.rs`:
+  - `lower_constant_expr`のCE::Binaryアームを、既存の`flatten_binary_chain`/
+    `build_binop_tree`/`binop_precedence`（A10で導入した汎用実装、変更不要）を
+    再利用する`flatten_constant_binary_chain`（新設）ベースの実装に置換
+    （優先順位バグ対策）
+  - ブリッジ関数を新設: `lower_constant_mintypmax`（`lower_constant_primary`の
+    重複コードを関数化）、`lower_constant_param_expr`（`ConstantParamExpression`
+    →`Expr`）、`lower_mintypmax`・`lower_param_expr`（`MintypmaxExpression`/
+    `ParamExpression`→`Expr`、既存の優先順位対応済み`lower_expression`に委譲）
+  - `lower_localparam`・`lower_param_port_list`（2箇所）・`lower_param_overrides`
+    （2箇所）、計5箇所の`parse_simple_const_expr(text.trim())`を型付き
+    ブリッジ関数呼び出し＋`?`伝搬に置換（`parse_simple_const_expr`自体は
+    配列次元レンジの文字列分割で引き続き使用するため削除せず）
+- `crates/elab/src/elaborate.rs`: `eval_const_hir_with`の`HirBinOp`畳み込みに
+  `LogAnd`/`LogOr`/`CaseEq`/`CaseNe`/`BitNand`/`BitNor`/`BitXnor`を追加
+- 新規回帰テスト`tests/integration/cases/localparam_const_expr/`
+  （三項演算子・`||`・`*`・括弧を含むlocalparam定数式、picorv32.vの
+  `irqregs_offset`/`regfile_size`/`WITH_PCPI`と同型パターン）を追加、
+  iverilog実出力から`expected.stdout`作成、`test_localparam_const_expr`/
+  `compare_localparam_const_expr`として登録
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で全変更内容をレビュー、計画通りの実装であることを確認
+- `cargo build --workspace`成功（既存の未使用関数警告のみ、新規warning無し）
+- `cargo test --workspace`全通過（68テスト、新規2件含む、既存回帰なし）
+- `iverilog`で新規テストケースの実出力を独立に再生成し、`expected.stdout`と
+  一致することを確認
+- picorv32.vスモークチェック（`timeout 15 rverilog --top picorv32 picorv32.v
+  --max-time 10`）: パース8モジュール成功、elaboration完了、`unresolved
+  net/param`警告が0件（従来の`WITH_PCPI`/`regfile_size`/`regindex_bits`/
+  `irqregs_offset`の4件が解消）を確認。「Running simulation」まで到達後
+  timeoutでkill（フルシミュレーションのハングは本タスクと独立の既知課題、
+  下記Next参照）
+
+### Result
+
+✅ A11残課題（localparamの複雑な定数式）解消。`cargo build`/`cargo test`
+   （68テスト）全通過、既存回帰なし
+✅ picorv32.vの`unresolved net/param`警告が完全に0件になったことを確認
+   （2026-07-29時点の残4件がすべて解消）
+⏳ picorv32.vのフルシミュレーションは`--max-time`指定でも停止せずハングする
+   （elaboration完了後、"Running simulation"の段階で発生。A10・A11とは別の
+   未特定の原因、次の課題）
+
+### Next
+
+- picorv32.vのフルシミュレーションハングの原因調査（A10・A11とは独立、
+  elaboration完了後の実行時の問題と推定）
+- 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの
+  診断化、E: fmt/clippyジョブのCI追加）

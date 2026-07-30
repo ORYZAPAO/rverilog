@@ -132,6 +132,12 @@ fn compare_localparam_midmodule() {
 }
 
 #[test]
+fn compare_localparam_const_expr() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/localparam_const_expr/dut.v")]);
+}
+
+#[test]
 fn compare_binop_precedence() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/binop_precedence/dut.v")]);
