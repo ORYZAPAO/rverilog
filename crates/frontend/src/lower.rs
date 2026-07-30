@@ -216,8 +216,7 @@ fn lower_param_port_list(
                 for pa in a.nodes.1.nodes.1.0.nodes.0.contents() {
                     if let Some(name) = get_id(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) {
                         let value = if let Some((_, cpe)) = &pa.nodes.2 {
-                            let text = tree.get_str(cpe).unwrap_or("0");
-                            parse_simple_const_expr(text.trim())
+                            lower_constant_param_expr(tree, cpe)?
                         } else {
                             Expr::Const(lv(0, 32))
                         };
@@ -234,8 +233,7 @@ fn lower_param_port_list(
                             for pa in pp.nodes.2.nodes.0.contents() {
                                 if let Some(name) = get_id(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) {
                                     let value = if let Some((_, cpe)) = &pa.nodes.2 {
-                                        let text = tree.get_str(cpe).unwrap_or("0");
-                                        parse_simple_const_expr(text.trim())
+                                        lower_constant_param_expr(tree, cpe)?
                                     } else {
                                         Expr::Const(lv(0, 32))
                                     };
@@ -547,11 +545,11 @@ fn lower_constant_expr(tree: &SyntaxTree, ce: &sv_parser::ConstantExpression) ->
             let inner = lower_constant_primary(tree, &u.nodes.2)?;
             Ok(Expr::Un(op, Box::new(inner)))
         }
-        CE::Binary(b) => {
-            let lhs = lower_constant_expr(tree, &b.nodes.0)?;
-            let op = lower_binary_op(tree, &b.nodes.1)?;
-            let rhs = lower_constant_expr(tree, &b.nodes.3)?;
-            Ok(Expr::Bin(op, Box::new(lhs), Box::new(rhs)))
+        CE::Binary(_) => {
+            let mut operands = Vec::new();
+            let mut ops = Vec::new();
+            flatten_constant_binary_chain(tree, ce, &mut operands, &mut ops)?;
+            Ok(build_binop_tree(operands, ops))
         }
         CE::Ternary(t) => {
             let cond = lower_constant_expr(tree, &t.nodes.0)?;
@@ -576,18 +574,7 @@ fn lower_constant_primary(tree: &SyntaxTree, p: &sv_parser::ConstantPrimary) -> 
             let text = tree.get_str(&pp.nodes.0).unwrap_or("?").trim();
             Ok(Expr::Net(SmolStr::from(text)))
         }
-        CP::MintypmaxExpression(m) => {
-            use sv_parser::ConstantMintypmaxExpression as CM;
-            match &m.nodes.0.nodes.1 {
-                CM::Unary(ce) => lower_constant_expr(tree, ce),
-                CM::Ternary(t) => {
-                    let cond = lower_constant_expr(tree, &t.nodes.0)?;
-                    let then_e = lower_constant_expr(tree, &t.nodes.2)?;
-                    let else_e = lower_constant_expr(tree, &t.nodes.4)?;
-                    Ok(Expr::Cond(Box::new(cond), Box::new(then_e), Box::new(else_e)))
-                }
-            }
-        }
+        CP::MintypmaxExpression(m) => lower_constant_mintypmax(tree, &m.nodes.0.nodes.1),
         _ => {
             if let Some(t) = tree.get_str(p) {
                 Ok(parse_simple_const_expr(t.trim()))
@@ -595,6 +582,65 @@ fn lower_constant_primary(tree: &SyntaxTree, p: &sv_parser::ConstantPrimary) -> 
                 Err(unsupported("constant primary kind"))
             }
         }
+    }
+}
+
+fn lower_constant_mintypmax(
+    tree: &SyntaxTree,
+    m: &sv_parser::ConstantMintypmaxExpression,
+) -> Result<Expr, FrontendError> {
+    use sv_parser::ConstantMintypmaxExpression as CM;
+    match m {
+        CM::Unary(ce) => lower_constant_expr(tree, ce),
+        CM::Ternary(t) => {
+            let cond = lower_constant_expr(tree, &t.nodes.0)?;
+            let then_e = lower_constant_expr(tree, &t.nodes.2)?;
+            let else_e = lower_constant_expr(tree, &t.nodes.4)?;
+            Ok(Expr::Cond(Box::new(cond), Box::new(then_e), Box::new(else_e)))
+        }
+    }
+}
+
+fn lower_constant_param_expr(
+    tree: &SyntaxTree,
+    cpe: &sv_parser::ConstantParamExpression,
+) -> Result<Expr, FrontendError> {
+    match cpe {
+        sv_parser::ConstantParamExpression::ConstantMintypmaxExpression(m) => {
+            lower_constant_mintypmax(tree, m)
+        }
+        sv_parser::ConstantParamExpression::DataType(_) => {
+            Err(unsupported("constant param expression: data type"))
+        }
+        sv_parser::ConstantParamExpression::Dollar(_) => {
+            Err(unsupported("constant param expression: dollar"))
+        }
+    }
+}
+
+fn lower_mintypmax(
+    tree: &SyntaxTree,
+    m: &sv_parser::MintypmaxExpression,
+) -> Result<Expr, FrontendError> {
+    match m {
+        sv_parser::MintypmaxExpression::Expression(e) => lower_expression(tree, e),
+        sv_parser::MintypmaxExpression::Ternary(t) => {
+            let cond = lower_expression(tree, &t.nodes.0)?;
+            let then_e = lower_expression(tree, &t.nodes.2)?;
+            let else_e = lower_expression(tree, &t.nodes.4)?;
+            Ok(Expr::Cond(Box::new(cond), Box::new(then_e), Box::new(else_e)))
+        }
+    }
+}
+
+fn lower_param_expr(
+    tree: &SyntaxTree,
+    pe: &sv_parser::ParamExpression,
+) -> Result<Expr, FrontendError> {
+    match pe {
+        sv_parser::ParamExpression::MintypmaxExpression(m) => lower_mintypmax(tree, m),
+        sv_parser::ParamExpression::DataType(_) => Err(unsupported("param expression: data type")),
+        sv_parser::ParamExpression::Dollar(_) => Err(unsupported("param expression: dollar")),
     }
 }
 
@@ -945,8 +991,7 @@ fn lower_localparam(
         for pa in lpdp.nodes.2.nodes.0.contents() {
             if let Some(name) = get_id(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) {
                 let value = if let Some((_, cpe)) = &pa.nodes.2 {
-                    let text = tree.get_str(cpe).unwrap_or("0");
-                    parse_simple_const_expr(text.trim())
+                    lower_constant_param_expr(tree, cpe)?
                 } else {
                     Expr::Const(lv(0, 32))
                 };
@@ -1664,6 +1709,27 @@ fn flatten_binary_chain(
     }
 }
 
+fn flatten_constant_binary_chain(
+    tree: &SyntaxTree,
+    ce: &sv_parser::ConstantExpression,
+    operands: &mut Vec<Expr>,
+    ops: &mut Vec<BinOp>,
+) -> Result<(), FrontendError> {
+    use sv_parser::ConstantExpression as CE;
+    match ce {
+        CE::Binary(b) => {
+            flatten_constant_binary_chain(tree, &b.nodes.0, operands, ops)?;
+            ops.push(lower_binary_op(tree, &b.nodes.1)?);
+            flatten_constant_binary_chain(tree, &b.nodes.3, operands, ops)?;
+            Ok(())
+        }
+        other => {
+            operands.push(lower_constant_expr(tree, other)?);
+            Ok(())
+        }
+    }
+}
+
 /// IEEE 1364-2001 Table 5-4 の演算子優先順位（数値が大きいほど強く結合）。
 /// `**` は本サブセット未対応のためここには含まない。
 fn binop_precedence(op: BinOp) -> u8 {
@@ -1999,8 +2065,7 @@ fn lower_param_overrides(
                         let pname = get_id(tree, RefNode::ParameterIdentifier(&item.nodes.1));
                         // item.nodes.2 = Paren<Option<ParamExpression>>
                         let value = if let Some(pe) = &item.nodes.2.nodes.1 {
-                            let text = tree.get_str(pe).unwrap_or("0");
-                            parse_simple_const_expr(text.trim())
+                            lower_param_expr(tree, pe)?
                         } else {
                             Expr::Const(lv(0, 32))
                         };
@@ -2009,8 +2074,7 @@ fn lower_param_overrides(
                 }
                 sv_parser::ListOfParameterAssignments::Ordered(o) => {
                     for item in o.nodes.0.contents() {
-                        let text = tree.get_str(&item.nodes.0).unwrap_or("0");
-                        let value = parse_simple_const_expr(text.trim());
+                        let value = lower_param_expr(tree, &item.nodes.0)?;
                         out.push(ParamOverride { name: None, value });
                     }
                 }

@@ -1107,19 +1107,27 @@ fn eval_const_hir_with(
         HirExpr::Bin(op, lhs, rhs) => {
             let l = eval_const_hir_with(ctx, scope, lhs, extra)?;
             let r = eval_const_hir_with(ctx, scope, rhs, extra)?;
+            #[allow(unreachable_patterns)]
             Ok(match op {
                 HirBinOp::Add => l.wrapping_add(r),
                 HirBinOp::Sub => l.wrapping_sub(r),
                 HirBinOp::Mul => l.wrapping_mul(r),
                 HirBinOp::Div => if r == 0 { 0 } else { l / r },
                 HirBinOp::Mod => if r == 0 { 0 } else { l % r },
+                HirBinOp::LogAnd => ((l != 0) && (r != 0)) as u64,
+                HirBinOp::LogOr => ((l != 0) || (r != 0)) as u64,
                 HirBinOp::Shl | HirBinOp::Ashl => l << (r & 63),
                 HirBinOp::Shr | HirBinOp::Ashr => l >> (r & 63),
                 HirBinOp::BitAnd => l & r,
                 HirBinOp::BitOr => l | r,
                 HirBinOp::BitXor => l ^ r,
+                HirBinOp::BitNand => !(l & r),
+                HirBinOp::BitNor => !(l | r),
+                HirBinOp::BitXnor => !(l ^ r),
                 HirBinOp::Eq => (l == r) as u64,
                 HirBinOp::Ne => (l != r) as u64,
+                HirBinOp::CaseEq => (l == r) as u64,
+                HirBinOp::CaseNe => (l != r) as u64,
                 HirBinOp::Lt => (l < r) as u64,
                 HirBinOp::Gt => (l > r) as u64,
                 HirBinOp::Le => (l <= r) as u64,
