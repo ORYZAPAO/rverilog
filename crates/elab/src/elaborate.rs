@@ -452,7 +452,7 @@ fn elab_module(
     for always in &hir.alwayses {
         let body_id = lower_stmt(ctx, scope, &always.body)?;
         let sens = if let Some(s) = &always.sensitivity {
-            lower_sensitivity(ctx, scope, s)?
+            lower_sensitivity(ctx, scope, s, Some(body_id))?
         } else {
             Sensitivity::Items(Vec::new())
         };
@@ -597,7 +597,7 @@ fn elab_generate_items(
     for always in &items.alwayses {
         let body_id = lower_stmt(ctx, scope, &always.body)?;
         let sens = if let Some(s) = &always.sensitivity {
-            lower_sensitivity(ctx, scope, s)?
+            lower_sensitivity(ctx, scope, s, Some(body_id))?
         } else {
             Sensitivity::Items(Vec::new())
         };
@@ -968,8 +968,8 @@ fn lower_stmt(ctx: &mut ElabCtx, scope: ScopeId, s: &HirStmt) -> Result<StmtId, 
             Stmt::Delay(*time, body_id)
         }
         HirStmt::EventCtl(sens, body) => {
-            let ms = lower_sensitivity(ctx, scope, sens)?;
             let body_id = lower_stmt(ctx, scope, body)?;
+            let ms = lower_sensitivity(ctx, scope, sens, Some(body_id))?;
             Stmt::EventCtl(ms, body_id)
         }
         HirStmt::SysCall(task @ (HirSysTask::ReadMemH | HirSysTask::ReadMemB), args) => {
@@ -1046,9 +1046,22 @@ fn lower_sensitivity(
     ctx: &mut ElabCtx,
     scope: ScopeId,
     hs: &HirSensitivity,
+    auto_body: Option<StmtId>,
 ) -> Result<Sensitivity, ElabError> {
     match hs {
-        HirSensitivity::All => Ok(Sensitivity::All),
+        HirSensitivity::All => {
+            let Some(body) = auto_body else {
+                return Ok(Sensitivity::All);
+            };
+            let mut nets = std::collections::HashSet::new();
+            if !collect_sensitivity_stmt(ctx, body, &mut nets) || nets.is_empty() {
+                return Ok(Sensitivity::All);
+            }
+            Ok(Sensitivity::Items(nets.into_iter().map(|net| SensitivityEdge {
+                edge: None,
+                net,
+            }).collect()))
+        }
         HirSensitivity::Items(items) => {
             let mut edges = Vec::new();
             for item in items {
@@ -1062,6 +1075,62 @@ fn lower_sensitivity(
             }
             Ok(Sensitivity::Items(edges))
         }
+    }
+}
+
+/// `always @*` の本体から、値として参照されるネットを収集する。
+/// 依存先を静的に確定できない式では false を返し、呼び出し側で
+/// `Sensitivity::All` にフォールバックする。
+fn collect_sensitivity_stmt(ctx: &ElabCtx, stmt_id: StmtId, nets: &mut std::collections::HashSet<NetId>) -> bool {
+    match &ctx.stmts[stmt_id.0 as usize] {
+        Stmt::Block(stmts) | Stmt::NamedBlock(_, stmts) | Stmt::Fork(stmts) => stmts.iter().all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets)),
+        Stmt::If(cond, then_stmt, else_stmt) => collect_sensitivity_expr(ctx, *cond, nets)
+            && collect_sensitivity_stmt(ctx, *then_stmt, nets)
+            && else_stmt.map_or(true, |stmt| collect_sensitivity_stmt(ctx, stmt, nets)),
+        Stmt::Case { sel, arms, default, .. } => collect_sensitivity_expr(ctx, *sel, nets)
+            && arms.iter().all(|(patterns, body)| patterns.iter().all(|&expr| collect_sensitivity_expr(ctx, expr, nets))
+                && collect_sensitivity_stmt(ctx, *body, nets))
+            && default.map_or(true, |stmt| collect_sensitivity_stmt(ctx, stmt, nets)),
+        Stmt::BlockingAssign(lval, expr) | Stmt::NbaAssign(lval, expr) => collect_sensitivity_lvalue(ctx, lval, nets)
+            && collect_sensitivity_expr(ctx, *expr, nets),
+        Stmt::Delay(_, body) | Stmt::EventCtl(_, body) => collect_sensitivity_stmt(ctx, *body, nets),
+        Stmt::SysCall(_, args) => args.iter().all(|&expr| collect_sensitivity_expr(ctx, expr, nets)),
+        Stmt::While(cond, body) => collect_sensitivity_expr(ctx, *cond, nets) && collect_sensitivity_stmt(ctx, *body, nets),
+        Stmt::ReadMem(_, path, _) => collect_sensitivity_expr(ctx, *path, nets),
+        Stmt::Null | Stmt::Disable(_) => true,
+    }
+}
+
+/// 左辺は代入先そのものを感度に含めず、動的な添字式だけを読み出しとして扱う。
+fn collect_sensitivity_lvalue(ctx: &ElabCtx, lval: &LValue, nets: &mut std::collections::HashSet<NetId>) -> bool {
+    match lval {
+        LValue::Net(_) | LValue::BitSelect(_, _) | LValue::PartSelect(_, _, _) => true,
+        LValue::DynBitSelect(_, index) | LValue::DynPartSelect(_, index, _, _) | LValue::MemWrite(_, index) => collect_sensitivity_expr(ctx, *index, nets),
+        LValue::Concat(parts) => parts.iter().all(|part| collect_sensitivity_lvalue(ctx, part, nets)),
+    }
+}
+
+fn collect_sensitivity_expr(ctx: &ElabCtx, expr_id: ExprId, nets: &mut std::collections::HashSet<NetId>) -> bool {
+    match &ctx.exprs[expr_id.0 as usize] {
+        Expr::Const(_) | Expr::StringLit(_) => true,
+        Expr::Net(net) | Expr::BitSel(net, _) | Expr::PartSel(net, _, _) | Expr::DynPartSel(net, _, _, _) => {
+            nets.insert(*net);
+            match &ctx.exprs[expr_id.0 as usize] {
+                Expr::BitSel(_, index) | Expr::DynPartSel(_, index, _, _) => collect_sensitivity_expr(ctx, *index, nets),
+                _ => true,
+            }
+        }
+        Expr::Concat(parts) => parts.iter().all(|&expr| collect_sensitivity_expr(ctx, expr, nets)),
+        Expr::Repeat(_, expr) | Expr::Un(_, expr) => collect_sensitivity_expr(ctx, *expr, nets),
+        Expr::Bin(_, lhs, rhs) => collect_sensitivity_expr(ctx, *lhs, nets) && collect_sensitivity_expr(ctx, *rhs, nets),
+        Expr::Cond(cond, then_expr, else_expr) => collect_sensitivity_expr(ctx, *cond, nets)
+            && collect_sensitivity_expr(ctx, *then_expr, nets)
+            && collect_sensitivity_expr(ctx, *else_expr, nets),
+        Expr::MemRead(_, index) | Expr::Random(Some(index)) => collect_sensitivity_expr(ctx, *index, nets),
+        Expr::Random(None) => true,
+        // 関数呼び出しは、lowering済みの引数セットアップ文と関数本体を辿る。
+        // 返り値ネット自体は呼び出し内で書かれる左辺なので感度に含めない。
+        Expr::CallResult(stmts, _) => stmts.iter().all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets)),
     }
 }
 

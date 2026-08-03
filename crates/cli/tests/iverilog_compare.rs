@@ -156,6 +156,12 @@ fn compare_monitor() {
 }
 
 #[test]
+fn compare_always_star() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/always_star/dut.v")]);
+}
+
+#[test]
 fn compare_delay0() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/delay0/dut.v")]);
