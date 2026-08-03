@@ -2008,3 +2008,103 @@ Codex側の実装完了後、こちらで独立に検証:
   elaboration完了後の実行時の問題と推定）
 - 従来からの残タスク（D: 連続代入のsensitivity駆動化、B: サイレントスキップの
   診断化、E: fmt/clippyジョブのCI追加）
+
+## 2026-08-03
+
+### Task
+
+PLAN.md推奨着手順7番: picorv32.vフルシミュレーションのハング原因調査・修正。
+`feat/m1-milestone`から新規ブランチ`fix/picorv32-sim-hang`を切って着手。ユーザー指示に
+より実装はCodex（`codex:rescue`サブエージェント経由）に委任した。
+
+### 事前調査（自分で実施、デバッグ計装によるボトムアップ調査）
+
+Codexに委任する前に、こちらでデバッグ用のeprintln計装を`interp.rs`に一時的に追加して
+原因を特定:
+
+- `exec_proc`のACTIVE region drainループ・単一プロセスのstepループそれぞれにイテレーション
+  数カウンタを仕込んだが、いずれも閾値（50万〜500万回）に到達せず、素朴な「単純な
+  ビジーループ」ではないことが判明
+- `eval_expr`にグローバルなatomicコールカウンタを追加したところ、20秒で2億8千万回超の
+  呼び出しが発生しているにもかかわらず収束しないことを確認（再帰深度は1〜5程度で
+  暴走はしていない）→ 大量だが正当な処理が回り続けている状態
+- プロセスごとのstepガード（500万ステップ）を仕込んで発火させ、フレーム情報とscope名を
+  出力させたところ、ハングしているのは全てpicorv32トップモジュール直下の
+  `kind=Always, sensitivity=All`（＝`always @*`）プロセスであることを特定
+- **確定原因1（重大・確実）**: `crates/sim/src/interp.rs`の`exec_proc`、
+  `StepResult::Done`ハンドリング（alwaysプロセス完了時に次のイベント待ちへ戻す処理）が
+  `Sensitivity::Items`かつ非空の場合のみ`event_waiters`に登録してreturnする一方、
+  `Sensitivity::All`（`always @*`）の場合はどの分岐にもマッチせず素通りし、コメント
+  「always without sensitivity: loop immediately」の通り本体を無条件に即再実行して
+  しまう。つまり`always @*`ブロックは一度実行完了すると二度とイベント待ちに入らず、
+  トリガー条件を一切見ずに無限に自分の本体を再実行し続ける完全なビジーループだった
+- この最小修正（`Sensitivity::All`も`event_waiters`へ登録）だけでは別の問題が露呈する
+  ことも計装で確認: `trigger_sensitivity`の`Sensitivity::All => any_change`（設計内の
+  どのネットが変化しても無条件に起床）と、非インクリメンタルな`eval_conts`
+  （全連続代入を毎回総当たりで最大200回再評価するbrute-force fixed-pointループ、
+  D節で既知の課題）が組み合わさり、picorv32規模（数百ネット・多数の`always @*`）の
+  設計では実質収束せずハングし続ける
+- 調査終了後、デバッグ計装は全て除去し、pristineな状態に戻してからCodexに実装を委任した
+  （`git diff`が空であることを確認済み）
+
+### What was done（Codexに委任・実装完了を確認）
+
+上記調査結果を基に、3点の実装をCodexへ依頼:
+
+1. **`always @*`の自動センシティビティリスト化（本命の修正）**:
+   `crates/elab/src/elaborate.rs`に`collect_sensitivity_stmt`/`collect_sensitivity_expr`/
+   `collect_sensitivity_lvalue`を新設。`always @*`の本体（Stmt/Expr木）を再帰的に走査し、
+   右辺値として読み出されるネットID集合を収集（If/Case/代入/演算/連結/動的添字・部分選択/
+   関数呼び出しのlowering済み本体まで対応、LHS自体は含めないが動的添字式は含める）。
+   収集した集合から`Sensitivity::Items(edge: None のエントリ集合)`を生成し、
+   `Sensitivity::All`の代わりにプロセスへ格納。ネットが1つも見つからない場合は安全側に
+   倒して従来の`Sensitivity::All`にフォールバック
+2. **`exec_proc`の`Sensitivity::All`対応（最小修正、必須）**: フォールバック時にも
+   正しく動くよう、`Sensitivity::All`の場合も完了時に必ず`event_waiters`へ登録して
+   returnするよう修正（元のバグそのものの修正）
+3. **`eval_conts`の変化判定改善**: 連続代入の変化判定をRHS評価値の幅ではなく、
+   `write_lvalue`後にLHSから読み戻した実値で比較するよう修正（幅差による見せかけの
+   固定点非収束を防止）
+4. **`--max-time`の配線（独立した既存バグ、安全弁として修正）**: `crates/cli/src/cli.rs`の
+   `max_time`フィールドがどこにも使われていなかった問題を修正。`Interpreter`に
+   `max_time: Option<u64>`を持たせ`set_max_time`で設定、`run()`が未来イベントの時刻が
+   `max_time`を超える箇所で`"sim: reached --max-time {N}, stopping"`を出して正常終了する
+   よう`crates/cli/src/driver.rs`から配線
+5. 新規回帰テスト`tests/integration/cases/always_star/`（`always @*`が入力変化のたびに
+   正しく再トリガーされることをiverilog実出力とbit-exact比較で確認）・
+   `tests/integration/cases/max_time/`（`always`が永久に停止しない設計で`--max-time`が
+   実際にプロセスを止めることを確認、iverilog比較は無し）を追加、
+   `crates/cli/tests/integration.rs`/`iverilog_compare.rs`に登録
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff --stat`で変更ファイル・行数を確認（`crates/elab/src/elaborate.rs` +77/-0、
+  `crates/sim/src/interp.rs` +33/-12、`crates/cli/src/driver.rs` +1、テスト関連含め
+  計127行追加・12行削除＋新規テスト4ファイル）
+- `cargo build --workspace`成功（既存の`dead_code`警告3件のみ、新規警告なし）
+- `cargo test --workspace`全通過（68テスト: 統合テスト20件・iverilog比較18件を含む、
+  既存テストへの回帰なし）
+- `timeout 30 cargo run -p rverilog-cli --release -- --top picorv32 picorv32.v
+  --max-time 200`を実行し、**0.55秒で正常終了（exit=0）**することを確認
+  （クロック・テストベンチが無いRTL単体のため、`--max-time`到達前に未来イベントが
+  尽きて自然終了。ハング・timeoutなし）
+- `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を再実行し、VCD生成・
+  `$finish`による正常終了を確認（回帰なし）
+
+### Result
+
+✅ picorv32.vフルシミュレーションのハング（PLAN.md推奨着手順7番）を解消。原因は
+   `always @*`が完了後に二度とイベント待ちへ戻らず無限ビジーループする重大バグで、
+   自動センシティビティリスト化により根本修正
+✅ 独立した既存バグだった`--max-time`未配線も安全弁として修正
+✅ `cargo build`/`cargo test`（68テスト）全通過、既存回帰なし
+✅ picorv32.vが0.55秒で正常終了することを確認（従来はtimeoutで強制終了するまで
+   ハングしていた）
+✅ M1受入れサンプル（counter4・fifo_sync）の回帰なしを確認
+
+### Next
+
+- PLAN.md 実装課題A節にA12として今回のバグを記録
+- 従来からの残タスク（D: 連続代入のsensitivity駆動化の残り、B: サイレントスキップの
+  診断化、E: fmt/clippyジョブのCI追加、picorv32.vにテストベンチ・クロック生成を
+  追加した上でのフル命令実行シミュレーション確認）

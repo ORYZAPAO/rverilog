@@ -37,6 +37,7 @@ pub struct Interpreter {
     pub net_values: HashMap<NetId, LogicVal>,
     pub mem_values: HashMap<(u32, u32), LogicVal>,
     now: u64,
+    max_time: Option<u64>,
     seq: u32,
     active: Vec<ProcState>,
     future: BinaryHeap<Reverse<(u64, u32)>>,
@@ -78,6 +79,7 @@ impl Interpreter {
             net_values,
             mem_values: HashMap::new(),
             now: 0,
+            max_time: None,
             seq: 0,
             active: Vec::new(),
             future: BinaryHeap::new(),
@@ -125,7 +127,6 @@ impl Interpreter {
             }
             self.active.push(state);
         }
-
         let mut guard = 0u64;
         'outer: loop {
             if self.finished { break; }
@@ -182,6 +183,10 @@ impl Interpreter {
             // Advance to next future event
             if self.future.is_empty() { break; }
             let Reverse((t, seq)) = self.future.pop().unwrap();
+            if self.max_time.is_some_and(|max_time| t > max_time) {
+                eprintln!("sim: reached --max-time {}, stopping", self.max_time.unwrap());
+                break;
+            }
             let old_time = self.now;
             self.now = t;
             self.vcd_advance_time(old_time, t);
@@ -214,11 +219,16 @@ impl Interpreter {
                         let body = proc.body;
                         let sens = proc.sensitivity.clone();
                         state.frames = vec![(vec![body], 0, None)];
-                        if let Sensitivity::Items(ref items) = sens {
-                            if !items.is_empty() {
+                        match &sens {
+                            Sensitivity::All => {
                                 self.event_waiters.push((sens, state));
                                 return;
                             }
+                            Sensitivity::Items(items) if !items.is_empty() => {
+                                self.event_waiters.push((sens, state));
+                                return;
+                            }
+                            _ => {}
                         }
                         // always without sensitivity: loop immediately
                     } else {
@@ -901,12 +911,14 @@ impl Interpreter {
                 let signed = self.design.expr_signed[cont.expr.0 as usize];
                 let val = self.eval_expr(cont.expr);
                 let old = self.get_lval_val(&cont.lval);
-                if old.as_ref() != Some(&val) {
+                let lval = cont.lval.clone();
+                self.write_lvalue(&lval, val, signed);
+                let new = self.get_lval_val(&lval);
+                if old != new {
                     changed = true;
-                    let lval = cont.lval.clone();
-                    let ov = old;
-                    self.write_lvalue(&lval, val.clone(), signed);
-                    self.trigger_sensitivity(&lval, ov.as_ref(), &val);
+                    if let Some(new) = new.as_ref() {
+                        self.trigger_sensitivity(&lval, old.as_ref(), new);
+                    }
                 }
             }
             if !changed { break; }
@@ -957,6 +969,11 @@ impl Interpreter {
     /// Enable VCD output to the given path.  Call before `run()`.
     pub fn set_vcd_output(&mut self, path: PathBuf) {
         self.vcd_path = Some(path);
+    }
+
+    /// 次のイベントが指定時刻を超える場合、シミュレーションを正常終了する。
+    pub fn set_max_time(&mut self, max_time: Option<u64>) {
+        self.max_time = max_time;
     }
 
     fn init_vcd_from_path(&mut self, path: PathBuf) {

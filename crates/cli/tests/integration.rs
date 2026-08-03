@@ -165,6 +165,28 @@ fn test_monitor() {
 }
 
 #[test]
+fn test_always_star() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/always_star/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("always_star");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
+fn test_max_time() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/max_time/dut.v")];
+    let design = rverilog_frontend::parse_files(&files, &[], &[]).expect("parse failed");
+    let elaborated = rverilog_elab::elaborate(&design, "dut", &[]).expect("elaborate failed");
+    let mut interp = rverilog_sim::Interpreter::new(elaborated);
+    interp.set_max_time(Some(5));
+    interp.run();
+    assert_eq!(interp.output(), expected_stdout("max_time"));
+}
+
+#[test]
 fn test_delay0() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/delay0/dut.v")];

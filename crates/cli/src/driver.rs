@@ -25,6 +25,7 @@ pub fn run(args: &crate::cli::Args) -> Result<()> {
 
             info!("Creating interpreter");
             let mut interp = Interpreter::new(elaborated);
+            interp.set_max_time(args.max_time);
 
             if let Some(output) = &args.output {
                 interp.set_vcd_output(output.clone());
