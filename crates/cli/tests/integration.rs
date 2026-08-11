@@ -187,6 +187,16 @@ fn test_max_time() {
 }
 
 #[test]
+fn test_cont_loop() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/cont_loop/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("cont_loop");
+    assert_eq!(got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+}
+
+#[test]
 fn test_delay0() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/delay0/dut.v")];

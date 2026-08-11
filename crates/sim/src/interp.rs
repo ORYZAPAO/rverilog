@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BinaryHeap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::cmp::Reverse;
 use std::path::PathBuf;
 use rverilog_mir::*;
@@ -61,10 +61,14 @@ pub struct Interpreter {
     monitor_args: Option<Vec<ExprId>>,
     /// 前回monitorが印字した際の監視対象値スナップショット（`args[1..]`の評価結果）。
     monitor_last: Option<Vec<LogicVal>>,
+    cont_dirty: VecDeque<u32>,
+    /// cont_dirtyへの重複enqueueを防ぐビットセット。
+    cont_queued: Vec<bool>,
 }
 
 impl Interpreter {
     pub fn new(design: ElaboratedDesign) -> Self {
+        let cont_len = design.conts.len();
         let mut net_values = HashMap::new();
         for (i, net) in design.nets.iter().enumerate() {
             let x_mask = if net.width >= 64 { u64::MAX } else { (1u64 << net.width) - 1 };
@@ -97,6 +101,8 @@ impl Interpreter {
             rng_state: 0x2545_F491_4F6C_DD1D,
             monitor_args: None,
             monitor_last: None,
+            cont_dirty: VecDeque::new(),
+            cont_queued: vec![false; cont_len],
         }
     }
 
@@ -126,6 +132,9 @@ impl Interpreter {
                 }
             }
             self.active.push(state);
+        }
+        for i in 0..self.design.conts.len() {
+            self.mark_cont_dirty(i as u32);
         }
         let mut guard = 0u64;
         'outer: loop {
@@ -877,6 +886,14 @@ impl Interpreter {
         let negedge = (old_is_1 && (new_is_0 || new_is_unknown)) || (old_is_unknown && new_is_0);
         let any_change = old.map(|o| o != new).unwrap_or(true);
 
+        if any_change {
+            if let Some(conts) = self.design.cont_sensitivity.get(&net_id.0).cloned() {
+                for cont_id in conts {
+                    self.mark_cont_dirty(cont_id);
+                }
+            }
+        }
+
         let mut to_wake = Vec::new();
         let mut remaining = Vec::new();
 
@@ -903,25 +920,41 @@ impl Interpreter {
         self.active.extend(to_wake);
     }
 
+    fn mark_cont_dirty(&mut self, cont_id: u32) {
+        if !self.cont_queued[cont_id as usize] {
+            self.cont_queued[cont_id as usize] = true;
+            self.cont_dirty.push_back(cont_id);
+        }
+    }
+
     fn eval_conts(&mut self) {
-        for _ in 0..200 {
-            let mut changed = false;
-            let conts = self.design.conts.clone();
-            for cont in &conts {
-                let signed = self.design.expr_signed[cont.expr.0 as usize];
-                let val = self.eval_expr(cont.expr);
-                let old = self.get_lval_val(&cont.lval);
-                let lval = cont.lval.clone();
-                self.write_lvalue(&lval, val, signed);
-                let new = self.get_lval_val(&lval);
-                if old != new {
-                    changed = true;
-                    if let Some(new) = new.as_ref() {
-                        self.trigger_sensitivity(&lval, old.as_ref(), new);
-                    }
+        let limit = self.design.conts.len().saturating_mul(64).max(1000);
+        let mut iterations = 0usize;
+        while let Some(cont_id) = self.cont_dirty.pop_front() {
+            self.cont_queued[cont_id as usize] = false;
+            iterations += 1;
+            if iterations > limit {
+                eprintln!(
+                    "sim: continuous assignment did not converge (possible combinational loop) at time {}, stopping after {} evaluations",
+                    self.now, iterations
+                );
+                self.cont_dirty.clear();
+                for queued in self.cont_queued.iter_mut() {
+                    *queued = false;
+                }
+                break;
+            }
+            let cont = self.design.conts[cont_id as usize].clone();
+            let signed = self.design.expr_signed[cont.expr.0 as usize];
+            let val = self.eval_expr(cont.expr);
+            let old = self.get_lval_val(&cont.lval);
+            self.write_lvalue(&cont.lval, val, signed);
+            let new = self.get_lval_val(&cont.lval);
+            if let Some(new) = new {
+                if old.as_ref() != Some(&new) {
+                    self.trigger_sensitivity(&cont.lval, old.as_ref(), &new);
                 }
             }
-            if !changed { break; }
         }
     }
 
