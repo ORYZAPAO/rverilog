@@ -2358,3 +2358,40 @@ PLAN.md 推奨着手順10番、E（fmt/clippy ジョブの CI 追加と負パス
 
 - picorv32.v にテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
   （推奨着手順11番）
+
+## 2026-08-13 (3)
+
+### Task
+
+PR #25（E: fmt/clippy CI追加）のdiffレビュー中、`cargo fmt`が既存の英語コメント6箇所
+（`crates/cli/tests/common/mod.rs`・`crates/frontend/src/lower.rs`・
+`crates/hir/src/design.rs`・`crates/sim/src/interp.rs`・`crates/vcd_out/src/dump.rs`）を
+再整形して表面化させたのをユーザーが発見し「コメントは日本語で」と指示。プロジェクト規約
+（[[feedback_comment_language]]）に沿って該当コメントを日本語へ翻訳した
+（`vcd_out/dump.rs`はついでに同ファイル内の他の未翻訳コメントも含めて修正）。
+
+### What was done
+
+- 該当5ファイルの英語コメントをすべて日本語へ翻訳（ロジック変更なし）
+- `chore/fmt-clippy-ci`ブランチに追加コミットしてpushしたが、**PR #25はその追加pushより前に
+  既にマージ済み**だったため、この修正はfeat/m1-milestoneへ反映されていなかった
+  （リポジトリの`allow_auto_merge`はfalse・rulesetも無しのため自動マージではなく、
+  ユーザーがCIグリーンを見て直接マージしたタイミングの問題と推定）
+- 取りこぼしに気付き、`feat/m1-milestone`から新規ブランチ`fix/ja-comments-followup`を切って
+  該当コミットをcherry-pick、独立に`cargo build`/`fmt --check`/`clippy -D warnings`/
+  `cargo test`（80テスト）を再検証してからPR #26として切り出し、マージした
+
+### Result
+
+✅ 該当コメント6箇所（+αで`dump.rs`内の残り5箇所）すべて日本語化完了、`feat/m1-milestone`へ反映
+✅ `cargo build`/`cargo fmt --check`/`cargo clippy -D warnings`/`cargo test`（80テスト）
+   全通過を確認
+
+### Next
+
+- 教訓: PRに追加pushする場合、マージ前に必ず最新のCI結果・マージ状態を再確認してから
+  次のアクション（追加push→確認待ち、等）に進むこと。今回のように「push直後にはまだ
+  マージされていない」という前提でユーザー確認を挟んでも、確認のやり取りの間に
+  ユーザー側で先にマージが完了しているケースがあり得る
+- picorv32.v にテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
+  （推奨着手順11番、次のタスク）
