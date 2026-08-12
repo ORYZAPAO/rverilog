@@ -285,6 +285,15 @@ pub fn elaborate(
 
     elab_module(&mut ctx, top, None, SmolStr::from(top_name), &[])?;
 
+    let mut cont_sensitivity: IndexMap<u32, Vec<u32>> = IndexMap::new();
+    for (i, cont) in ctx.conts.iter().enumerate() {
+        let mut nets = std::collections::HashSet::new();
+        collect_sensitivity_expr(&ctx, cont.expr, &mut nets);
+        for net in nets {
+            cont_sensitivity.entry(net.0).or_default().push(i as u32);
+        }
+    }
+
     let top_scope = ScopeId(0);
     Ok(ElaboratedDesign {
         nets: ctx.nets,
@@ -296,6 +305,7 @@ pub fn elaborate(
         scopes: ctx.scopes,
         top: top_scope,
         sensitivity_table: ctx.sensitivity_table,
+        cont_sensitivity,
         expr_signed: ctx.expr_signed,
     })
 }

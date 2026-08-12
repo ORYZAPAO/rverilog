@@ -367,14 +367,27 @@ iverilog 出力比較 CI 導入済み）。
 
 ### D. 設計と実装の乖離・死コード
 
-- `sim/src/scheduler.rs` が TODO スタブのまま死コード。実イベントループは `Interpreter::run` に
-  別実装されており、未使用の `future: VecDeque` は時刻順ソートされないバグも内包。
-  削除するか interp ループを移設して一本化する
-- `sim/src/systask.rs` も全関数 TODO スタブで `interp.rs::exec_syscall` と重複（`lib.rs` で
-  pub use されたまま）
-- 連続代入が計画の「NetId→プロセス逆引きテーブル」方式でなく総当たり固定点ループ
+- ~~`sim/src/scheduler.rs`・`sim/src/systask.rs` が TODO スタブのまま死コード~~
+  **対応済み（2026-08-12）**。両ファイルとも `interp.rs` に実装が重複しており
+  ワークスペース全体を検索してもこの2ファイル以外から一切参照されていなかったため削除。
+  `lib.rs` から該当 `pub mod`/`pub use` を除去
+- ~~連続代入が計画の「NetId→プロセス逆引きテーブル」方式でなく総当たり固定点ループ
   （`interp.rs` `eval_conts`、最大 200 回打ち切り）。規模で性能劣化し、発振回路で黙って誤結果
-  （最低限、打ち切り時に警告を出す）
+  （最低限、打ち切り時に警告を出す）~~ **対応済み（2026-08-12）**。`always @*` の自動
+  センシティビティリスト化（A12）と同じ `collect_sensitivity_expr` を再利用し、
+  `ElaboratedDesign` に `cont_sensitivity: IndexMap<u32, Vec<u32>>`（net.0 → \[cont_id\]、
+  cont_idは`design.conts`のインデックス）を新設。`elaborate()` で各`ContAssign`のRHS式が
+  読み出すネット集合を収集して構築。sim側は `Interpreter` に `cont_dirty: VecDeque<u32>` +
+  `cont_queued: Vec<bool>`（重複enqueue防止）のdirtyワークリストを追加し、
+  `trigger_sensitivity` が対象ネットの実変化（`any_change`）を検知した際に該当contを
+  dirty化するよう変更。`eval_conts` は全conts総当たりではなくdirtyワークリストのみを
+  drainする実装に置換。無限発振（組み合わせループ、例: `assign a = ~a;`）検出のため
+  pop回数上限（`conts.len() * 64`、最低1000）を設け、超過時は`eprintln!`で警告を出して
+  打ち切るよう変更（従来は無警告で200回スイープ後に黙って打ち切っていた）。回帰テスト
+  `tests/integration/cases/cont_loop/`（組み合わせループがハングせず警告を出しつつ
+  `$finish`まで到達することを確認、iverilog比較は対象外—未定義動作に近いため）を追加。
+  `cargo test --workspace`（39テスト）全通過、`samples/counter4`・`samples/fifo_sync`・
+  picorv32.vスモークチェック（0.57秒、A12時点の0.55秒から性能劣化なし）で回帰なしを確認
 - `elab/src/width.rs` が実質スタブ（14 行）。IEEE の context-determined 幅推論が体系実装されず
   幅処理が elaborate.rs に分散。A1（signed 対応）の障害になる
 
@@ -405,8 +418,8 @@ iverilog 出力比較 CI 導入済み）。
 6. ~~A11: モジュール中盤の `localparam` 名前解決~~ 完了（2026-07-29に`cpu_state_*`パターンの範囲、
    2026-07-30に三項演算子・`||`・`*`・括弧を含む複雑な定数式（`WITH_PCPI`等）の残課題も解消）
 7. ~~picorv32.v フルシミュレーションのハング原因調査~~ 完了（2026-08-03、A12参照）
-8. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
-   — 実装済み・PR #22 レビュー待ち（2026-08-11、`feat/cont-assign-sensitivity`）
+8. ~~D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理含む）~~
+   完了（2026-08-12、D節参照）
 9. ~~B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）~~
    完了（2026-08-12、defparam/specify/UDP の計4箇所）
 10. E: fmt/clippy ジョブの CI 追加、負パステストの拡充（負パステストは B 対応で3件着手済み、
