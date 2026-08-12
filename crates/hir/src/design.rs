@@ -117,8 +117,8 @@ pub struct TfArg {
 pub struct PortDecl {
     pub name: SmolStr,
     pub direction: PortDirection,
-    pub width: u32,        // static fallback (1 if param-dependent)
-    pub width_expr: Expr,  // authoritative width expression
+    pub width: u32,       // static fallback (1 if param-dependent)
+    pub width_expr: Expr, // authoritative width expression
     pub signed: bool,
 }
 
@@ -224,7 +224,12 @@ pub struct Range {
 pub enum Stmt {
     Block(Vec<Stmt>),
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
-    Case { sel: Expr, arms: Vec<(Vec<Expr>, Box<Stmt>)>, default: Option<Box<Stmt>>, kind: CaseKind },
+    Case {
+        sel: Expr,
+        arms: Vec<(Vec<Expr>, Box<Stmt>)>,
+        default: Option<Box<Stmt>>,
+        kind: CaseKind,
+    },
     BlockingAssign(LValue, Expr),
     NbaAssign(LValue, Expr),
     Delay(u64, Box<Stmt>),
@@ -278,16 +283,39 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    LogAnd, LogOr,
-    BitAnd, BitOr, BitXor, BitNand, BitNor, BitXnor,
-    Eq, Ne, CaseEq, CaseNe, Lt, Gt, Le, Ge,
-    Shl, Shr, Ashl, Ashr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    LogAnd,
+    LogOr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNand,
+    BitNor,
+    BitXnor,
+    Eq,
+    Ne,
+    CaseEq,
+    CaseNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    Ashl,
+    Ashr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Pos, Neg, LogNot, BitNot,
+    Pos,
+    Neg,
+    LogNot,
+    BitNot,
 }
 
 #[derive(Debug, Clone)]

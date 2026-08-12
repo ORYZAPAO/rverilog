@@ -1,13 +1,15 @@
 #![allow(dead_code)]
-use std::path::{Path, PathBuf};
-use rverilog_frontend::parse_files;
 use rverilog_elab::elaborate;
+use rverilog_frontend::parse_files;
 use rverilog_sim::Interpreter;
+use std::path::{Path, PathBuf};
 
 pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()  // crates/
-        .parent().unwrap()  // workspace root
+        .parent()
+        .unwrap() // crates/
+        .parent()
+        .unwrap() // workspace root
         .to_path_buf()
 }
 

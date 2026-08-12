@@ -1,6 +1,6 @@
+use crate::logicval::LogicVal;
 use indexmap::IndexMap;
 use smol_str::SmolStr;
-use crate::logicval::LogicVal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetId(pub u32);
@@ -142,7 +142,12 @@ pub enum LValue {
 pub enum Stmt {
     Block(Vec<StmtId>),
     If(ExprId, StmtId, Option<StmtId>),
-    Case { sel: ExprId, arms: Vec<(Vec<ExprId>, StmtId)>, default: Option<StmtId>, kind: CaseKind },
+    Case {
+        sel: ExprId,
+        arms: Vec<(Vec<ExprId>, StmtId)>,
+        default: Option<StmtId>,
+        kind: CaseKind,
+    },
     BlockingAssign(LValue, ExprId),
     NbaAssign(LValue, ExprId),
     Delay(u64, StmtId),
@@ -191,17 +196,45 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    LogAnd, LogOr,
-    BitAnd, BitOr, BitXor, BitNand, BitNor, BitXnor,
-    Eq, Ne, CaseEq, CaseNe, Lt, Gt, Le, Ge,
-    Shl, Shr, Ashl, Ashr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    LogAnd,
+    LogOr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNand,
+    BitNor,
+    BitXnor,
+    Eq,
+    Ne,
+    CaseEq,
+    CaseNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    Ashl,
+    Ashr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Pos, Neg, LogNot, BitNot,
-    RedAnd, RedNand, RedOr, RedNor, RedXor, RedXnor,
+    Pos,
+    Neg,
+    LogNot,
+    BitNot,
+    RedAnd,
+    RedNand,
+    RedOr,
+    RedNor,
+    RedXor,
+    RedXnor,
 }
 
 #[derive(Debug, Clone)]

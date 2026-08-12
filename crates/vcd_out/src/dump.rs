@@ -23,7 +23,13 @@ fn vcd_code(idx: usize) -> String {
     }
 }
 
-fn write_vcd_value(w: &mut impl Write, code: &str, aval: u64, bval: u64, width: u32) -> std::io::Result<()> {
+fn write_vcd_value(
+    w: &mut impl Write,
+    code: &str,
+    aval: u64,
+    bval: u64,
+    width: u32,
+) -> std::io::Result<()> {
     if width == 1 {
         let ch = match (aval & 1, bval & 1) {
             (0, 0) => '0',
@@ -73,8 +79,8 @@ fn write_scope_dfs(
 
 pub struct VcdWriter {
     writer: BufWriter<File>,
-    code_map: HashMap<u32, (String, u32)>,   // net_id → (code, width)
-    pending: HashMap<u32, (u64, u64)>,        // net_id → (aval, bval)
+    code_map: HashMap<u32, (String, u32)>, // net_id → (code, width)
+    pending: HashMap<u32, (u64, u64)>,     // net_id → (aval, bval)
     last_time: u64,
 }
 
@@ -87,7 +93,7 @@ impl VcdWriter {
     /// `roots`: scope_ids that have no parent.
     pub fn new(
         path: &Path,
-        scopes: &[(u32, u32, &str)],  // (id, parent_or_MAX, name)
+        scopes: &[(u32, u32, &str)],    // (id, parent_or_MAX, name)
         nets: &[(u32, u32, &str, u32)], // (net_id, scope_id, name, width)
         root_scope_ids: &[u32],
     ) -> Result<Self, VcdError> {
@@ -98,7 +104,8 @@ impl VcdWriter {
         writeln!(w, "$timescale 1ns $end")?;
 
         // Build scope lookup
-        let scope_names: HashMap<u32, &str> = scopes.iter().map(|&(id, _, name)| (id, name)).collect();
+        let scope_names: HashMap<u32, &str> =
+            scopes.iter().map(|&(id, _, name)| (id, name)).collect();
         let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
         for &(id, parent, _) in scopes {
             if parent != u32::MAX {
@@ -136,7 +143,9 @@ impl VcdWriter {
     /// Write $dumpvars with initial values (called once before simulation).
     pub fn dump_initial(&mut self, values: &HashMap<u32, (u64, u64)>) -> Result<(), VcdError> {
         writeln!(self.writer, "$dumpvars")?;
-        let pairs: Vec<_> = self.code_map.iter()
+        let pairs: Vec<_> = self
+            .code_map
+            .iter()
             .map(|(&id, (code, width))| (id, code.clone(), *width))
             .collect();
         for (id, code, width) in &pairs {

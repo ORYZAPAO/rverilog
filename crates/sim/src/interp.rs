@@ -1,8 +1,8 @@
-use std::collections::{BinaryHeap, HashMap, VecDeque};
-use std::cmp::Reverse;
-use std::path::PathBuf;
 use rverilog_mir::*;
 use rverilog_vcd::VcdWriter;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::path::PathBuf;
 
 // Execution frame: (stmt_list, next_index, block_id of NamedBlock this frame represents, for `disable`)
 type Frame = (Vec<StmtId>, usize, Option<u32>);
@@ -10,8 +10,16 @@ type Frame = (Vec<StmtId>, usize, Option<u32>);
 /// indexed part-select (`base +: width` / `base -: width`) の (hi, lo) を計算する。
 /// base が負、または hi < lo となる不正な範囲の場合は None。
 fn indexed_part_select_bounds(base: i64, width: u32, plus_dir: bool) -> Option<(i64, i64)> {
-    let (hi, lo) = if plus_dir { (base + width as i64 - 1, base) } else { (base, base - width as i64 + 1) };
-    if lo < 0 || hi < lo { None } else { Some((hi, lo)) }
+    let (hi, lo) = if plus_dir {
+        (base + width as i64 - 1, base)
+    } else {
+        (base, base - width as i64 + 1)
+    };
+    if lo < 0 || hi < lo {
+        None
+    } else {
+        Some((hi, lo))
+    }
 }
 
 struct ProcState {
@@ -46,8 +54,8 @@ pub struct Interpreter {
     nba_queue: Vec<(LValue, LogicVal, bool)>,
     finished: bool,
     vcd: Option<VcdWriter>,
-    vcd_path: Option<PathBuf>,   // set by $dumpfile
-    vcd_active: bool,            // enabled by $dumpvars
+    vcd_path: Option<PathBuf>, // set by $dumpfile
+    vcd_active: bool,          // enabled by $dumpvars
     output_buf: String,
     fork_seq: u32,
     /// fork ID → 未完了の分岐数
@@ -71,7 +79,11 @@ impl Interpreter {
         let cont_len = design.conts.len();
         let mut net_values = HashMap::new();
         for (i, net) in design.nets.iter().enumerate() {
-            let x_mask = if net.width >= 64 { u64::MAX } else { (1u64 << net.width) - 1 };
+            let x_mask = if net.width >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << net.width) - 1
+            };
             let init = match net.kind {
                 NetKind::Wire => LogicVal::new(net.width as u16, 0, x_mask), // Z
                 _ => LogicVal::new(net.width as u16, x_mask, x_mask),        // X
@@ -138,7 +150,9 @@ impl Interpreter {
         }
         let mut guard = 0u64;
         'outer: loop {
-            if self.finished { break; }
+            if self.finished {
+                break;
+            }
             guard += 1;
             if guard > 50_000_000 {
                 eprintln!("sim: iteration limit reached at time {}", self.now);
@@ -151,7 +165,9 @@ impl Interpreter {
                     let procs: Vec<ProcState> = std::mem::take(&mut self.active);
                     for proc in procs {
                         self.exec_proc(proc);
-                        if self.finished { break 'outer; }
+                        if self.finished {
+                            break 'outer;
+                        }
                     }
                 }
 
@@ -159,21 +175,27 @@ impl Interpreter {
                 self.eval_conts();
 
                 // If cont assigns triggered new active processes, loop again
-                if self.active.is_empty() { break; }
+                if self.active.is_empty() {
+                    break;
+                }
             }
 
             // INACTIVE region: 同時刻(#0)で待っているプロセスをNBA適用前に再開する
             // （IEEE 1364: active → inactive → NBA の順序）
             let mut moved_inactive = false;
             while let Some(&Reverse((t, _))) = self.future.peek() {
-                if t != self.now { break; }
+                if t != self.now {
+                    break;
+                }
                 let Reverse((_, seq)) = self.future.pop().unwrap();
                 if let Some(p) = self.future_procs.remove(&seq) {
                     self.active.push(p);
                     moved_inactive = true;
                 }
             }
-            if moved_inactive { continue 'outer; }
+            if moved_inactive {
+                continue 'outer;
+            }
 
             // NBA region
             if !self.nba_queue.is_empty() {
@@ -190,10 +212,15 @@ impl Interpreter {
             self.flush_monitor();
 
             // Advance to next future event
-            if self.future.is_empty() { break; }
+            if self.future.is_empty() {
+                break;
+            }
             let Reverse((t, seq)) = self.future.pop().unwrap();
             if self.max_time.is_some_and(|max_time| t > max_time) {
-                eprintln!("sim: reached --max-time {}, stopping", self.max_time.unwrap());
+                eprintln!(
+                    "sim: reached --max-time {}, stopping",
+                    self.max_time.unwrap()
+                );
                 break;
             }
             let old_time = self.now;
@@ -204,7 +231,9 @@ impl Interpreter {
             }
             // Drain same-time events
             while let Some(&Reverse((t2, _))) = self.future.peek() {
-                if t2 != self.now { break; }
+                if t2 != self.now {
+                    break;
+                }
                 let Reverse((_, s2)) = self.future.pop().unwrap();
                 if let Some(p) = self.future_procs.remove(&s2) {
                     self.active.push(p);
@@ -312,19 +341,20 @@ impl Interpreter {
                 StepResult::Continue
             }
 
-            Stmt::Case { sel, arms, default, kind } => {
+            Stmt::Case {
+                sel,
+                arms,
+                default,
+                kind,
+            } => {
                 let sel_val = self.eval_expr(sel);
                 let mut matched = false;
                 'outer: for (pats, body) in &arms {
                     for &pid in pats {
                         let pv = self.eval_expr(pid);
                         let eq = match kind {
-                            CaseKind::Case => {
-                                sel_val.case_eq(&pv)
-                            }
-                            CaseKind::CaseZ | CaseKind::CaseX => {
-                                sel_val.case_eq(&pv)
-                            }
+                            CaseKind::Case => sel_val.case_eq(&pv),
+                            CaseKind::CaseZ | CaseKind::CaseX => sel_val.case_eq(&pv),
                         };
                         if eq == LogicVal::ONE {
                             state.frames.push((vec![*body], 0, None));
@@ -400,7 +430,11 @@ impl Interpreter {
             Stmt::Disable(target) => {
                 // 同一プロセスのフレームスタックから対象ブロックを探し、それを含む上の階層を巻き戻す。
                 // 他プロセスで実行中のブロック/タスクの中断には対応しない（M2サブセット）。
-                if let Some(i) = state.frames.iter().rposition(|(_, _, id)| *id == Some(target)) {
+                if let Some(i) = state
+                    .frames
+                    .iter()
+                    .rposition(|(_, _, id)| *id == Some(target))
+                {
                     state.frames.truncate(i);
                 }
                 StepResult::Continue
@@ -477,7 +511,10 @@ impl Interpreter {
                 // $dumpfile が未呼び出しの場合、IEEE 1364-2005 §17.2 に従い
                 // カレントディレクトリの "dump.vcd" を既定の出力先とする。
                 if self.vcd.is_none() {
-                    let path = self.vcd_path.take().unwrap_or_else(|| PathBuf::from("dump.vcd"));
+                    let path = self
+                        .vcd_path
+                        .take()
+                        .unwrap_or_else(|| PathBuf::from("dump.vcd"));
                     self.init_vcd_from_path(path);
                 }
             }
@@ -541,20 +578,26 @@ impl Interpreter {
                 let net_val = self.read_net(net_id);
                 let base = self.eval_expr(base_id).pad_to_width(32) as i64;
                 match indexed_part_select_bounds(base, width, plus_dir) {
-                    Some((hi, lo)) if (hi as u32) < net_val.width() => {
-                        net_val.part_select(hi as u32, lo as u32).unwrap_or_else(|_| LogicVal::x_of_width(width))
-                    }
+                    Some((hi, lo)) if (hi as u32) < net_val.width() => net_val
+                        .part_select(hi as u32, lo as u32)
+                        .unwrap_or_else(|_| LogicVal::x_of_width(width)),
                     _ => LogicVal::x_of_width(width),
                 }
             }
             Expr::Concat(parts) => {
-                if parts.is_empty() { return LogicVal::ZERO; }
+                if parts.is_empty() {
+                    return LogicVal::ZERO;
+                }
                 let vals: Vec<LogicVal> = parts.iter().map(|&id| self.eval_expr(id)).collect();
                 // parts[0] = MSB
-                vals[1..].iter().fold(vals[0].clone(), |acc, v| acc.concat(v))
+                vals[1..]
+                    .iter()
+                    .fold(vals[0].clone(), |acc, v| acc.concat(v))
             }
             Expr::Repeat(count, inner) => {
-                if count == 0 { return LogicVal::ZERO; }
+                if count == 0 {
+                    return LogicVal::ZERO;
+                }
                 let val = self.eval_expr(inner);
                 (1..count).fold(val.clone(), |acc, _| acc.concat(&val))
             }
@@ -582,7 +625,8 @@ impl Interpreter {
             Expr::MemRead(mem_id, idx_id) => {
                 let idx = self.eval_expr(idx_id).pad_to_width(32) as u32;
                 let w = self.design.get_mem(mem_id).elem_width;
-                self.mem_values.get(&(mem_id.0, idx))
+                self.mem_values
+                    .get(&(mem_id.0, idx))
                     .cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0))
             }
@@ -634,7 +678,9 @@ impl Interpreter {
                     self.exec_sync_stmt(e);
                 }
             }
-            Stmt::Case { sel, arms, default, .. } => {
+            Stmt::Case {
+                sel, arms, default, ..
+            } => {
                 let sel_val = self.eval_expr(sel);
                 let mut matched = false;
                 'outer: for (pats, body) in &arms {
@@ -672,7 +718,9 @@ impl Interpreter {
             Stmt::While(cond_id, body_id) => {
                 for _ in 0..1_000_000 {
                     let cond = self.eval_expr(cond_id);
-                    if !cond.is_known() || cond.pad_to_width(cond.width()) == 0 { break; }
+                    if !cond.is_known() || cond.pad_to_width(cond.width()) == 0 {
+                        break;
+                    }
                     self.exec_sync_stmt(body_id);
                 }
             }
@@ -714,23 +762,30 @@ impl Interpreter {
     fn get_lval_val(&mut self, lval: &LValue) -> Option<LogicVal> {
         match lval {
             LValue::Net(id) => self.net_values.get(id).cloned(),
-            LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _)
-            | LValue::DynPartSelect(id, _, _, _) => {
-                self.net_values.get(id).cloned()
-            }
+            LValue::BitSelect(id, _)
+            | LValue::PartSelect(id, _, _)
+            | LValue::DynBitSelect(id, _)
+            | LValue::DynPartSelect(id, _, _, _) => self.net_values.get(id).cloned(),
             LValue::MemWrite(mem_id, idx_id) => {
                 let idx = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 self.mem_values.get(&(mem_id.0, idx)).cloned()
             }
             LValue::Concat(parts) => {
-                let vals: Vec<LogicVal> = parts.iter().map(|p| {
-                    self.get_lval_val(p).unwrap_or_else(|| {
-                        let w = self.lvalue_width(p);
-                        let xm = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
-                        LogicVal::new(w as u16, xm, xm)
+                let vals: Vec<LogicVal> = parts
+                    .iter()
+                    .map(|p| {
+                        self.get_lval_val(p).unwrap_or_else(|| {
+                            let w = self.lvalue_width(p);
+                            let xm = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+                            LogicVal::new(w as u16, xm, xm)
+                        })
                     })
-                }).collect();
-                Some(vals[1..].iter().fold(vals[0].clone(), |acc, v| acc.concat(v)))
+                    .collect();
+                Some(
+                    vals[1..]
+                        .iter()
+                        .fold(vals[0].clone(), |acc, v| acc.concat(v)),
+                )
             }
         }
     }
@@ -753,7 +808,10 @@ impl Interpreter {
             LValue::BitSelect(id, bit) => {
                 let net_id = *id;
                 let w = self.design.get_net(net_id).width;
-                let old = self.net_values.get(&net_id).cloned()
+                let old = self
+                    .net_values
+                    .get(&net_id)
+                    .cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
                 let oa = old.pad_to_width(w);
                 let ob = old.pad_to_width_b(w);
@@ -770,7 +828,10 @@ impl Interpreter {
                 let net_id = *id;
                 let bit = self.eval_expr(*idx_id).pad_to_width(32) as u32;
                 let w = self.design.get_net(net_id).width;
-                let old = self.net_values.get(&net_id).cloned()
+                let old = self
+                    .net_values
+                    .get(&net_id)
+                    .cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
                 let oa = old.pad_to_width(w);
                 let ob = old.pad_to_width_b(w);
@@ -786,12 +847,19 @@ impl Interpreter {
             LValue::PartSelect(id, hi, lo) => {
                 let net_id = *id;
                 let w = self.design.get_net(net_id).width;
-                let old = self.net_values.get(&net_id).cloned()
+                let old = self
+                    .net_values
+                    .get(&net_id)
+                    .cloned()
                     .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
                 let oa = old.pad_to_width(w);
                 let ob = old.pad_to_width_b(w);
                 let sel_w = hi - lo + 1;
-                let m = if sel_w >= 64 { u64::MAX } else { (1u64 << sel_w) - 1 };
+                let m = if sel_w >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << sel_w) - 1
+                };
                 let va = val.pad_to_width(sel_w);
                 let vb = val.pad_to_width_b(sel_w);
                 let na = (oa & !(m << lo)) | (va << lo);
@@ -810,12 +878,19 @@ impl Interpreter {
                 if let Some((hi, lo)) = indexed_part_select_bounds(base, *width, *plus_dir) {
                     if hi >= 0 && (hi as u32) < w {
                         let (hi, lo) = (hi as u32, lo as u32);
-                        let old = self.net_values.get(&net_id).cloned()
+                        let old = self
+                            .net_values
+                            .get(&net_id)
+                            .cloned()
                             .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
                         let oa = old.pad_to_width(w);
                         let ob = old.pad_to_width_b(w);
                         let sel_w = hi - lo + 1;
-                        let m = if sel_w >= 64 { u64::MAX } else { (1u64 << sel_w) - 1 };
+                        let m = if sel_w >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << sel_w) - 1
+                        };
                         let va = val.pad_to_width(sel_w);
                         let vb = val.pad_to_width_b(sel_w);
                         let na = (oa & !(m << lo)) | (va << lo);
@@ -832,7 +907,11 @@ impl Interpreter {
             }
             LValue::Concat(parts) => {
                 let total_w: u32 = parts.iter().map(|p| self.lvalue_width(p)).sum();
-                let full = if signed { val.extend_sign(total_w) } else { val.resize(total_w) };
+                let full = if signed {
+                    val.extend_sign(total_w)
+                } else {
+                    val.resize(total_w)
+                };
                 let mut hi = total_w;
                 for p in parts {
                     let w = self.lvalue_width(p);
@@ -855,16 +934,21 @@ impl Interpreter {
                 let w = self.lvalue_width(p);
                 let lo = hi - w;
                 let part_new = new_full.part_select(hi - 1, lo).unwrap_or(LogicVal::X);
-                let part_old = old_full.as_ref().and_then(|o| o.part_select(hi - 1, lo).ok());
+                let part_old = old_full
+                    .as_ref()
+                    .and_then(|o| o.part_select(hi - 1, lo).ok());
                 self.trigger_sensitivity(p, part_old.as_ref(), &part_new);
                 hi = lo;
             }
             return;
         }
         let net_id = match lval {
-            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) | LValue::DynBitSelect(id, _)
+            LValue::Net(id)
+            | LValue::BitSelect(id, _)
+            | LValue::PartSelect(id, _, _)
+            | LValue::DynBitSelect(id, _)
             | LValue::DynPartSelect(id, _, _, _) => *id,
-            LValue::MemWrite(_, _) => return,  // memory writes don't trigger net sensitivity
+            LValue::MemWrite(_, _) => return, // memory writes don't trigger net sensitivity
             LValue::Concat(_) => unreachable!("handled by the early return above"),
         };
 
@@ -901,7 +985,9 @@ impl Interpreter {
             let wake = match &sens {
                 Sensitivity::All => any_change,
                 Sensitivity::Items(edges) => edges.iter().any(|e| {
-                    if e.net != net_id { return false; }
+                    if e.net != net_id {
+                        return false;
+                    }
                     match e.edge {
                         None => any_change,
                         Some(EdgeType::Posedge) => posedge,
@@ -962,8 +1048,12 @@ impl Interpreter {
     /// 1回だけ呼ぶ。登録済みの$monitor引数を評価し、前回印字時から値が変化して
     /// いた場合（初回登録直後を含む）のみ印字する。
     fn flush_monitor(&mut self) {
-        let Some(args) = self.monitor_args.clone() else { return; };
-        if args.is_empty() { return; }
+        let Some(args) = self.monitor_args.clone() else {
+            return;
+        };
+        if args.is_empty() {
+            return;
+        }
         let vals: Vec<LogicVal> = args[1..].iter().map(|&id| self.eval_expr(id)).collect();
         if self.monitor_last.as_ref() != Some(&vals) {
             let s = self.format_args(&args);
@@ -975,14 +1065,19 @@ impl Interpreter {
     }
 
     fn format_args(&mut self, args: &[ExprId]) -> String {
-        if args.is_empty() { return String::new(); }
+        if args.is_empty() {
+            return String::new();
+        }
         let first = self.design.get_expr(args[0]).clone();
         if let Expr::StringLit(fmt) = first {
             let now = self.now;
             format_string(&fmt, &args[1..], self, now)
         } else {
             // No format string: space-separated values
-            args.iter().map(|&id| self.eval_expr(id).to_string()).collect::<Vec<_>>().join(" ")
+            args.iter()
+                .map(|&id| self.eval_expr(id).to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
         }
     }
 
@@ -1010,20 +1105,30 @@ impl Interpreter {
     }
 
     fn init_vcd_from_path(&mut self, path: PathBuf) {
-        let scopes_owned: Vec<(u32, u32, String)> = self.design.scopes.iter().enumerate()
+        let scopes_owned: Vec<(u32, u32, String)> = self
+            .design
+            .scopes
+            .iter()
+            .enumerate()
             .map(|(i, s)| {
                 let parent = s.parent.map(|p| p.0).unwrap_or(u32::MAX);
                 (i as u32, parent, s.name.to_string())
             })
             .collect();
-        let scopes_ref: Vec<(u32, u32, &str)> = scopes_owned.iter()
+        let scopes_ref: Vec<(u32, u32, &str)> = scopes_owned
+            .iter()
             .map(|(id, parent, name)| (*id, *parent, name.as_str()))
             .collect();
 
-        let nets_owned: Vec<(u32, u32, String, u32)> = self.design.nets.iter().enumerate()
+        let nets_owned: Vec<(u32, u32, String, u32)> = self
+            .design
+            .nets
+            .iter()
+            .enumerate()
             .map(|(i, n)| (i as u32, n.scope.0, n.name.to_string(), n.width))
             .collect();
-        let nets_ref: Vec<(u32, u32, &str, u32)> = nets_owned.iter()
+        let nets_ref: Vec<(u32, u32, &str, u32)> = nets_owned
+            .iter()
             .map(|(id, scope, name, width)| (*id, *scope, name.as_str(), *width))
             .collect();
 
@@ -1035,11 +1140,18 @@ impl Interpreter {
                 println!("{}", msg);
                 self.output_buf.push_str(&msg);
                 self.output_buf.push('\n');
-                let initial: HashMap<u32, (u64, u64)> = self.net_values.iter()
-                    .map(|(id, val)| (id.0, (
-                        val.pad_to_width(val.width()),
-                        val.pad_to_width_b(val.width()),
-                    )))
+                let initial: HashMap<u32, (u64, u64)> = self
+                    .net_values
+                    .iter()
+                    .map(|(id, val)| {
+                        (
+                            id.0,
+                            (
+                                val.pad_to_width(val.width()),
+                                val.pad_to_width_b(val.width()),
+                            ),
+                        )
+                    })
                     .collect();
                 let _ = vcd.dump_initial(&initial);
                 self.vcd = Some(vcd);
@@ -1052,7 +1164,9 @@ impl Interpreter {
     }
 
     fn vcd_record_net_change(&mut self, net_id: NetId, val: &LogicVal) {
-        if !self.vcd_active { return; }
+        if !self.vcd_active {
+            return;
+        }
         if let Some(vcd) = &mut self.vcd {
             let aval = val.pad_to_width(val.width());
             let bval = val.pad_to_width_b(val.width());
@@ -1061,7 +1175,9 @@ impl Interpreter {
     }
 
     fn vcd_advance_time(&mut self, old_time: u64, new_time: u64) {
-        if !self.vcd_active { return; }
+        if !self.vcd_active {
+            return;
+        }
         if let Some(vcd) = &mut self.vcd {
             let _ = vcd.advance_time(old_time, new_time);
         }
@@ -1091,8 +1207,8 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
             } else {
                 LogicVal::ZERO
             };
-            let arg_signed = arg_idx < args.len()
-                && interp.design.expr_signed[args[arg_idx].0 as usize];
+            let arg_signed =
+                arg_idx < args.len() && interp.design.expr_signed[args[arg_idx].0 as usize];
             arg_idx += 1;
             let width = val.width();
             match spec {
@@ -1110,13 +1226,29 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
                         let a = val.pad_to_width(width);
                         let b = val.pad_to_width_b(width);
                         let natural = natural_repr(spec, a, b, width, arg_signed);
-                        result.push_str(&apply_width_modifier(spec, width, &width_digits, &natural, arg_signed));
+                        result.push_str(&apply_width_modifier(
+                            spec,
+                            width,
+                            &width_digits,
+                            &natural,
+                            arg_signed,
+                        ));
                     }
                 }
                 's' | 'S' => result.push_str(&val.to_string()),
-                't' | 'T' => { arg_idx -= 1; result.push_str(&now.to_string()); }
-                '%' => { arg_idx -= 1; result.push('%'); }
-                _ => { result.push('%'); result.push(spec); arg_idx -= 1; }
+                't' | 'T' => {
+                    arg_idx -= 1;
+                    result.push_str(&now.to_string());
+                }
+                '%' => {
+                    arg_idx -= 1;
+                    result.push('%');
+                }
+                _ => {
+                    result.push('%');
+                    result.push(spec);
+                    arg_idx -= 1;
+                }
             }
         } else if c == '\\' {
             match chars.next().unwrap_or('\\') {
@@ -1124,7 +1256,10 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
                 't' => result.push('\t'),
                 '\\' => result.push('\\'),
                 '"' => result.push('"'),
-                other => { result.push('\\'); result.push(other); }
+                other => {
+                    result.push('\\');
+                    result.push(other);
+                }
             }
         } else {
             result.push(c);
@@ -1159,26 +1294,41 @@ fn group_char(a_grp: u64, b_grp: u64, mask: u64, known_digit: impl Fn(u64) -> ch
 /// （`%h`/`%o`/`%b`はIEEE準拠でビットパターン表示のみ、signednessの影響を受けない）。
 fn natural_repr(spec: char, a: u64, b: u64, width: u32, signed: bool) -> String {
     match spec {
-        'b' | 'B' => (0..width).rev()
-            .map(|bit| group_char((a >> bit) & 1, (b >> bit) & 1, 1, |v| if v == 0 { '0' } else { '1' }))
+        'b' | 'B' => (0..width)
+            .rev()
+            .map(|bit| {
+                group_char((a >> bit) & 1, (b >> bit) & 1, 1, |v| {
+                    if v == 0 {
+                        '0'
+                    } else {
+                        '1'
+                    }
+                })
+            })
             .collect(),
         'h' | 'H' => {
-            let digits = (((width + 3) / 4).max(1)) as usize;
-            (0..digits as u32).rev()
+            let digits = width.div_ceil(4).max(1) as usize;
+            (0..digits as u32)
+                .rev()
                 .map(|i| {
                     let s = i * 4;
                     let mask = (1u64 << (4.min(width - s))) - 1;
-                    group_char((a >> s) & mask, (b >> s) & mask, mask, |v| std::char::from_digit(v as u32, 16).unwrap())
+                    group_char((a >> s) & mask, (b >> s) & mask, mask, |v| {
+                        std::char::from_digit(v as u32, 16).unwrap()
+                    })
                 })
                 .collect()
         }
         'o' | 'O' => {
-            let digits = (((width + 2) / 3).max(1)) as usize;
-            (0..digits as u32).rev()
+            let digits = width.div_ceil(3).max(1) as usize;
+            (0..digits as u32)
+                .rev()
                 .map(|i| {
                     let s = i * 3;
                     let mask = (1u64 << (3.min(width - s))) - 1;
-                    group_char((a >> s) & mask, (b >> s) & mask, mask, |v| std::char::from_digit(v as u32, 8).unwrap())
+                    group_char((a >> s) & mask, (b >> s) & mask, mask, |v| {
+                        std::char::from_digit(v as u32, 8).unwrap()
+                    })
                 })
                 .collect()
         }
@@ -1187,15 +1337,27 @@ fn natural_repr(spec: char, a: u64, b: u64, width: u32, signed: bool) -> String 
             // apply_width_modifier側で行う）
             if b == 0 {
                 if signed && width > 0 {
-                    let sign_bit = if width >= 64 { (a >> 63) & 1 } else { (a >> (width - 1)) & 1 };
+                    let sign_bit = if width >= 64 {
+                        (a >> 63) & 1
+                    } else {
+                        (a >> (width - 1)) & 1
+                    };
                     if sign_bit == 1 {
-                        let signed_val: i64 = if width >= 64 { a as i64 } else { (a as i64) - (1i64 << width) };
+                        let signed_val: i64 = if width >= 64 {
+                            a as i64
+                        } else {
+                            (a as i64) - (1i64 << width)
+                        };
                         return signed_val.to_string();
                     }
                 }
                 a.to_string()
             } else {
-                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                let mask = if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
                 group_char(a, b, mask, |_| unreachable!()).to_string()
             }
         }
@@ -1207,14 +1369,28 @@ fn natural_repr(spec: char, a: u64, b: u64, width: u32, signed: bool) -> String 
 /// （`%h`/`%o`/`%b`は`natural_repr`が既にビット幅由来の桁数を生成済みのため不要）。
 /// `signed`（iverilog実測挙動）: signed値は符号1桁分を常に確保するため、最大正値
 /// `2^(width-1)-1` の桁数+1をフィールド幅とする（unsignedは`2^width-1`の桁数そのまま）。
-fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &str, signed: bool) -> String {
+fn apply_width_modifier(
+    spec: char,
+    width: u32,
+    width_digits: &str,
+    natural: &str,
+    signed: bool,
+) -> String {
     if width_digits.is_empty() {
         if spec == 'd' || spec == 'D' {
             let digits = if signed && width > 0 {
-                let max_pos = if width - 1 >= 64 { u64::MAX } else { (1u64 << (width - 1)) - 1 };
+                let max_pos = if width > 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << (width - 1)) - 1
+                };
                 max_pos.to_string().len() + 1
             } else {
-                let max = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                let max = if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
                 max.to_string().len()
             };
             return format!("{:>width$}", natural, width = digits);
@@ -1223,7 +1399,11 @@ fn apply_width_modifier(spec: char, width: u32, width_digits: &str, natural: &st
     }
     if width_digits == "0" {
         let trimmed = natural.trim_start_matches('0');
-        return if trimmed.is_empty() { "0".to_string() } else { trimmed.to_string() };
+        return if trimmed.is_empty() {
+            "0".to_string()
+        } else {
+            trimmed.to_string()
+        };
     }
     let n: usize = width_digits.parse().unwrap_or(0);
     if natural.len() >= n {
@@ -1261,8 +1441,20 @@ fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal, l_signed: bool, r_signed: 
         BinOp::Add => l.add(r),
         BinOp::Sub => l.sub(r),
         BinOp::Mul => l.mul(r),
-        BinOp::Div => if both_signed { l.div_signed(r) } else { l.div(r) },
-        BinOp::Mod => if both_signed { l.mod_signed(r) } else { l.mod_(r) },
+        BinOp::Div => {
+            if both_signed {
+                l.div_signed(r)
+            } else {
+                l.div(r)
+            }
+        }
+        BinOp::Mod => {
+            if both_signed {
+                l.mod_signed(r)
+            } else {
+                l.mod_(r)
+            }
+        }
         BinOp::LogAnd => l.log_and(r),
         BinOp::LogOr => l.log_or(r),
         BinOp::BitAnd => l.clone() & r.clone(),
@@ -1275,14 +1467,44 @@ fn apply_binop(op: BinOp, l: &LogicVal, r: &LogicVal, l_signed: bool, r_signed: 
         BinOp::Ne => l.ne(r),
         BinOp::CaseEq => l.case_eq(r),
         BinOp::CaseNe => l.case_ne(r),
-        BinOp::Lt => if both_signed { l.lt_signed(r) } else { l.lt(r) },
-        BinOp::Gt => if both_signed { l.gt_signed(r) } else { l.gt(r) },
-        BinOp::Le => if both_signed { l.le_signed(r) } else { l.le(r) },
-        BinOp::Ge => if both_signed { l.ge_signed(r) } else { l.ge(r) },
+        BinOp::Lt => {
+            if both_signed {
+                l.lt_signed(r)
+            } else {
+                l.lt(r)
+            }
+        }
+        BinOp::Gt => {
+            if both_signed {
+                l.gt_signed(r)
+            } else {
+                l.gt(r)
+            }
+        }
+        BinOp::Le => {
+            if both_signed {
+                l.le_signed(r)
+            } else {
+                l.le(r)
+            }
+        }
+        BinOp::Ge => {
+            if both_signed {
+                l.ge_signed(r)
+            } else {
+                l.ge(r)
+            }
+        }
         BinOp::Shl => l.shl(r),
         BinOp::Shr => l.shr(r),
         BinOp::Ashl => l.ashl(r),
-        BinOp::Ashr => if l_signed { l.ashr(r) } else { l.shr(r) },
+        BinOp::Ashr => {
+            if l_signed {
+                l.ashr(r)
+            } else {
+                l.shr(r)
+            }
+        }
     }
 }
 
@@ -1315,7 +1537,9 @@ fn strip_readmem_comments(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '/' && chars.peek() == Some(&'/') {
             while let Some(&n) = chars.peek() {
-                if n == '\n' { break; }
+                if n == '\n' {
+                    break;
+                }
                 chars.next();
             }
         } else if c == '/' && chars.peek() == Some(&'*') {
@@ -1338,7 +1562,7 @@ fn strip_readmem_comments(s: &str) -> String {
 /// `_` は読み飛ばす。
 fn parse_readmem_token(token: &str, radix: u32, elem_width: u32) -> LogicVal {
     let bits_per_digit = if radix == 2 { 1 } else { 4 };
-    let n_chunks = ((elem_width as usize) + 63) / 64;
+    let n_chunks = (elem_width as usize).div_ceil(64);
     let mut a = vec![0u64; n_chunks];
     let mut b = vec![0u64; n_chunks];
     let mut bitpos: usize = 0;
@@ -1459,7 +1683,7 @@ mod format_tests {
     #[test]
     fn partial_x_value() {
         let a = (TOP_NIBBLE_X & A) | LOW_NIBBLE; // 上位4bit=known(1010)、下位4bitはX型(a=b=1)
-        let b = LOW_NIBBLE;       // 下位4bitがX
+        let b = LOW_NIBBLE; // 下位4bitがX
         assert_eq!(repr('d', a, b), "  X");
         assert_eq!(repr('h', a, b), "ax");
         assert_eq!(repr('o', a, b), "2Xx");
@@ -1480,16 +1704,40 @@ mod format_tests {
     #[test]
     fn explicit_width_and_zero_modifier() {
         // iverilog実測: "width: d=  172 h=  ac o= 254 b=  10101100"
-        assert_eq!(apply_width_modifier('d', 8, "5", &natural_repr('d', A, 0, 8, false), false), "  172");
-        assert_eq!(apply_width_modifier('h', 8, "4", &natural_repr('h', A, 0, 8, false), false), "  ac");
-        assert_eq!(apply_width_modifier('o', 8, "4", &natural_repr('o', A, 0, 8, false), false), " 254");
-        assert_eq!(apply_width_modifier('b', 8, "10", &natural_repr('b', A, 0, 8, false), false), "  10101100");
+        assert_eq!(
+            apply_width_modifier('d', 8, "5", &natural_repr('d', A, 0, 8, false), false),
+            "  172"
+        );
+        assert_eq!(
+            apply_width_modifier('h', 8, "4", &natural_repr('h', A, 0, 8, false), false),
+            "  ac"
+        );
+        assert_eq!(
+            apply_width_modifier('o', 8, "4", &natural_repr('o', A, 0, 8, false), false),
+            " 254"
+        );
+        assert_eq!(
+            apply_width_modifier('b', 8, "10", &natural_repr('b', A, 0, 8, false), false),
+            "  10101100"
+        );
         // iverilog実測: "zpad: d=00172 h=00ac"
-        assert_eq!(apply_width_modifier('d', 8, "05", &natural_repr('d', A, 0, 8, false), false), "00172");
-        assert_eq!(apply_width_modifier('h', 8, "04", &natural_repr('h', A, 0, 8, false), false), "00ac");
+        assert_eq!(
+            apply_width_modifier('d', 8, "05", &natural_repr('d', A, 0, 8, false), false),
+            "00172"
+        );
+        assert_eq!(
+            apply_width_modifier('h', 8, "04", &natural_repr('h', A, 0, 8, false), false),
+            "00ac"
+        );
         // iverilog実測: "zero: d=172 h=ac"（%0d/%0h は最小桁数）
-        assert_eq!(apply_width_modifier('d', 8, "0", &natural_repr('d', A, 0, 8, false), false), "172");
-        assert_eq!(apply_width_modifier('h', 8, "0", &natural_repr('h', A, 0, 8, false), false), "ac");
+        assert_eq!(
+            apply_width_modifier('d', 8, "0", &natural_repr('d', A, 0, 8, false), false),
+            "172"
+        );
+        assert_eq!(
+            apply_width_modifier('h', 8, "0", &natural_repr('h', A, 0, 8, false), false),
+            "ac"
+        );
     }
 
     #[test]

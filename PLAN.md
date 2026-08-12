@@ -352,8 +352,7 @@ iverilog 出力比較 CI 導入済み）。
   エラーも既存で無視される別問題）、トップレベルの`primitive`宣言自体の無言スキップ（UDP
   インスタンス化のエラー化で実質カバー）、ゲートプリミティブの`switch`/`cmos`/`pass`/
   `pullup`/`pulldown`（既知の別課題、コード内コメントで明記済み）
-- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子、
-  式中の関数呼び出し
+- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子
 - `real`/`realtime` が型検査なしで 1bit reg として解釈される
 - `disable` は同一プロセス内のみ対応、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
 
@@ -394,9 +393,13 @@ iverilog 出力比較 CI 導入済み）。
 ### E. テスト・CI
 
 - iverilog 出力比較 CI 導入済み（`.github/workflows/ci.yml`、`crates/cli/tests/iverilog_compare.rs`）
-- fmt/clippy ジョブは未導入
+- ~~fmt/clippy ジョブは未導入~~ **対応済み（2026-08-13）**。`fmt` ジョブで
+  `cargo fmt --check`、`clippy` ジョブで `cargo clippy --workspace --all-targets -- -D warnings`
+  を実行するよう追加。既存コードベース全体に `cargo fmt` を適用し、clippy 指摘を解消
 - 統合テストは 8 ケース（counter4/fifo_sync/disable_fork/format_xz/func_task/gates/generate/
-  readmem_random）。サブセット外構文のエラーを確認する負パステストはまだない
+  readmem_random）。`unsupported_construct.rs` でdefparam/specify/UDPに加え、while/repeat/
+  forever・`**` 演算子の明示エラーを回帰テスト化。式中の関数呼び出しは実装どおり受理される
+  ことも確認した
 
 ### F. 軽微
 
@@ -422,8 +425,8 @@ iverilog 出力比較 CI 導入済み）。
    完了（2026-08-12、D節参照）
 9. ~~B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）~~
    完了（2026-08-12、defparam/specify/UDP の計4箇所）
-10. E: fmt/clippy ジョブの CI 追加、負パステストの拡充（負パステストは B 対応で3件着手済み、
-    fmt/clippy ジョブ自体は未着手）
+10. ~~E: fmt/clippy ジョブの CI 追加、負パステストの拡充~~ 完了（2026-08-13、fmt/clippy
+    CIジョブ追加、全体fmt・clippy警告解消、負パステスト拡充）
 11. picorv32.v にテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
     （A12解消によりelaborationからsim終了までは到達するようになったが、実際に命令を実行させる
     検証はまだ未実施）

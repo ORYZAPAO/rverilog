@@ -11,12 +11,8 @@ mod tests {
 
     #[test]
     fn test_parse_counter4() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../samples/counter4");
-        let files = vec![
-            root.join("counter4.v"),
-            root.join("tb.v"),
-        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/counter4");
+        let files = vec![root.join("counter4.v"), root.join("tb.v")];
         let design = parse_files(&files, &[], &[]).expect("parse failed");
         assert_eq!(design.modules.len(), 2, "expected 2 modules");
 
@@ -29,7 +25,10 @@ mod tests {
         assert!(names.contains(&"rst"));
         assert!(names.contains(&"count"));
 
-        let tb = design.modules.get("tb_counter4").expect("tb_counter4 missing");
+        let tb = design
+            .modules
+            .get("tb_counter4")
+            .expect("tb_counter4 missing");
         assert!(!tb.instances.is_empty(), "expected instance in tb");
     }
 }

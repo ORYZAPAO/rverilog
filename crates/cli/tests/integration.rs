@@ -1,5 +1,5 @@
 mod common;
-use common::{workspace_root, run_sim, expected_stdout};
+use common::{expected_stdout, run_sim, workspace_root};
 
 #[test]
 fn test_counter4() {
@@ -10,8 +10,11 @@ fn test_counter4() {
     ];
     let got = run_sim("tb_counter4", &files);
     let expected = expected_stdout("counter4");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -20,8 +23,11 @@ fn test_func_task() {
     let files = vec![root.join("tests/integration/cases/func_task/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("func_task");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -30,8 +36,11 @@ fn test_gates() {
     let files = vec![root.join("tests/integration/cases/gates/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("gates");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -40,8 +49,11 @@ fn test_generate() {
     let files = vec![root.join("tests/integration/cases/generate/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("generate");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -50,8 +62,11 @@ fn test_disable_fork() {
     let files = vec![root.join("tests/integration/cases/disable_fork/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("disable_fork");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -60,8 +75,11 @@ fn test_readmem_random() {
     let files = vec![root.join("tests/integration/cases/readmem_random/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("readmem_random");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -70,8 +88,11 @@ fn test_format_xz() {
     let files = vec![root.join("tests/integration/cases/format_xz/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("format_xz");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -80,8 +101,11 @@ fn test_signed() {
     let files = vec![root.join("tests/integration/cases/signed/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("signed");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -90,8 +114,11 @@ fn test_signed_cast() {
     let files = vec![root.join("tests/integration/cases/signed_cast/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("signed_cast");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -100,8 +127,11 @@ fn test_lvalue_select() {
     let files = vec![root.join("tests/integration/cases/lvalue_select/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("lvalue_select");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -110,8 +140,11 @@ fn test_indexed_part_select() {
     let files = vec![root.join("tests/integration/cases/indexed_part_select/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("indexed_part_select");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -120,8 +153,11 @@ fn test_localparam_midmodule() {
     let files = vec![root.join("tests/integration/cases/localparam_midmodule/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("localparam_midmodule");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -130,8 +166,11 @@ fn test_localparam_const_expr() {
     let files = vec![root.join("tests/integration/cases/localparam_const_expr/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("localparam_const_expr");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -140,8 +179,11 @@ fn test_binop_precedence() {
     let files = vec![root.join("tests/integration/cases/binop_precedence/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("binop_precedence");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -150,8 +192,11 @@ fn test_edge_x() {
     let files = vec![root.join("tests/integration/cases/edge_x/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("edge_x");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -160,8 +205,11 @@ fn test_monitor() {
     let files = vec![root.join("tests/integration/cases/monitor/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("monitor");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -170,8 +218,11 @@ fn test_always_star() {
     let files = vec![root.join("tests/integration/cases/always_star/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("always_star");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -192,8 +243,11 @@ fn test_cont_loop() {
     let files = vec![root.join("tests/integration/cases/cont_loop/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("cont_loop");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -202,8 +256,11 @@ fn test_delay0() {
     let files = vec![root.join("tests/integration/cases/delay0/dut.v")];
     let got = run_sim("dut", &files);
     let expected = expected_stdout("delay0");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }
 
 #[test]
@@ -215,6 +272,9 @@ fn test_fifo_sync() {
     ];
     let got = run_sim("tb_fifo_sync", &files);
     let expected = expected_stdout("fifo_sync");
-    assert_eq!(got, expected,
-        "\n--- expected ---\n{}\n--- got ---\n{}", expected, got);
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
 }

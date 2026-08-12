@@ -2329,3 +2329,32 @@ Codex側の実装完了後、こちらで独立に検証:
 - E: fmt/clippyジョブのCI追加、負パステストの拡充（推奨着手順10番、着手予定）
 - picorv32.vにテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
   （推奨着手順11番）
+
+## 2026-08-13 (2)
+
+### Task
+
+PLAN.md 推奨着手順10番、E（fmt/clippy ジョブの CI 追加と負パステストの拡充）を実施。
+
+### What was done
+
+- `.github/workflows/ci.yml` に `cargo fmt --check` を実行する `fmt` ジョブと、
+  `cargo clippy --workspace --all-targets -- -D warnings` を実行する `clippy` ジョブを追加
+- ワークスペース全体へ `cargo fmt` を適用し、既存の整形差分を解消
+- clippy の指摘を解消。`div_ceil`・`is_none_or`・`checked_div` 等の標準APIへの置換、
+  不要なキャスト・未使用ヘルパーの削除、イテレータ記法への機械的な整理を実施
+- `unsupported_construct.rs` に while/repeat/forever ループと `**` 演算子が
+  `UnsupportedConstruct` を返す負パステストを追加
+- 式中の関数呼び出しは実装を確認した結果 `Expr::Call` として受理されるため、受理を確認する
+  回帰テストを追加
+- PLAN.md の実装課題E節と推奨着手順10番を完了として更新
+
+### Result
+
+✅ fmt・clippyをCIで強制できる状態になった
+✅ サブセット外のループ文・冪乗演算子の診断を回帰テストで保護し、関数呼び出し式の現行仕様も確認
+
+### Next
+
+- picorv32.v にテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
+  （推奨着手順11番）
