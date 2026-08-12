@@ -117,8 +117,8 @@ pub struct TfArg {
 pub struct PortDecl {
     pub name: SmolStr,
     pub direction: PortDirection,
-    pub width: u32,       // static fallback (1 if param-dependent)
-    pub width_expr: Expr, // authoritative width expression
+    pub width: u32,       // 静的フォールバック値（param依存の場合は1）
+    pub width_expr: Expr, // 正式な幅を表す式
     pub signed: bool,
 }
 

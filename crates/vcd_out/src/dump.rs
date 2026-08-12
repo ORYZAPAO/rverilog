@@ -85,15 +85,15 @@ pub struct VcdWriter {
 }
 
 impl VcdWriter {
-    /// Create writer and emit VCD header.
+    /// writerを生成しVCDヘッダを出力する。
     ///
-    /// `scopes`: slice of `(scope_id, parent_scope_id, name)`; root scopes have `parent = None`
-    /// encoded as `u32::MAX`.
-    /// `nets`: slice of `(net_id, scope_id, name, width)`.
-    /// `roots`: scope_ids that have no parent.
+    /// `scopes`: `(scope_id, parent_scope_id, name)` のスライス。ルートスコープは
+    /// `parent = None` を `u32::MAX` として符号化する。
+    /// `nets`: `(net_id, scope_id, name, width)` のスライス。
+    /// `roots`: 親を持たないscope_id群。
     pub fn new(
         path: &Path,
-        scopes: &[(u32, u32, &str)],    // (id, parent_or_MAX, name)
+        scopes: &[(u32, u32, &str)],    // (id, parentまたはMAX, name)
         nets: &[(u32, u32, &str, u32)], // (net_id, scope_id, name, width)
         root_scope_ids: &[u32],
     ) -> Result<Self, VcdError> {
@@ -103,7 +103,7 @@ impl VcdWriter {
         writeln!(w, "$version rverilog v0.1.0 $end")?;
         writeln!(w, "$timescale 1ns $end")?;
 
-        // Build scope lookup
+        // スコープ検索テーブルを構築
         let scope_names: HashMap<u32, &str> =
             scopes.iter().map(|&(id, _, name)| (id, name)).collect();
         let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -113,7 +113,7 @@ impl VcdWriter {
             }
         }
 
-        // Assign VCD codes to nets in order
+        // ネットへ順にVCDコードを割り当てる
         let mut code_map: HashMap<u32, (String, u32)> = HashMap::new();
         let mut nets_by_scope: HashMap<u32, Vec<(String, u32, String)>> = HashMap::new();
         for (i, &(net_id, scope_id, name, width)) in nets.iter().enumerate() {
@@ -125,7 +125,7 @@ impl VcdWriter {
                 .push((code, width, name.to_string()));
         }
 
-        // Write scope/var hierarchy
+        // スコープ・変数階層を出力
         for &root_id in root_scope_ids {
             write_scope_dfs(&mut w, root_id, &children_map, &scope_names, &nets_by_scope)?;
         }
@@ -140,7 +140,7 @@ impl VcdWriter {
         })
     }
 
-    /// Write $dumpvars with initial values (called once before simulation).
+    /// 初期値付きで$dumpvarsを出力する（シミュレーション開始前に一度だけ呼ばれる）。
     pub fn dump_initial(&mut self, values: &HashMap<u32, (u64, u64)>) -> Result<(), VcdError> {
         writeln!(self.writer, "$dumpvars")?;
         let pairs: Vec<_> = self
@@ -156,21 +156,21 @@ impl VcdWriter {
         Ok(())
     }
 
-    /// Record a net value change at the current simulation time.
+    /// 現在のシミュレーション時刻でのネット値変化を記録する。
     pub fn record_change(&mut self, net_id: u32, aval: u64, bval: u64) {
         if self.code_map.contains_key(&net_id) {
             self.pending.insert(net_id, (aval, bval));
         }
     }
 
-    /// Flush pending changes (tagged with `current_time`), then set internal time to `new_time`.
+    /// 保留中の変化を`current_time`で出力し、内部時刻を`new_time`へ進める。
     pub fn advance_time(&mut self, current_time: u64, new_time: u64) -> Result<(), VcdError> {
         self.flush_at(current_time)?;
         self.last_time = new_time;
         Ok(())
     }
 
-    /// Flush any remaining pending changes at the given time.
+    /// 指定時刻で残っている保留中の変化をすべて出力する。
     pub fn flush_at(&mut self, t: u64) -> Result<(), VcdError> {
         if self.pending.is_empty() {
             return Ok(());

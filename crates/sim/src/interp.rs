@@ -54,8 +54,8 @@ pub struct Interpreter {
     nba_queue: Vec<(LValue, LogicVal, bool)>,
     finished: bool,
     vcd: Option<VcdWriter>,
-    vcd_path: Option<PathBuf>, // set by $dumpfile
-    vcd_active: bool,          // enabled by $dumpvars
+    vcd_path: Option<PathBuf>, // $dumpfileで設定
+    vcd_active: bool,          // $dumpvarsで有効化
     output_buf: String,
     fork_seq: u32,
     /// fork ID → 未完了の分岐数
@@ -948,7 +948,7 @@ impl Interpreter {
             | LValue::PartSelect(id, _, _)
             | LValue::DynBitSelect(id, _)
             | LValue::DynPartSelect(id, _, _, _) => *id,
-            LValue::MemWrite(_, _) => return, // memory writes don't trigger net sensitivity
+            LValue::MemWrite(_, _) => return, // メモリ書き込みはネットのsensitivityを起動しない
             LValue::Concat(_) => unreachable!("handled by the early return above"),
         };
 
