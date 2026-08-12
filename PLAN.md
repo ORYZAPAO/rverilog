@@ -340,9 +340,18 @@ iverilog 出力比較 CI 導入済み）。
 
 ### B. 未対応の言語機能
 
-- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: `defparam`、`specify`、UDP は
-  `lower.rs` の `_ => {}` catch-all で無言スキップされる。最低限 `UnsupportedConstruct` エラーに
-  すべき
+- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: **対応済み（2026-08-12）**。
+  `defparam`（`process_mogi`の`MOGI::Parameter`）、`specify`ブロック（`lower_nonport_items`・
+  `lower_module_items`の`NonPortModuleItem::SpecifyBlock`、モジュール本体・generate外の2箇所）、
+  UDPインスタンス化（`process_mogi`の`MOGI::Udp`）が`lower.rs`の`_ => {}` catch-allで無言
+  スキップされていた計4箇所を`FrontendError::UnsupportedConstruct`エラーに置換。回帰テスト
+  `crates/cli/tests/unsupported_construct.rs`（defparam/specify/UDP各1件、`parse_files`が
+  `Err(UnsupportedConstruct)`を返しメッセージに該当語を含むことを確認）を新規追加し、プロジェクト
+  初のサブセット外構文の負パステストとした。**未対応のまま残した範囲**（意図的にスコープ外）:
+  generate block内でのdefparam/UDP（`process_generate_mogi`は`()`を返す設計で子呼び出しの
+  エラーも既存で無視される別問題）、トップレベルの`primitive`宣言自体の無言スキップ（UDP
+  インスタンス化のエラー化で実質カバー）、ゲートプリミティブの`switch`/`cmos`/`pass`/
+  `pullup`/`pulldown`（既知の別課題、コード内コメントで明記済み）
 - **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子、
   式中の関数呼び出し
 - `real`/`realtime` が型検査なしで 1bit reg として解釈される
@@ -397,8 +406,11 @@ iverilog 出力比較 CI 導入済み）。
    2026-07-30に三項演算子・`||`・`*`・括弧を含む複雑な定数式（`WITH_PCPI`等）の残課題も解消）
 7. ~~picorv32.v フルシミュレーションのハング原因調査~~ 完了（2026-08-03、A12参照）
 8. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
-9. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
-10. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
+   — 実装済み・PR #22 レビュー待ち（2026-08-11、`feat/cont-assign-sensitivity`）
+9. ~~B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）~~
+   完了（2026-08-12、defparam/specify/UDP の計4箇所）
+10. E: fmt/clippy ジョブの CI 追加、負パステストの拡充（負パステストは B 対応で3件着手済み、
+    fmt/clippy ジョブ自体は未着手）
 11. picorv32.v にテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
     （A12解消によりelaborationからsim終了までは到達するようになったが、実際に命令を実行させる
     検証はまだ未実施）

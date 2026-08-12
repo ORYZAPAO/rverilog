@@ -2108,3 +2108,78 @@ Codex側の実装完了後、こちらで独立に検証:
 - 従来からの残タスク（D: 連続代入のsensitivity駆動化の残り、B: サイレントスキップの
   診断化、E: fmt/clippyジョブのCI追加、picorv32.vにテストベンチ・クロック生成を
   追加した上でのフル命令実行シミュレーション確認）
+
+## 2026-08-12
+
+### Task
+
+PLAN.md推奨着手順9番: B（サイレントスキップの診断化）。`defparam`・`specify`ブロック・UDP
+（user-defined primitive）が`lower.rs`の`_ => {}` catch-allで診断なしに無言スキップされる
+問題を`FrontendError::UnsupportedConstruct`エラーに置換する。`feat/m1-milestone`から新規
+ブランチ`fix/silent-skip-diagnostics-b`を切って着手。ユーザー指示により実装はCodex
+（`codex:codex-rescue`サブエージェント経由）に委任した。
+
+前提として、推奨着手順8番（D: 連続代入のsensitivity駆動化）は前回セッションで既に実装済み・
+PR #22としてオープン済み（CIグリーン）であることを確認したが、ユーザー判断でマージは保留し
+B番のみ着手する方針とした。
+
+### 事前調査（自分で実施）
+
+Codexに委任する前に、`sv-parser-syntaxtree-0.13.5`のソース（`ModuleCommonItem`/
+`NonPortModuleItem`/`ModuleOrGenerateItem`/`ModuleOrGenerateItemDeclaration`各enum定義）を
+直接確認し、対象箇所を特定:
+
+- `defparam`は文法上`ModuleOrGenerateItem::Parameter`（`ParameterOverride`が
+  `ListOfDefparamAssignments`をラップ）としてパースされ、`process_mogi`関数
+  （`crates/frontend/src/lower.rs`）の末尾`_ => {}`に落ちて無言スキップされていた
+- UDPインスタンス化は`ModuleOrGenerateItem::Udp`として同じく`process_mogi`の`_ => {}`に
+  落ちていた
+- `specify`ブロックは`NonPortModuleItem::SpecifyBlock`として、モジュール直下のアイテムを
+  走査する`lower_nonport_items`・`lower_module_items`（ANSI/non-ANSIポート形式それぞれに
+  対応する2つの並行実装）の`_ => {}`に落ちていた
+- スコープ外と判断した箇所も明確化: `process_generate_mogi`（generate block内、`()`を返す
+  設計で子呼び出しのエラーも既存で無視される別問題）、`lower_decl`内の`_ => {}`
+  （DPI/class/covergroup等、このプロジェクトの対象外のSystemVerilog専用機能）、ゲート
+  プリミティブの`_ => {}`（switch/cmos/pass/pullup/pulldown、既にコメントで明記済みの
+  別課題）、トップレベルの`primitive`宣言自体の無言スキップ（UDPインスタンス化のエラー化で
+  実質カバーされるため見送り）
+
+### What was done（Codexに委任・実装完了を確認）
+
+- `crates/frontend/src/lower.rs`: 4箇所に`unsupported()`ヘルパー（既存）を使った
+  明示的エラー分岐を追加
+  - `process_mogi`: `MOGI::Parameter(_) => return Err(unsupported("defparam"))`・
+    `MOGI::Udp(_) => return Err(unsupported("UDP instantiation"))`
+  - `lower_nonport_items`・`lower_module_items`（各1箇所、計2箇所）:
+    `NonPortModuleItem::SpecifyBlock(_) => return Err(unsupported("specify block"))`
+- 新規回帰テスト`crates/cli/tests/unsupported_construct.rs`（プロジェクト初のサブセット外
+  構文の負パステスト）を追加。`rverilog_frontend::parse_files`を一時ファイル経由で直接呼び、
+  defparam・specifyブロック・UDPインスタンス化（`primitive`宣言込み）の3パターンそれぞれで
+  `Err(FrontendError::UnsupportedConstruct(_))`が返り、エラーメッセージに該当語
+  （"defparam"/"specify"/"UDP"）を含むことを確認
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更内容が計画通り4箇所ちょうどに絞られていること（スコープ外と指定した箇所への
+  変更がないこと）を確認
+- `cargo build --workspace`成功（既存の`lower.rs`未使用関数warning3件のみ、新規warningなし）
+- `cargo test --workspace`全通過（71テスト: 既存68テスト＋新規3テスト、回帰なし）
+- `samples/counter4`（`--top tb_counter4`）・`samples/fifo_sync`（`--top tb_fifo_sync`）を
+  それぞれ実行し、VCD生成・`$finish`による正常終了を確認（回帰なし）
+
+### Result
+
+✅ B（サイレントスキップの診断化）完了。`defparam`・`specify`ブロック・UDPインスタンス化の
+   計4箇所を`FrontendError::UnsupportedConstruct`エラーに置換
+✅ プロジェクト初のサブセット外構文の負パステストを追加（`unsupported_construct.rs`、3件）
+✅ `cargo build`/`cargo test`（71テスト）全通過、既存回帰なし
+✅ M1受入れサンプル（counter4・fifo_sync）の回帰なしを確認
+✅ PLAN.md 実装課題B節・推奨着手順9番を対応済みに更新
+
+### Next
+
+- PR #22（D: 連続代入のsensitivity駆動化、2026-08-11オープン・CIグリーン）のマージ判断
+  （ユーザー保留中）
+- E: fmt/clippyジョブのCI追加（負パステストは今回着手済みだが、fmt/clippy自体は未着手）
+- picorv32.vにテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
+  （推奨着手順11番、未着手）

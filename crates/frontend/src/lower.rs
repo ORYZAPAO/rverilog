@@ -279,6 +279,9 @@ fn lower_nonport_items(
                 let g = lower_generate_items(tree, &gr.nodes.1);
                 merge_generate_items(&mut generates, g);
             }
+            sv_parser::NonPortModuleItem::SpecifyBlock(_) => {
+                return Err(unsupported("specify block"));
+            }
             _ => {}
         }
     }
@@ -310,6 +313,9 @@ fn lower_module_items(
                 sv_parser::NonPortModuleItem::GenerateRegion(gr) => {
                     let g = lower_generate_items(tree, &gr.nodes.1);
                     merge_generate_items(&mut generates, g);
+                }
+                sv_parser::NonPortModuleItem::SpecifyBlock(_) => {
+                    return Err(unsupported("specify block"));
                 }
                 _ => {}
             }
@@ -374,7 +380,8 @@ fn process_mogi(
                 _ => {}
             }
         }
-        _ => {}
+        MOGI::Parameter(_) => return Err(unsupported("defparam")),
+        MOGI::Udp(_) => return Err(unsupported("UDP instantiation")),
     }
     Ok(())
 }
