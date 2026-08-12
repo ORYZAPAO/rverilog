@@ -2108,3 +2108,98 @@ Codex側の実装完了後、こちらで独立に検証:
 - 従来からの残タスク（D: 連続代入のsensitivity駆動化の残り、B: サイレントスキップの
   診断化、E: fmt/clippyジョブのCI追加、picorv32.vにテストベンチ・クロック生成を
   追加した上でのフル命令実行シミュレーション確認）
+
+## 2026-08-12
+
+### Task
+
+PLAN.md推奨着手順8番: 連続代入(`assign`)のsensitivity駆動化 + sim死コード整理。
+`feat/m1-milestone`から新規ブランチ`feat/cont-assign-sensitivity`を切って着手。
+ユーザー指示により実装はCodex（`codex:rescue`サブエージェント経由）に委任した。
+
+### 事前調査（自分で実施）
+
+Codexに委任する前にこちらで現状コードを調査:
+
+- `crates/sim/src/interp.rs`の`eval_conts()`は、ACTIVE regionが空になるたびに
+  design内の全`assign`文を無条件に最大200回、値が変化しなくなるまで再評価する
+  brute-force固定点ループだった（`design.conts.clone()`を毎回丸ごと舐める）。
+  発振する組み合わせループがあっても打ち切り時に警告が一切出ない
+- `always @*`についてはA12（2026-08-03解消）で既に「本体を静的解析して読み出し
+  ネット集合を収集し、そのネットが変化したときだけ起床する」sensitivity駆動の仕組み
+  （`elab/src/elaborate.rs`の`collect_sensitivity_expr`/`collect_sensitivity_stmt`）が
+  実装済みで、同じインフラを連続代入にも再利用できると判断
+- `ElaboratedDesign`には既に`sensitivity_table: IndexMap<u32, Vec<u32>>`
+  （net.0→\[process.0\]）というプロセス用逆引きテーブルがあるが、interp.rs側は
+  これを一切読まず`event_waiters`の線形スキャンで独自判定していることを確認
+  （今回のスコープ外の別件と判断し、触らず）。連続代入専用に同型の新規テーブル
+  `cont_sensitivity`（net.0→\[cont_id\]）を追加する方針とした
+- `collect_sensitivity_expr`/`collect_sensitivity_stmt`は`Expr`/`Stmt`の全バリアントを
+  網羅したexhaustive matchで、実装上は常に`true`を返す（「false=fallback」経路は
+  現状到達不能）ことを確認。連続代入用に特別なfallback処理は不要と判断
+- `crates/sim/src/scheduler.rs`・`crates/sim/src/systask.rs`（TODOスタブ、
+  `interp.rs`と実装重複）はワークスペース全体をgrepしてもこの2ファイル以外から
+  一切参照されていないことを確認、削除対象とした
+- 上記調査結果を基にPlanモードで詳細な実装計画（変更箇所・関数シグネチャ・
+  疑似コード）を作成、承認を得た
+
+### What was done（Codexに委任・実装完了を確認）
+
+- `crates/mir/src/ir.rs`: `ElaboratedDesign`に`cont_sensitivity: IndexMap<u32, Vec<u32>>`
+  フィールドを追加
+- `crates/elab/src/elaborate.rs`: `elaborate()`内、`elab_module`完了後・
+  `ElaboratedDesign`構築前に、`ctx.conts`を走査して各`ContAssign`のRHS式に
+  `collect_sensitivity_expr`を適用し`cont_sensitivity`を構築するコードを追加
+- `crates/sim/src/interp.rs`:
+  - `Interpreter`に`cont_dirty: VecDeque<u32>`（dirtyワークリスト）・
+    `cont_queued: Vec<bool>`（重複enqueue防止ビットセット）を追加
+  - `run()`冒頭でプロセスseedの直後に全cont_idを`mark_cont_dirty`し初期dirty化
+    （起動時は全conts未評価のため従来の全件評価動作を維持）
+  - `trigger_sensitivity()`の`any_change`判定直後に、変化があった場合のみ
+    `design.cont_sensitivity`から該当cont_idを引いて`mark_cont_dirty`する処理を追加
+  - `eval_conts()`を全面置換。dirtyワークリストをpopしながら評価し、値が実際に
+    変化した場合のみ`trigger_sensitivity`を呼ぶ（連鎖伝搬は`mark_cont_dirty`が担う）。
+    pop回数上限（`conts.len() * 64`、最低1000）を設け、超過時は
+    `eprintln!("sim: continuous assignment did not converge (possible combinational
+    loop) ...")`で警告を出してから打ち切るよう変更（従来は無警告だった）
+- `crates/sim/src/scheduler.rs`・`crates/sim/src/systask.rs`を削除、
+  `crates/sim/src/lib.rs`から該当`pub mod`/`pub use`を除去
+- 新規回帰テスト`tests/integration/cases/cont_loop/`（`assign a = ~a;`という
+  組み合わせループが、warningを出しつつハングせず`$finish`まで到達することを確認。
+  真の組み合わせ発振はiverilog側にも有効な比較対象がないため、A12時の`max_time`
+  テストと同じ前例に倣い`crates/cli/tests/integration.rs`にのみ登録、
+  `iverilog_compare.rs`には登録せず）を追加
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff --stat`で計画通りの変更であることを確認
+  （7ファイル、+72/-205行、`scheduler.rs`/`systask.rs`削除込み）
+- `cargo build --workspace`成功（既存の`lower.rs`未使用関数警告3件のみ、新規警告なし）
+- `cargo test --workspace`全通過（39テスト: 統合テスト21件・iverilog比較18件を含む、
+  新規`test_cont_loop`含め既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行しVCD生成・
+  `$finish`による正常終了を確認（回帰なし）
+- `picorv32.v`スモークチェック（`--max-time 200`）を再実行し、**0.57秒で正常終了**
+  （A12解消時の0.55秒からほぼ同等、性能劣化・デッドロックなし）を確認
+- `cont_loop`テストのdutを直接実行し、
+  `sim: continuous assignment did not converge (possible combinational loop) at
+  time 0, stopping after 1001 evaluations`という警告が実際に出力され、その後
+  `$finish at time 1`まで到達することを目視確認
+
+### Result
+
+✅ 連続代入がsensitivity駆動（dirtyワークリスト方式）になり、brute-force総当たり
+   固定点ループを解消。組み合わせループも警告付きで安全に打ち切られるようになった
+✅ `sim/src/scheduler.rs`・`sim/src/systask.rs`の死コードを削除
+✅ `cargo build`/`cargo test`（39テスト）全通過、既存回帰なし
+✅ M1受入れサンプル（counter4・fifo_sync）・picorv32.vスモークチェックいずれも
+   回帰なし（picorv32.vは0.57秒で正常終了、性能劣化なし）
+✅ PLAN.md 実装課題D節・推奨着手順8番を完了マークに更新
+
+### Next
+
+- 従来からの残タスク（B: サイレントスキップの診断化、E: fmt/clippyジョブのCI追加、
+  `elab/src/width.rs`のcontext-determined幅推論再設計、picorv32.vにテストベンチ・
+  クロック生成を追加した上でのフル命令実行シミュレーション確認）
+- ブランチ`feat/cont-assign-sensitivity`はローカルで検証完了、push・PR作成は
+  ユーザーの明示確認待ち
