@@ -1174,11 +1174,11 @@ fn packed_width_expr(tree: &SyntaxTree, node: RefNode) -> (u32, Expr) {
                 )),
                 Box::new(Expr::Const(lv(1, 32))),
             );
-            // Try to compute literal width for static declarations
+            // 静的宣言の場合はリテラル幅の算出を試みる
             let literal_width = if let Expr::Const(v) = &msb_e {
                 v.pad_to_width(32) as u32 + 1
             } else {
-                0 // dynamic (param-dependent)
+                0 // param依存の動的幅
             };
             return (literal_width, width_e);
         }
