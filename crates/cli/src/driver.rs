@@ -1,14 +1,18 @@
 use anyhow::Result;
 use tracing::info;
 
+use rverilog_elab::elaborate;
 use rverilog_frontend::parse_files;
 use rverilog_hir::Design;
-use rverilog_elab::elaborate;
 use rverilog_sim::Interpreter;
 
 pub fn run(args: &crate::cli::Args) -> Result<()> {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(if args.verbose { tracing::Level::DEBUG } else { tracing::Level::INFO })
+        .with_max_level(if args.verbose {
+            tracing::Level::DEBUG
+        } else {
+            tracing::Level::INFO
+        })
         .try_init();
 
     info!("Parsing files...");
@@ -44,14 +48,16 @@ pub fn run(args: &crate::cli::Args) -> Result<()> {
 }
 
 fn parse_defines(defs: &[String]) -> Vec<(String, String)> {
-    defs.iter().map(|s| {
-        let parts: Vec<&str> = s.splitn(2, '=').collect();
-        match parts.len() {
-            1 => (parts[0].to_string(), String::new()),
-            2 => (parts[0].to_string(), parts[1].to_string()),
-            _ => unreachable!(),
-        }
-    }).collect()
+    defs.iter()
+        .map(|s| {
+            let parts: Vec<&str> = s.splitn(2, '=').collect();
+            match parts.len() {
+                1 => (parts[0].to_string(), String::new()),
+                2 => (parts[0].to_string(), parts[1].to_string()),
+                _ => unreachable!(),
+            }
+        })
+        .collect()
 }
 
 fn print_modules(design: &Design) {

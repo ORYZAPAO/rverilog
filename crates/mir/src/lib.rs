@@ -1,11 +1,9 @@
-pub mod logicval;
 pub mod ir;
+pub mod logicval;
 
-pub use logicval::LogicVal;
 pub use ir::{
-    ElaboratedDesign, NetId, ProcessId, ContId, ScopeId, StmtId, ExprId, MemId,
-    Process, ProcessKind, NetInfo, MemInfo, NetKind, Scope,
-    LValue, Stmt, CaseKind, BinOp, UnOp, SysTask,
-    Sensitivity, SensitivityEdge, EdgeType,
-    ContAssign, Expr,
+    BinOp, CaseKind, ContAssign, ContId, EdgeType, ElaboratedDesign, Expr, ExprId, LValue, MemId,
+    MemInfo, NetId, NetInfo, NetKind, Process, ProcessId, ProcessKind, Scope, ScopeId, Sensitivity,
+    SensitivityEdge, Stmt, StmtId, SysTask, UnOp,
 };
+pub use logicval::LogicVal;
