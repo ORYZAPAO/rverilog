@@ -226,6 +226,40 @@ fn test_always_star() {
 }
 
 #[test]
+fn test_logical_x_shortcircuit() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("logical_x_shortcircuit");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
+#[ignore = "既知の未解決課題: A13修正後もPicoRV32が最初の命令fetch前に不正命令トラップへ入りtimeoutする（PLAN.md推奨着手順11番参照）"]
+fn test_picorv32_smoke() {
+    let root = workspace_root();
+    let files = vec![
+        root.join("tests/integration/cases/picorv32_smoke/tb.v"),
+        root.join("tests/integration/cases/picorv32_smoke/picorv32.v"),
+    ];
+    let got = run_sim("tb_picorv32", &files);
+    assert!(
+        got.contains("PASS: picorv32 executed addi/add/lui/sw correctly"),
+        "picorv32 smoke test did not pass:\n{}",
+        got
+    );
+    assert!(
+        !got.contains("TIMEOUT") && !got.contains("FAIL"),
+        "picorv32 smoke test reported failure:\n{}",
+        got
+    );
+}
+
+#[test]
 fn test_max_time() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/max_time/dut.v")];

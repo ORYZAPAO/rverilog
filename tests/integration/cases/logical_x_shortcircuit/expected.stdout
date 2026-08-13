@@ -1,0 +1,5 @@
+or=1
+and=0
+PASS: X && 0 condition took false branch
+PASS: mixed X condition took true branch
+PASS: reset branch taken

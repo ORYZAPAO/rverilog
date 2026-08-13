@@ -175,6 +175,21 @@ impl LogicVal {
         true
     }
 
+    /// 値が論理的に真かどうか（IEEE 1364の if 文・while 文・&&・||の短絡規則:
+    /// 既知の1ビットが1つでもあれば真。それ以外（全既知0、またはXを含み既知1
+    /// ビットが無い）は偽として扱う）。
+    pub fn is_true(&self) -> bool {
+        let n = num_chunks(self.width());
+        for i in 0..n {
+            let m = chunk_mask(self.width(), i);
+            // 既知の1ビット = a=1 かつ b=0
+            if (self.get_chunk(i) & !self.get_chunk_b(i)) & m != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn is_known(&self) -> bool {
         let n = num_chunks(self.width());
         for i in 0..n {
@@ -474,25 +489,23 @@ impl LogicVal {
     // ── logical operators ─────────────────────────────────────────────────────
 
     pub fn log_and(&self, rhs: &LogicVal) -> LogicVal {
+        if self.is_zero() || rhs.is_zero() {
+            return LogicVal::ZERO;
+        }
         if !self.is_known() || !rhs.is_known() {
             return LogicVal::X;
         }
-        if self.is_zero() || rhs.is_zero() {
-            LogicVal::ZERO
-        } else {
-            LogicVal::ONE
-        }
+        LogicVal::ONE
     }
 
     pub fn log_or(&self, rhs: &LogicVal) -> LogicVal {
+        if self.is_true() || rhs.is_true() {
+            return LogicVal::ONE;
+        }
         if !self.is_known() || !rhs.is_known() {
             return LogicVal::X;
         }
-        if !self.is_zero() || !rhs.is_zero() {
-            LogicVal::ONE
-        } else {
-            LogicVal::ZERO
-        }
+        LogicVal::ZERO
     }
 
     pub fn log_not(&self) -> LogicVal {
