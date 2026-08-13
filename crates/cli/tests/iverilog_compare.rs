@@ -205,6 +205,28 @@ fn compare_always_star() {
 }
 
 #[test]
+fn compare_logical_x_shortcircuit() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")],
+    );
+}
+
+#[test]
+#[ignore = "既知の未解決課題: A13修正後もPicoRV32が最初の命令fetch前に不正命令トラップへ入りtimeoutする（PLAN.md推奨着手順11番参照）"]
+fn compare_picorv32_smoke() {
+    let root = workspace_root();
+    compare_case(
+        "tb_picorv32",
+        &[
+            root.join("tests/integration/cases/picorv32_smoke/tb.v"),
+            root.join("tests/integration/cases/picorv32_smoke/picorv32.v"),
+        ],
+    );
+}
+
+#[test]
 fn compare_delay0() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/delay0/dut.v")]);

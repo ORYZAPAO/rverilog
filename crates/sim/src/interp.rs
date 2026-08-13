@@ -329,14 +329,10 @@ impl Interpreter {
 
             Stmt::If(cond_id, then_id, else_id) => {
                 let cond = self.eval_expr(cond_id);
-                let nonzero = cond.pad_to_width(cond.width()) != 0;
-                let known = cond.is_known();
-                if known && nonzero {
+                if cond.is_true() {
                     state.frames.push((vec![then_id], 0, None));
-                } else if known {
-                    if let Some(e) = else_id {
-                        state.frames.push((vec![e], 0, None));
-                    }
+                } else if let Some(e) = else_id {
+                    state.frames.push((vec![e], 0, None));
                 }
                 StepResult::Continue
             }
@@ -412,8 +408,7 @@ impl Interpreter {
 
             Stmt::While(cond_id, body_id) => {
                 let cond = self.eval_expr(cond_id);
-                let nonzero = cond.pad_to_width(cond.width()) != 0;
-                if cond.is_known() && nonzero {
+                if cond.is_true() {
                     // Push body followed by this while stmt again
                     state.frames.push((vec![body_id, stmt_id], 0, None));
                 }
@@ -614,9 +609,9 @@ impl Interpreter {
             }
             Expr::Cond(c, t, f) => {
                 let cv = self.eval_expr(c);
-                if cv.is_known() && cv.pad_to_width(cv.width()) != 0 {
+                if cv.is_true() {
                     self.eval_expr(t)
-                } else if cv.is_zero() {
+                } else if cv.is_known() {
                     self.eval_expr(f)
                 } else {
                     LogicVal::X
@@ -672,7 +667,7 @@ impl Interpreter {
             }
             Stmt::If(cond_id, then_id, else_id) => {
                 let cond = self.eval_expr(cond_id);
-                if cond.is_known() && cond.pad_to_width(cond.width()) != 0 {
+                if cond.is_true() {
                     self.exec_sync_stmt(then_id);
                 } else if let Some(e) = else_id {
                     self.exec_sync_stmt(e);
@@ -718,7 +713,7 @@ impl Interpreter {
             Stmt::While(cond_id, body_id) => {
                 for _ in 0..1_000_000 {
                     let cond = self.eval_expr(cond_id);
-                    if !cond.is_known() || cond.pad_to_width(cond.width()) == 0 {
+                    if !cond.is_true() {
                         break;
                     }
                     self.exec_sync_stmt(body_id);
