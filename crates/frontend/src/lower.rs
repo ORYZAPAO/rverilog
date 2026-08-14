@@ -175,9 +175,16 @@ fn lower_ansi_ports(
         if let Some(list) = &lpd.nodes.0.nodes.1 {
             // list.nodes.0 is first item, list.nodes.1 is rest
             let first = &list.nodes.0;
-            ports.push(lower_ansi_port(tree, &first.1)?);
+            // ANSI ポートでヘッダを省略した場合は、直前のポート方向を継承する。
+            // 先頭ポートには IEEE 1364-2001 の既定値である input を適用する。
+            let mut prev_dir = PortDirection::Input;
+            let port = lower_ansi_port(tree, &first.1, prev_dir)?;
+            prev_dir = port.direction;
+            ports.push(port);
             for (_, item) in &list.nodes.1 {
-                ports.push(lower_ansi_port(tree, &item.1)?);
+                let port = lower_ansi_port(tree, &item.1, prev_dir)?;
+                prev_dir = port.direction;
+                ports.push(port);
             }
         }
     }
@@ -187,14 +194,15 @@ fn lower_ansi_ports(
 fn lower_ansi_port(
     tree: &SyntaxTree,
     port: &sv_parser::AnsiPortDeclaration,
+    prev_dir: PortDirection,
 ) -> Result<PortDecl, FrontendError> {
     match port {
-        sv_parser::AnsiPortDeclaration::Net(n) => lower_ansi_port_net(tree, n),
-        sv_parser::AnsiPortDeclaration::Variable(v) => lower_ansi_port_variable(tree, v),
+        sv_parser::AnsiPortDeclaration::Net(n) => lower_ansi_port_net(tree, n, prev_dir),
+        sv_parser::AnsiPortDeclaration::Variable(v) => lower_ansi_port_variable(tree, v, prev_dir),
         sv_parser::AnsiPortDeclaration::Paren(p) => {
             let dir = match &p.nodes.0 {
                 Some(d) => lower_port_direction(d),
-                None => PortDirection::Input,
+                None => prev_dir,
             };
             let name = get_id(tree, RefNode::PortIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
@@ -212,6 +220,7 @@ fn lower_ansi_port(
 fn lower_ansi_port_net(
     tree: &SyntaxTree,
     x: &sv_parser::AnsiPortDeclarationNet,
+    prev_dir: PortDirection,
 ) -> Result<PortDecl, FrontendError> {
     let dir = if let Some(hdr) = &x.nodes.0 {
         match hdr {
@@ -220,11 +229,11 @@ fn lower_ansi_port_net(
                 .0
                 .as_ref()
                 .map(lower_port_direction)
-                .unwrap_or(PortDirection::Input),
-            _ => PortDirection::Input,
+                .unwrap_or(prev_dir),
+            _ => prev_dir,
         }
     } else {
-        PortDirection::Input
+        prev_dir
     };
     let (width, width_expr) = packed_width_expr(tree, RefNode::AnsiPortDeclarationNet(x));
     let signed = has_signed(RefNode::AnsiPortDeclarationNet(x));
@@ -242,15 +251,16 @@ fn lower_ansi_port_net(
 fn lower_ansi_port_variable(
     tree: &SyntaxTree,
     x: &sv_parser::AnsiPortDeclarationVariable,
+    prev_dir: PortDirection,
 ) -> Result<PortDecl, FrontendError> {
     let dir = if let Some(hdr) = &x.nodes.0 {
         hdr.nodes
             .0
             .as_ref()
             .map(lower_port_direction)
-            .unwrap_or(PortDirection::Output)
+            .unwrap_or(prev_dir)
     } else {
-        PortDirection::Output
+        prev_dir
     };
     let (width, width_expr) = packed_width_expr(tree, RefNode::AnsiPortDeclarationVariable(x));
     let signed = has_signed(RefNode::AnsiPortDeclarationVariable(x));
