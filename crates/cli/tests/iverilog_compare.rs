@@ -214,6 +214,15 @@ fn compare_logical_x_shortcircuit() {
 }
 
 #[test]
+fn compare_reduction_ops() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/reduction_ops/dut.v")],
+    );
+}
+
+#[test]
 fn compare_ansi_port_comma_direction() {
     let root = workspace_root();
     compare_case(

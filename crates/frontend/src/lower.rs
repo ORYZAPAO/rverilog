@@ -2412,7 +2412,15 @@ fn lower_unary_op(tree: &SyntaxTree, op: &sv_parser::UnaryOperator) -> Result<Un
         "-" => Ok(UnOp::Neg),
         "!" => Ok(UnOp::LogNot),
         "~" => Ok(UnOp::BitNot),
-        _ => Ok(UnOp::BitNot),
+        "&" => Ok(UnOp::RedAnd),
+        "~&" => Ok(UnOp::RedNand),
+        "|" => Ok(UnOp::RedOr),
+        "~|" => Ok(UnOp::RedNor),
+        "^" => Ok(UnOp::RedXor),
+        "~^" | "^~" => Ok(UnOp::RedXnor),
+        other => Err(FrontendError::UnsupportedConstruct(format!(
+            "unary operator: {other}"
+        ))),
     }
 }
 
