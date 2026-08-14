@@ -2516,3 +2516,78 @@ Codex側の実装完了後、こちらで独立に検証:
   `01000000`→`10000000`と遷移しておりFSM自体は動いているように見えるため、
   decoder_trigger周りかmem_do_prefetchの生成条件自体を疑うべき）。原因調査は
   自分で行い、実装はCodexへ委任する運用を継続する（推奨着手順11番、継続）
+
+## 2026-08-15 (2)
+
+### Task
+
+前回セッションに引き続き、推奨着手順11番（picorv32.vフル命令実行シミュレーション確認）を継続。
+`mem_do_prefetch`が立たない原因を追う中で、A15・A16という2つの重大バグを発見・対応した。
+
+### 原因調査（自分で実施、A15）
+
+- `feat/m1-milestone`を最新化（PR #29=A14マージ分を`git pull --ff-only`で反映）
+- `picorv32.v`に一時的な`always @(posedge clk) $display(...)`デバッグ計装を追加し、
+  `resetn`/`cpu_state`/`mem_state`/`mem_do_rinst`/`mem_do_prefetch`/`mem_done`/
+  `decoder_trigger`/`mem_valid`/`mem_ready`/`mem_xfer`を毎クロック出力させて調査
+- `mem_done`（`wire mem_done = resetn && ((...) || (...)) && (...);`という宣言時代入で
+  定義されたワイヤ）が全シミュレーション時間を通じて`z`のまま一切変化しないことを発見
+- 最小再現（`wire c = a & b;`のような宣言時代入）で同一症状（`c`が`z`のまま張り付く）を
+  再現し、`assign`文に分けて書くと正常動作することを確認
+- `crates/frontend/src/lower.rs`の`lower_net_decl`（1077-1099行目付近）を確認したところ、
+  `unwrap_all_net_identifiers`でネット名だけを抜き出しており、`NetDeclAssignment`が持つ
+  初期化式（sv-parser型定義: `NetDeclAssignment.nodes.2: Option<(Symbol, Expression)>`）を
+  一切見ていないことが判明。`wire foo = expr;`はpicorv32.vで数十箇所使われている一般的な
+  イディオムであり、これが根本原因の一つと特定した
+
+### What was done（Codexに委任・実装完了を確認、A15）
+
+- ブランチ`fix/net-decl-assignment-dropped`を作成し、原因分析結果をそのままCodexへ委任
+- `lower_net_decl`の戻り値を`(Vec<NetDecl>, Vec<ContinuousAssign>)`に変更し、初期化式が
+  あれば`ContinuousAssign`（`LValue::Net(name)` ← `lower_expression(expr)`）を生成
+- 呼び出し元3箇所（モジュール直下`process_mogi`、generate内`lower_generate_decl`、
+  関数/タスクローカル宣言`lower_decl`）全てで`assigns`への合流を配線
+- 回帰テスト`tests/integration/cases/net_decl_assignment/`（単一代入・同一宣言内複数代入
+  混在）を追加
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`lower_net_decl`本体＋3呼び出し元＋回帰テスト）に
+  絞られていることを確認
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy -D warnings`とも警告なし
+- `cargo test --workspace`で83テスト全通過（既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`回帰なし確認
+- デバッグ計装版picorv32.vを再実行し、`mem_done`が`z`から抜け出し`0`/`1`を正しく
+  出力するようになったことを確認。ただし`cpu_state`が`cpu_state_fetch`(`01000000`)から
+  `cpu_state_trap`(`10000000`)へ一度遷移した後、そこで完全に停止することを新たに発見
+
+### 原因調査（自分で実施、A16）
+
+- `cpu_state_trap`への遷移は想定外（1命令目`addi`は正常な命令のはずでtrapに落ちるのは
+  おかしい）。`mem_done`の算出式が`&mem_state`（reduction AND）・`\|mem_state`
+  （reduction OR）という2bit信号への単項リダクション演算子を使っていることに着目し、
+  デバッグ計装をさらに追加してこれらの部分式を個別出力
+- `mem_state=00`（2bit both 0）にもかかわらず`&mem_state=1`・`\|mem_state=1`という、
+  本来ありえない結果（両方とも0であるべき）を観測
+- 最小再現（`reg [1:0] x; wire o=\|x; wire a=&x;`を4つの`x`パターンで検証）で、
+  `o`・`a`が常に同一値になり、かつその値が`x`の全体を無視して`NOT(x[0])`
+  （＝`~x`のLSBのみ）と一致するパターンであることを突き止めた
+- `crates/frontend/src/lower.rs`の`lower_unary_op`（2408-2417行目）を確認したところ、
+  `+`/`-`/`!`/`~`のみ明示的に扱っており、それ以外（単項の`&`/`\|`/`^`/`~&`/`~\|`/`~^`、
+  すなわちリダクション演算子全種）は`_ => Ok(UnOp::BitNot)`のcatch-allで無条件に
+  `UnOp::BitNot`（ビット反転）へ丸め込まれていることを発見。`mir::ir::UnOp`には
+  `RedAnd`/`RedNand`/`RedOr`/`RedNor`/`RedXor`/`RedXnor`が既に定義され
+  `logicval.rs`の`reduce_and`/`reduce_or`等の実装も正しいにもかかわらず、frontendから
+  一度も生成されず完全に死んでいた。プロジェクト全体でリダクション演算子が発見時点まで
+  一度も正しく動作していなかったことを意味する、今回発見した中で最も基礎的で影響範囲の
+  広いバグ
+
+### Next
+
+- A16（リダクション演算子の誤lowering）の修正をCodexへ委任する（ブランチは次セッションで
+  新規作成）。`lower_unary_op`が実際のトークン文字列（`&`/`~&`/`\|`/`~\|`/`^`/`~^`または
+  `^~`）を判定して対応する`UnOp::Red*`を返すよう修正し、回帰テスト
+  （`reg [1:0] x; wire o=\|x; wire a=&x;`等、真理表ベース）を追加する
+- 修正後、picorv32.vが`cpu_state_trap`を経ずに`cpu_state_ld_rs1`へ正しく進むか再確認し、
+  `mem_do_prefetch`が最終的に立つか、picorv32スモークテストがPASSに到達するかを追跡する
+  （推奨着手順11番、継続）
