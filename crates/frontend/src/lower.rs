@@ -735,8 +735,16 @@ fn lower_constant_expr(
         CE::Binary(_) => {
             let mut operands = Vec::new();
             let mut ops = Vec::new();
-            flatten_constant_binary_chain(tree, ce, &mut operands, &mut ops)?;
-            Ok(build_binop_tree(operands, ops))
+            let tail = flatten_constant_binary_chain(tree, ce, &mut operands, &mut ops)?;
+            let combined = build_binop_tree(operands, ops);
+            match tail {
+                Some((then_e, else_e)) => Ok(Expr::Cond(
+                    Box::new(combined),
+                    Box::new(then_e),
+                    Box::new(else_e),
+                )),
+                None => Ok(combined),
+            }
         }
         CE::Ternary(t) => {
             let cond = lower_constant_expr(tree, &t.nodes.0)?;
@@ -2027,8 +2035,16 @@ fn lower_expression(
             // 演算子優先順位法（shunting-yard 相当）で正しく再結合する。
             let mut operands = Vec::new();
             let mut ops = Vec::new();
-            flatten_binary_chain(tree, expr, &mut operands, &mut ops)?;
-            Ok(build_binop_tree(operands, ops))
+            let tail = flatten_binary_chain(tree, expr, &mut operands, &mut ops)?;
+            let combined = build_binop_tree(operands, ops);
+            match tail {
+                Some((then_e, else_e)) => Ok(Expr::Cond(
+                    Box::new(combined),
+                    Box::new(then_e),
+                    Box::new(else_e),
+                )),
+                None => Ok(combined),
+            }
         }
         E::ConditionalExpression(ce) => {
             // ConditionalExpression.nodes = (CondPredicate, "?", Vec<Attr>, Expression, ":", Expression)
@@ -2046,48 +2062,73 @@ fn lower_expression(
 }
 
 /// `Expression::Binary` の木を in-order にたどり、オペランド列と演算子列に
-/// フラット化する。`E::Binary` 以外に到達した時点でリーフとして
-/// `lower_expression` に委譲する（括弧で明示的にグループ化された部分式は
-/// `Primary::MintypmaxExpression` としてリーフ扱いになるため、フラット化の
-/// 対象にならず正しく1オペランドとして扱われる）。
+/// フラット化する。チェーン末尾の裸の条件演算子は、条件部を最後の
+/// オペランドとして加え、then/else 部を戻り値で呼び出し元へ返す。これにより
+/// `a || b ? c : d` を `(a || b) ? c : d` として再構築する。
+/// 括弧で明示的にグループ化された部分式は `Primary::MintypmaxExpression` として
+/// リーフ扱いになるため、フラット化の対象にならず正しく1オペランドとして扱う。
 fn flatten_binary_chain(
     tree: &SyntaxTree,
     expr: &sv_parser::Expression,
     operands: &mut Vec<Expr>,
     ops: &mut Vec<BinOp>,
-) -> Result<(), FrontendError> {
+) -> Result<Option<(Expr, Expr)>, FrontendError> {
     use sv_parser::Expression as E;
     match expr {
         E::Binary(b) => {
-            flatten_binary_chain(tree, &b.nodes.0, operands, ops)?;
+            let left_tail = flatten_binary_chain(tree, &b.nodes.0, operands, ops)?;
+            if left_tail.is_some() {
+                return Err(FrontendError::ParseError(
+                    "二項演算子チェーンの左オペランドに予期しない三項演算子があります".into(),
+                ));
+            }
             ops.push(lower_binary_op(tree, &b.nodes.1)?);
-            flatten_binary_chain(tree, &b.nodes.3, operands, ops)?;
-            Ok(())
+            flatten_binary_chain(tree, &b.nodes.3, operands, ops)
+        }
+        E::ConditionalExpression(ce) => {
+            let cond = lower_cond_pred(tree, &ce.nodes.0)?;
+            operands.push(cond);
+            let then_e = lower_expression(tree, &ce.nodes.3)?;
+            let else_e = lower_expression(tree, &ce.nodes.5)?;
+            Ok(Some((then_e, else_e)))
         }
         other => {
             operands.push(lower_expression(tree, other)?);
-            Ok(())
+            Ok(None)
         }
     }
 }
 
+/// `ConstantExpression::Binary` についても、チェーン末尾の裸の三項演算子を
+/// 二項演算子チェーンの外側へ持ち上げ、通常の式と同じ優先順位を保つ。
 fn flatten_constant_binary_chain(
     tree: &SyntaxTree,
     ce: &sv_parser::ConstantExpression,
     operands: &mut Vec<Expr>,
     ops: &mut Vec<BinOp>,
-) -> Result<(), FrontendError> {
+) -> Result<Option<(Expr, Expr)>, FrontendError> {
     use sv_parser::ConstantExpression as CE;
     match ce {
         CE::Binary(b) => {
-            flatten_constant_binary_chain(tree, &b.nodes.0, operands, ops)?;
+            let left_tail = flatten_constant_binary_chain(tree, &b.nodes.0, operands, ops)?;
+            if left_tail.is_some() {
+                return Err(FrontendError::ParseError(
+                    "定数二項演算子チェーンの左オペランドに予期しない三項演算子があります".into(),
+                ));
+            }
             ops.push(lower_binary_op(tree, &b.nodes.1)?);
-            flatten_constant_binary_chain(tree, &b.nodes.3, operands, ops)?;
-            Ok(())
+            flatten_constant_binary_chain(tree, &b.nodes.3, operands, ops)
+        }
+        CE::Ternary(t) => {
+            let cond = lower_constant_expr(tree, &t.nodes.0)?;
+            operands.push(cond);
+            let then_e = lower_constant_expr(tree, &t.nodes.3)?;
+            let else_e = lower_constant_expr(tree, &t.nodes.5)?;
+            Ok(Some((then_e, else_e)))
         }
         other => {
             operands.push(lower_constant_expr(tree, other)?);
-            Ok(())
+            Ok(None)
         }
     }
 }

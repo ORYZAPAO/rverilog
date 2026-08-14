@@ -184,6 +184,15 @@ fn compare_binop_precedence() {
 }
 
 #[test]
+fn compare_ternary_binop_precedence() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/ternary_binop_precedence/dut.v")],
+    );
+}
+
+#[test]
 fn compare_edge_x() {
     let root = workspace_root();
     compare_case("dut", &[root.join("tests/integration/cases/edge_x/dut.v")]);
