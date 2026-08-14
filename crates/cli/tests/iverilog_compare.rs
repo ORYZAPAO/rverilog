@@ -205,6 +205,15 @@ fn compare_always_star() {
 }
 
 #[test]
+fn compare_case_width_mismatch() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/case_width_mismatch/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(
