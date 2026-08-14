@@ -2516,3 +2516,84 @@ Codex側の実装完了後、こちらで独立に検証:
   `01000000`→`10000000`と遷移しておりFSM自体は動いているように見えるため、
   decoder_trigger周りかmem_do_prefetchの生成条件自体を疑うべき）。原因調査は
   自分で行い、実装はCodexへ委任する運用を継続する（推奨着手順11番、継続）
+
+## 2026-08-15 (2)
+
+### Task
+
+推奨着手順11番の継続。前セッションでA14（ANSIポート方向継承バグ）を修正後、
+`mem_do_prefetch`が立たない原因を追う中で、A15・A16という2つの重大バグを発見・対応した。
+このセッションはA16の対応記録（A15は並行ブランチ`fix/net-decl-assignment-dropped`
+（PR #30、本セッション時点で未マージ）で対応済み。本ブランチ`fix/reduction-operator-lowering`は
+`feat/m1-milestone`から分岐しているためA15の修正は含んでいない）。
+
+### 原因調査（自分で実施、A15の要約）
+
+- `wire mem_done = resetn && (...) && (...);`という宣言時代入（`assign`文と分けて
+  書かず1文にまとめる`NetDeclAssignment`構文）の初期化式が`lower_net_decl`で完全に
+  無視され、`mem_done`が永久にZに張り付いていたことをデバッグ計装で発見・修正
+  （詳細はPR #30・DIARY該当ブランチの記録を参照）
+
+### 原因調査（自分で実施、A16）
+
+- A15修正後の再検証で、`cpu_state`が`cpu_state_fetch`(`01000000`)から
+  `cpu_state_trap`(`10000000`)へ想定外の遷移をして止まることを発見
+- `mem_done`の算出式が`&mem_state`（reduction AND）・`\|mem_state`（reduction OR）
+  という2bit信号への単項リダクション演算子を使っていることに着目し、部分式を
+  個別出力するデバッグ計装を追加
+- `mem_state=00`（2bit both 0）にもかかわらず`&mem_state=1`・`\|mem_state=1`という、
+  本来ありえない結果を観測
+- 最小再現（`reg [1:0] x; wire o=\|x; wire a=&x;`を4パターンのxで検証）で、
+  `o`・`a`が常に同一値になり、`x`全体を無視して`NOT(x[0])`（＝`~x`のLSBのみ）と
+  一致するパターンであることを突き止めた
+- `crates/frontend/src/lower.rs`の`lower_unary_op`を確認したところ、`+`/`-`/`!`/`~`
+  のみ明示的に扱っており、それ以外（単項の`&`/`\|`/`^`/`~&`/`~\|`/`~^`、すなわち
+  リダクション演算子全種）は`_ => Ok(UnOp::BitNot)`のcatch-allで無条件に`BitNot`へ
+  丸め込まれていることを発見。`mir::ir::UnOp`には`RedAnd`等6バリアントが既に定義され
+  `logicval.rs`の実装も正しいにもかかわらず、frontendから一度も生成されず完全に
+  死んでいた。プロジェクト全体でリダクション演算子が発見時点まで一度も正しく
+  動作していなかったことを意味する、今回発見した中で最も基礎的で影響範囲の広いバグ
+
+### What was done（Codexに委任・実装完了を確認、A16）
+
+- ブランチ`fix/reduction-operator-lowering`（`feat/m1-milestone`から分岐）を作成し、
+  原因分析結果をそのままCodexへ委任
+- `lower_unary_op`が実際のトークン文字列（`&`/`~&`/`\|`/`~\|`/`^`/`~^`/`^~`）を判定して
+  対応する`UnOp::Red*`を返すよう修正。未知の演算子は無言フォールバックせず
+  `FrontendError::UnsupportedConstruct`エラーに変更
+- Codexが独自に発見・対応した波及範囲: `hir::UnOp`（`crates/hir/src/design.rs`）にも
+  同6バリアントを追加、`elab::lower_unop`（HIR→MIR変換）と`elab::eval_const_hir_with`
+  （コンパイル時定数畳み込み、genvar/localparam文脈で使用）にリダクション演算子の
+  評価ロジックを追加（依頼時には明示していなかったが、HIR側にも同名の`UnOp`列挙が
+  別途存在し、定数式評価器にも同様の対応が必要だったことをCodex側で正しく特定・対応）
+- 回帰テスト`tests/integration/cases/reduction_ops/`（2bit/4bit、AND/NAND/OR/NOR/XOR/
+  XNOR全6種、`~^`と`^~`両表記）を追加。このブランチはA15を含まないため、テストは
+  `wire o = expr;`ではなく`assign`文の明示形式で記述（A15未統合による誤検知を回避）
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`lower_unary_op`本体＋波及した`hir`/`elab`側＋回帰テスト）に
+  収まっていることを確認
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy -D warnings`とも警告なし
+- `cargo test --workspace`で83テスト全通過（既存回帰なし、ignore 2件は意図通り）
+- `samples/counter4`・`samples/fifo_sync`回帰なし確認
+- 最小再現（`reg [1:0] x; assign o=\|x; assign a=&x;`）を再実行し、真理表通りの
+  正しい結果（`x=00→or=0,and=0`／`x=01→or=1,and=0`／`x=11→or=1,and=1`／
+  `x=10→or=1,and=0`）になることを確認
+- 同ブランチで`wire o = \|x;`形式（宣言時代入）を試すと依然`o=z`になることを確認
+  （A15未統合のため想定通り、リダクション演算子自体のバグではないことを再確認）
+
+### Result
+
+✅ A16（単項リダクション演算子が全て`~`として誤lowingされる、IEEE基本演算子の
+   全面的な機能不全）を修正。真理表ベースの回帰テストで全6種を検証
+✅ `cargo test --workspace`（83テスト）全通過を確認
+⚠️ picorv32.vスモークはA16単独では依然PASS未到達（A15とA16は独立したバグで、
+   picorv32.vのフル動作にはおそらく両方の統合が必要。A15マージ後に再確認予定）
+✅ PLAN.md実装課題A節にA16を追加
+
+### Next
+
+- PR #30（A15）とこのブランチ（A16）を`feat/m1-milestone`へ統合した上で、
+  picorv32.vスモークテストを再実行し、`PASS`まで到達するか、あるいはさらに別の
+  未特定バグが残っているかを確認する（推奨着手順11番、継続）
