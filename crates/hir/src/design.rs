@@ -316,6 +316,12 @@ pub enum UnOp {
     Neg,
     LogNot,
     BitNot,
+    RedAnd,
+    RedNand,
+    RedOr,
+    RedNor,
+    RedXor,
+    RedXnor,
 }
 
 #[derive(Debug, Clone)]
