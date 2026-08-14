@@ -265,6 +265,19 @@ fn test_ansi_port_comma_direction() {
 }
 
 #[test]
+fn test_net_decl_assignment() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/net_decl_assignment/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("net_decl_assignment");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 #[ignore = "既知の未解決課題: A13修正後もPicoRV32が最初の命令fetch前に不正命令トラップへ入りtimeoutする（PLAN.md推奨着手順11番参照）"]
 fn test_picorv32_smoke() {
     let root = workspace_root();
