@@ -239,6 +239,19 @@ fn test_always_star() {
 }
 
 #[test]
+fn test_case_width_mismatch() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/case_width_mismatch/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("case_width_mismatch");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];
@@ -252,11 +265,37 @@ fn test_logical_x_shortcircuit() {
 }
 
 #[test]
+fn test_reduction_ops() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/reduction_ops/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("reduction_ops");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_ansi_port_comma_direction() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/ansi_port_comma_direction/dut.v")];
     let got = run_sim("top", &files);
     let expected = expected_stdout("ansi_port_comma_direction");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
+fn test_net_decl_assignment() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/net_decl_assignment/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("net_decl_assignment");
     assert_eq!(
         got, expected,
         "\n--- expected ---\n{}\n--- got ---\n{}",

@@ -214,6 +214,15 @@ fn compare_always_star() {
 }
 
 #[test]
+fn compare_case_width_mismatch() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/case_width_mismatch/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(
@@ -223,11 +232,29 @@ fn compare_logical_x_shortcircuit() {
 }
 
 #[test]
+fn compare_reduction_ops() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/reduction_ops/dut.v")],
+    );
+}
+
+#[test]
 fn compare_ansi_port_comma_direction() {
     let root = workspace_root();
     compare_case(
         "top",
         &[root.join("tests/integration/cases/ansi_port_comma_direction/dut.v")],
+    );
+}
+
+#[test]
+fn compare_net_decl_assignment() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/net_decl_assignment/dut.v")],
     );
 }
 

@@ -1525,11 +1525,24 @@ fn eval_const_hir_with(
         }
         HirExpr::Un(op, inner) => {
             let v = eval_const_hir_with(ctx, scope, inner, extra)?;
+            let width = hir_const_width(inner).min(64);
+            let mask = if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
+            let reduced_v = v & mask;
             Ok(match op {
                 HirUnOp::Pos => v,
                 HirUnOp::Neg => (-(v as i64)) as u64,
                 HirUnOp::LogNot => (v == 0) as u64,
                 HirUnOp::BitNot => !v,
+                HirUnOp::RedAnd => (reduced_v == mask) as u64,
+                HirUnOp::RedNand => (reduced_v != mask) as u64,
+                HirUnOp::RedOr => (reduced_v != 0) as u64,
+                HirUnOp::RedNor => (reduced_v == 0) as u64,
+                HirUnOp::RedXor => (reduced_v.count_ones() % 2) as u64,
+                HirUnOp::RedXnor => (reduced_v.count_ones() % 2 == 0) as u64,
             })
         }
         HirExpr::Cond(c, t, f) => {
@@ -1609,6 +1622,12 @@ fn lower_unop(op: HirUnOp) -> UnOp {
         HirUnOp::Neg => UnOp::Neg,
         HirUnOp::LogNot => UnOp::LogNot,
         HirUnOp::BitNot => UnOp::BitNot,
+        HirUnOp::RedAnd => UnOp::RedAnd,
+        HirUnOp::RedNand => UnOp::RedNand,
+        HirUnOp::RedOr => UnOp::RedOr,
+        HirUnOp::RedNor => UnOp::RedNor,
+        HirUnOp::RedXor => UnOp::RedXor,
+        HirUnOp::RedXnor => UnOp::RedXnor,
     }
 }
 

@@ -496,7 +496,7 @@ fn process_mogi(
                 MCI::InitialConstruct(ic) => initials.push(lower_initial(tree, ic)?),
                 MCI::ContinuousAssign(ca) => assigns.extend(lower_continuous_assign(tree, ca)?),
                 MCI::ModuleOrGenerateItemDeclaration(d) => {
-                    lower_decl(tree, d, nets, regs, mems, locals, functions, tasks)?
+                    lower_decl(tree, d, nets, regs, mems, locals, assigns, functions, tasks)?
                 }
                 MCI::LoopGenerateConstruct(lgc) => {
                     if let Some(c) = lower_loop_generate(tree, lgc) {
@@ -594,8 +594,9 @@ fn lower_generate_decl(
         use sv_parser::PackageOrGenerateItemDeclaration as PD;
         match p.as_ref() {
             PD::NetDeclaration(nd) => {
-                if let Ok(v) = lower_net_decl(tree, nd) {
-                    g.nets.extend(v);
+                if let Ok((nets, assigns)) = lower_net_decl(tree, nd) {
+                    g.nets.extend(nets);
+                    g.assigns.extend(assigns);
                 }
             }
             PD::DataDeclaration(dd) => {
@@ -864,6 +865,7 @@ fn lower_decl(
     regs: &mut Vec<RegDecl>,
     mems: &mut Vec<MemDecl>,
     locals: &mut Vec<LocalParamDecl>,
+    assigns: &mut Vec<ContinuousAssign>,
     functions: &mut Vec<FunctionDecl>,
     tasks: &mut Vec<TaskDecl>,
 ) -> Result<(), FrontendError> {
@@ -871,7 +873,11 @@ fn lower_decl(
     if let D::PackageOrGenerateItemDeclaration(p) = d {
         use sv_parser::PackageOrGenerateItemDeclaration as PD;
         match p.as_ref() {
-            PD::NetDeclaration(nd) => nets.extend(lower_net_decl(tree, nd)?),
+            PD::NetDeclaration(nd) => {
+                let (new_nets, new_assigns) = lower_net_decl(tree, nd)?;
+                nets.extend(new_nets);
+                assigns.extend(new_assigns);
+            }
             PD::DataDeclaration(dd) => {
                 let (new_regs, new_mems) = lower_data_decl(tree, dd)?;
                 regs.extend(new_regs);
@@ -1085,25 +1091,32 @@ fn lower_task_decl(
 fn lower_net_decl(
     tree: &SyntaxTree,
     nd: &sv_parser::NetDeclaration,
-) -> Result<Vec<NetDecl>, FrontendError> {
-    let mut out = Vec::new();
+) -> Result<(Vec<NetDecl>, Vec<ContinuousAssign>), FrontendError> {
+    let mut nets = Vec::new();
+    let mut assigns = Vec::new();
     if let sv_parser::NetDeclaration::NetType(nt) = nd {
         let (width, width_expr) = packed_width_expr(tree, RefNode::NetDeclarationNetType(nt));
         let signed = has_signed(RefNode::NetDeclarationNetType(nt));
-        // ListOfNetDeclAssignments → NetDeclAssignment → NetIdentifier
-        for name_node in unwrap_all_net_identifiers(RefNode::NetDeclarationNetType(nt)) {
-            if let Some(name) = get_id(tree, name_node) {
-                out.push(NetDecl {
-                    name,
+        for assignment in nt.nodes.5.nodes.0.contents() {
+            if let Some(name) = get_id(tree, RefNode::NetIdentifier(&assignment.nodes.0)) {
+                nets.push(NetDecl {
+                    name: name.clone(),
                     width,
                     kind: NetKind::Wire,
                     width_expr: width_expr.clone(),
                     signed,
                 });
+                // ネット宣言時の初期化式は連続代入として扱う。
+                if let Some((_, expr)) = &assignment.nodes.2 {
+                    assigns.push(ContinuousAssign {
+                        lval: LValue::Net(name),
+                        expr: lower_expression(tree, expr)?,
+                    });
+                }
             }
         }
     }
-    Ok(out)
+    Ok((nets, assigns))
 }
 
 fn lower_data_decl(
@@ -1302,16 +1315,6 @@ fn lower_localparam(
         }
     }
     Ok(out)
-}
-
-fn unwrap_all_net_identifiers(node: RefNode) -> Vec<RefNode> {
-    let mut out = Vec::new();
-    for inner in node {
-        if let RefNode::NetIdentifier(_) = &inner {
-            out.push(inner);
-        }
-    }
-    out
 }
 
 // ── continuous assign ─────────────────────────────────────────────────────────
@@ -2450,7 +2453,15 @@ fn lower_unary_op(tree: &SyntaxTree, op: &sv_parser::UnaryOperator) -> Result<Un
         "-" => Ok(UnOp::Neg),
         "!" => Ok(UnOp::LogNot),
         "~" => Ok(UnOp::BitNot),
-        _ => Ok(UnOp::BitNot),
+        "&" => Ok(UnOp::RedAnd),
+        "~&" => Ok(UnOp::RedNand),
+        "|" => Ok(UnOp::RedOr),
+        "~|" => Ok(UnOp::RedNor),
+        "^" => Ok(UnOp::RedXor),
+        "~^" | "^~" => Ok(UnOp::RedXnor),
+        other => Err(FrontendError::UnsupportedConstruct(format!(
+            "unary operator: {other}"
+        ))),
     }
 }
 
