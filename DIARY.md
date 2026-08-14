@@ -2436,3 +2436,83 @@ PLAN.md 推奨着手順11番として、PicoRV32を実際にクロック駆動�
 
 - PicoRV32が最初の命令fetch前に不正命令トラップへ入る実行器側の原因を調査し、
   `#[ignore]`を外してスモークテストを通す（推奨着手順11番、継続）
+
+## 2026-08-15
+
+### Task
+
+新規セッション開始。PLAN.md・DIARY.mdを読み込み、推奨着手順11番（picorv32.vフル命令実行
+シミュレーション確認）の続きを実施。実装はCodexへ委任する運用方針を確認した。
+
+### 原因調査（自分で実施）
+
+- `feat/m1-milestone`を最新化（PR #28マージ分を`git pull --ff-only`で反映）。
+- `cargo build -p rverilog-cli --release`でビルドし、`tb_picorv32`を`--max-time 2000`で
+  実行、従来通りTIMEOUTすることを確認
+- 生成VCDをPythonスクリプトで解析（当初、識別子を1文字と決め打ちして誤った信号対応表を
+  作ってしまい「大量に発振している」ように見えたが、`$var`定義を正しくスコープ付きで
+  パースし直したところ誤りと判明。234信号中140個が2文字識別子だったため単純な
+  `line[1]`パースでは衝突していた）。正しく解析した結果、`dut.clk`は正常にトグルする一方、
+  `dut.resetn`/`dut.mem_valid`/`dut.mem_instr`/`dut.mem_addr`はtime=0のX値のまま二度と
+  更新されないことを発見
+- 最小再現ケース（2階層、`input clk, rst,`という1つの`input`にカンマ区切りで2ポートを
+  まとめる書き方）で同一症状（`rst`が子モジュールへ伝搬せず`cnt`がXのまま）を確認。
+  ポート宣言を`input clk; input rst;`と分離すると正常動作することも確認し、
+  「カンマ区切りANSIポート宣言」が原因と特定
+- `crates/frontend/src/lower.rs`に一時的な`eprintln!`デバッグを仕込み、sv-parserの
+  実際のAST構造を確認。ヘッダを持つ1番目のポート（`clk`）は`AnsiPortDeclaration::Net`、
+  ヘッダを省略した2番目のポート（`rst`）は`AnsiPortDeclaration::Variable`として
+  parseされることが判明。`lower_ansi_port_variable`はヘッダが`None`の場合に無条件で
+  `PortDirection::Output`へフォールバックしており、IEEE 1364-2001 12.3.3の
+  「ヘッダ省略時は直前のポート宣言の方向を継承する」規則に反していた
+  （`lower_ansi_port_net`側もヘッダ省略時`PortDirection::Input`固定で、先頭ポート以外では
+  本来誤りだが、今回のケースではたまたま影響なし）。picorv32.vの実際のポート宣言
+  （`input clk, resetn,`）がまさにこのパターンで、`resetn`が誤ってOutput
+  （`NetKind::Reg`）として登録され、elabのインスタンス接続ロジック
+  （`elaborate.rs`のポート接続コード）が接続方向を逆に解釈し、親の`resetn`が
+  子へ一切伝搬しない不具合になっていた
+- 自分でこの原因分析に基づき一度直接修正・動作確認まで行ったが、ユーザーから
+  「実装はCodexにやり直させる」との指示を受け、修正をrevertして`fix/ansi-port-direction-inherit`
+  ブランチを作成し、原因分析結果をそのままCodexへの依頼文に含めて委任した
+
+### What was done（Codexに委任・実装完了を確認）
+
+- `crates/frontend/src/lower.rs`: `lower_ansi_ports`に`prev_dir`（直前確定方向、
+  先頭はIEEE既定のInput）を追加し、`lower_ansi_port`/`lower_ansi_port_net`/
+  `lower_ansi_port_variable`（`Paren`分岐も含む）のヘッダ省略時フォールバックを
+  ハードコードされたInput/Outputから継承方向`prev_dir`に変更
+- 回帰テスト`tests/integration/cases/ansi_port_comma_direction/`
+  （`input clk, rst,`パターンの最小再現ケース）を新規追加し、
+  `crates/cli/tests/integration.rs`・`crates/cli/tests/iverilog_compare.rs`双方に登録
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更内容が依頼した通り（`lower.rs`の該当4関数＋回帰テスト1件）に
+  絞られていることを確認
+- `cargo build --workspace`成功、`cargo fmt --check`・
+  `cargo clippy --workspace --all-targets -- -D warnings`ともに警告なし
+- `cargo test --workspace`で81テスト全通過（既存回帰なし、ignore 2件は
+  picorv32_smoke関連で意図通り）
+- `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行しVCD生成・
+  正常終了を確認（回帰なし）
+- picorv32.vスモークテストを手動実行し、VCD上で`dut.resetn`が`#0: X`→`#10: 1`と
+  正しく遷移するようになったことを確認。ただし`mem_do_prefetch`が立たない別原因により
+  依然TIMEOUTのままで、`picorv32_smoke`の`#[ignore]`は継続
+
+### Result
+
+✅ A14（ANSIポートのカンマ区切り宣言における方向継承バグ、IEEE 1364-2001 12.3.3違反）を
+   修正。`input clk, resetn,`のようなpicorv32.v実際の記法で発生していた重大なポート
+   伝搬バグを解消
+✅ 回帰テスト`ansi_port_comma_direction`を追加し、`cargo test --workspace`
+   （81テスト）全通過を確認
+✅ picorv32.vで`dut.resetn`が正しく伝搬するようになったことをVCDで確認（部分的前進）
+⚠️ picorv32_smokeは`mem_do_prefetch`が立たない別の未特定原因により依然PASS未到達
+✅ PLAN.md実装課題A節にA14を追加、推奨着手順11番の進捗を更新
+
+### Next
+
+- `mem_do_prefetch`がpicorv32内部で立たない原因を調査する（cpu_stateは
+  `01000000`→`10000000`と遷移しておりFSM自体は動いているように見えるため、
+  decoder_trigger周りかmem_do_prefetchの生成条件自体を疑うべき）。原因調査は
+  自分で行い、実装はCodexへ委任する運用を継続する（推奨着手順11番、継続）
