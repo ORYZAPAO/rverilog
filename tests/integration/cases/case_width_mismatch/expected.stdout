@@ -1,0 +1,6 @@
+st=00 out=11
+st=01 out=22
+st=10 out=33
+st=11 out=44
+caseeq=1 casene=0
+$finish at time 4

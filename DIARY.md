@@ -2516,3 +2516,76 @@ Codex側の実装完了後、こちらで独立に検証:
   `01000000`→`10000000`と遷移しておりFSM自体は動いているように見えるため、
   decoder_trigger周りかmem_do_prefetchの生成条件自体を疑うべき）。原因調査は
   自分で行い、実装はCodexへ委任する運用を継続する（推奨着手順11番、継続）
+
+## 2026-08-15 (3)
+
+### Task
+
+前回セッションに続き推奨着手順11番の継続。A15（PR #30）・A16（PR #31）を
+ローカルで一時的に統合検証した結果、さらにA17という重大バグを発見・対応した。
+
+### 原因調査（自分で実施、A15・A16の統合検証）
+
+- ローカルに検証専用ブランチ`test/a15-a16-combined`（push対象外）を作成し、
+  `feat/m1-milestone`に`origin/fix/net-decl-assignment-dropped`（A15）・
+  `origin/fix/reduction-operator-lowering`（A16）をマージして統合状態を作成
+  （PLAN.md/DIARY.mdのコンフリクトのみ発生、コード側は無競合）
+- `cargo test --workspace`で85テスト全通過を確認後、デバッグ計装版picorv32.vを
+  実行。`&mem_state`/`\|mem_state`が`mem_state=00`で正しく`0`/`0`になるようになった
+  （A16の効果を確認）が、`cpu_state`が`cpu_state_fetch`のまま停止し続けることを発見
+- `mem_do_rinst=1`・`case0`条件（`mem_do_prefetch||mem_do_rinst||mem_do_rdata`）=1・
+  `mem_state==0`=true・`!resetn||trap`=false（つまりelse節=通常動作パスに入っている）
+  が全て揃っているにもかかわらず、`case (mem_state) 0: begin ... mem_valid<=...;
+  mem_state<=1; end`が一切実行されず`mem_valid`/`mem_state`が更新されないことを
+  デバッグ計装で確認
+- 最小再現（`reg [1:0] st; case(st) 0:...;1:...;2:...;3:...;endcase`）で、全ての
+  `st`パターンでcase項が一度もマッチせず`out`がデフォルト値のまま変わらないことを
+  確認。`crates/mir/src/logicval.rs`の`case_eq`（333-348行目付近）を確認したところ、
+  `if self.width() != rhs.width() { return LogicVal::ZERO; }`という早期returnが
+  あり、セレクタ（2bit）とcase項（サイズ指定なし10進リテラル、既定32bit幅）の幅が
+  完全一致しない限り無条件で不一致と判定していることを発見。同ファイル内の通常の
+  `==`用`eq`関数は`w = self.width().max(rhs.width())`で正しく幅の違いを吸収して
+  いるのと対照的で、`case_eq`だけがこの処理を欠いていた。picorv32.vの
+  `case (mem_state) 0: ...; 1: ...; 2: ...; 3: ...; endcase`（`mem_state`は2bit）が
+  まさにこのパターンに該当し、これがA14・A15・A16を全て適用した後でも
+  picorv32スモークがタイムアウトし続ける直接原因と特定した
+
+### What was done（Codexに委任・実装完了を確認、A17）
+
+- 検証専用ブランチを削除し、`feat/m1-milestone`から新規ブランチ
+  `fix/case-width-mismatch`を作成、原因分析結果をCodexへ委任
+- `case_eq`を`eq`と同じ`w = self.width().max(rhs.width())`方式に修正
+  （X/Z平面の厳密一致判定ロジック自体は変更なし）
+- 回帰テスト`tests/integration/cases/case_width_mismatch/`（2bitセレクタ対
+  32bit既定幅リテラルのcase文、`===`/`!==`の幅不一致比較）を追加
+- 調査中に`casez`/`casex`が同じ`case_eq`を呼んでおりワイルドカード（Z/X）マッチが
+  未実装の疑いがある既知課題（PLAN.md F節に既記載）を再確認したが、スコープ外として
+  今回は対応しないよう明示的に指示した
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`case_eq`本体3行＋回帰テスト）にちょうど絞られている
+  ことを確認（`eq`との差分もほぼ同一の変更で、実装として自然であることを確認）
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy -D warnings`とも警告なし
+- `cargo test --workspace`で83テスト全通過（既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`回帰なし確認
+- 最小再現（`reg [1:0] st; case(st) 0:...;endcase`）を再実行し、全4パターンで
+  正しくcase項がマッチすることを確認（`st=00→out=11`等）
+
+### Result
+
+✅ A17（`case`文比較の幅不一致バグ、IEEE 9.5節違反）を修正。`case`文で
+   サイズ指定なしリテラルを使う非常に一般的な書き方が軒並み壊れていた
+   重大バグを解消
+✅ `cargo test --workspace`（83テスト）全通過を確認
+✅ picorv32.vの`mem_state`FSMが`00`から`01`へ進行するようになったことを確認
+✅ PLAN.md実装課題A節にA17を追加
+
+### Next
+
+- PR #30（A15）・PR #31（A16）・今回のA17ブランチを`feat/m1-milestone`へ統合し、
+  picorv32.vスモークテストを再実行して`PASS`まで到達するか確認する
+  （推奨着手順11番、継続）
+- casez/casexのワイルドカードマッチ未実装疑惑（PLAN.md F節）は、picorv32.v自体は
+  plain caseのみ使用しているため今回のブロッカーではないが、別途優先度を検討する
+  価値がある既知課題として記録済み

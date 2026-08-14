@@ -331,12 +331,10 @@ impl LogicVal {
     }
 
     pub fn case_eq(&self, rhs: &LogicVal) -> LogicVal {
-        if self.width() != rhs.width() {
-            return LogicVal::ZERO;
-        }
-        let n = num_chunks(self.width());
+        let w = self.width().max(rhs.width());
+        let n = num_chunks(w);
         for i in 0..n {
-            let m = chunk_mask(self.width(), i);
+            let m = chunk_mask(w, i);
             if (self.get_chunk(i) & m) != (rhs.get_chunk(i) & m) {
                 return LogicVal::ZERO;
             }
