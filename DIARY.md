@@ -2739,3 +2739,77 @@ Codex側の実装完了後、こちらで独立に検証:
 - casez/casexのワイルドカードマッチ未実装疑惑（PLAN.md F節）は、picorv32.v自体は
   plain caseのみ使用しているため今回のブロッカーではないが、別途優先度を検討する
   価値がある既知課題として記録済み
+## 2026-08-15 (4)
+
+### Task
+
+前回セッションに続き推奨着手順11番の継続。A17（PR #32）をローカルでA15・A16と
+統合検証した結果、さらにA18という重大バグを発見・対応した。
+
+### 原因調査（自分で実施、A15+A16+A17の統合検証）
+
+- ローカル検証専用ブランチ`test/all-fixes-combined`（push対象外）で
+  `origin/fix/net-decl-assignment-dropped`（A15）・
+  `origin/fix/reduction-operator-lowering`（A16）・
+  `origin/fix/case-width-mismatch`（A17）を`feat/m1-milestone`へ順次マージ
+  （PLAN.md/DIARY.mdのみコンフリクト、コード側は無競合）
+- `cargo test --workspace`で88テスト全通過を確認後、デバッグ計装版picorv32.vを
+  実行。`mem_state`が`00`から`01`へ正しく進行するようになった（A17の効果を確認）が、
+  `mem_state=01`のまま停止し続けることを発見
+- state 1のコード（`if (mem_xfer) begin ... mem_state <= mem_do_rinst ||
+  mem_do_rdata ? 0 : 3; end`）を精査。`mem_valid`/`mem_ready`/`mem_xfer`は
+  正しく1になり転送完了を示すが、その直後`mem_valid`は正しく0へ戻る一方
+  `mem_state`が`01`のまま変化しないことをデバッグ計装で確認
+- 最小再現（`out = a || b ? 2'd0 : 2'd3;`を3パターンのa/bで検証）で、
+  `a || b ? 0 : 3`が`a || (b ? 0 : 3)`として誤評価されていることを特定
+  （観測値が`a||(b?0:3)`という式の値と完全に一致するパターンだった）。
+  `crates/frontend/src/lower.rs`の`flatten_binary_chain`（A10で導入、
+  `E::Binary`以外を不透明な1オペランドとして扱う設計）が、sv-parserが
+  `a || b ? c : d`を`E::Binary(a, "||", E::ConditionalExpression(b,c,d))`
+  という形で返す（三項演算子全体が丸ごと`||`の右オペランドとしてネストされる、
+  A10の右結合バグと同系統のsv-parser側の癖）ため、三項演算子全体を「ただの
+  オペランド」として扱ってしまい、IEEE Table 5-4で最低優先順位のはずの`?:`が
+  `||`より高優先度であるかのような結果になっていたことを特定。
+  picorv32.vの`mem_state <= mem_do_rinst || mem_do_rdata ? 0 : 3;`が
+  まさにこのパターンで、A14〜A17を全て適用した状態でもFSMがstate 1から
+  一切進行しない直接原因と特定した
+
+### What was done（Codexに委任・実装完了を確認、A18）
+
+- 検証専用ブランチを削除し、`feat/m1-milestone`から新規ブランチ
+  `fix/ternary-binop-precedence`を作成、具体的な実装方針（`flatten_binary_chain`
+  の戻り値を`Result<Option<(Expr,Expr)>, FrontendError>`に変更し、チェーン末尾の
+  裸の`E::ConditionalExpression`検出時は条件部をチェーンへ合流・then/else部を
+  戻り値で呼び出し元へ伝播する具体的なコード案）込みでCodexへ委任
+- Codexが依頼通りの実装に加え、**同型のバグを抱えていた定数式版
+  `flatten_constant_binary_chain`（`CE::Ternary`、localparam/genvar文脈で使用、
+  A11で導入）にも同じ修正を自発的に適用**（依頼文で「必ず確認すること」と
+  明示していた箇所を正しく特定・対応）
+- 回帰テスト`tests/integration/cases/ternary_binop_precedence/`
+  （`||`・`&&`・`+`/`==`との組み合わせ、localparam定数式での`?:`優先順位）を追加
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`flatten_binary_chain`・`flatten_constant_binary_chain`
+  ・両者の呼び出し元＋回帰テスト）に収まっていることを確認
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy -D warnings`とも警告なし
+- `cargo test --workspace`で83テスト全通過（既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`回帰なし確認
+- 最小再現（`a || b ? 0 : 3`の3パターン）を再実行し、全て正しい結果
+  （`(a||b)?0:3`通り）になることを確認
+
+### Result
+
+✅ A18（二項演算子チェーン末尾の裸の三項演算子の優先順位バグ、IEEE Table 5-4
+   違反）を修正。`cond1 || cond2 ? then : else`という非常に一般的な書き方が
+   軒並み壊れていた重大バグを解消。定数式（localparam/genvar）文脈の同型バグも
+   合わせて解消
+✅ `cargo test --workspace`（83テスト）全通過を確認
+✅ PLAN.md実装課題A節にA18を追加
+
+### Next
+
+- PR #30（A15）・PR #31（A16）・PR #32（A17）・今回のA18ブランチを
+  `feat/m1-milestone`へ統合し、picorv32.vスモークテストを再実行して`PASS`まで
+  到達するか確認する（推奨着手順11番、継続。A14〜A18で計5件の重大バグを
+  発見・修正したが、picorv32.vのフル動作確認はまだ未達成）

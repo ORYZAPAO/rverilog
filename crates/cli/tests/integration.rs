@@ -187,6 +187,19 @@ fn test_binop_precedence() {
 }
 
 #[test]
+fn test_ternary_binop_precedence() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/ternary_binop_precedence/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("ternary_binop_precedence");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_edge_x() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/edge_x/dut.v")];
