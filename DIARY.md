@@ -2880,3 +2880,72 @@ A15〜A18（PR #30〜#33）の統合と、picorv32.vスモークテストの最�
   `mem_la_addr`/wstrb生成ロジック（`{reg_op1[31:2], 2'b00}`等）の両方を
   疑うべき。原因調査は自分で行い、実装はCodexへ委任する運用を継続する
   （推奨着手順11番、継続）
+
+## 2026-09-03
+
+### Task
+
+推奨着手順11番の継続。A14〜A18を`feat/m1-milestone`へ統合済みの状態で
+`test_picorv32_smoke`（`--ignored`付き）を再実行し、依然`TIMEOUT`で失敗することを確認。
+新規セッションのため、調査をフォーク（サブエージェント）に委任し、原因特定後の実装は
+Codexに委任する運用を継続した。
+
+### 原因調査（フォークに委任、実測ベースで実施）
+
+- 1回目のフォーク応答はツール呼び出し3回・16秒のみで実質的な調査をしていなかったため
+  （委任の連鎖に迷い込んだ可能性）、「他エージェントに委任せず自分で手を動かして調査する
+  こと」を明示して同一フォークを再開
+- 再開後のフォークが`interp.rs`への一時的なデバッグ計装（調査後revert済み）とVCD波形観測で
+  `cpu_state`が起動直後の`cpu_state_fetch`から一度も遷移しないことを確認し、
+  `decoder_trigger`は正しく`1`になるにもかかわらず`if (decoder_trigger) ... cpu_state <=
+  cpu_state_ld_rs1;`（picorv32.v 1557行目、3段の`else if`チェーンの最終節）が一度も
+  評価されないことを特定
+- 最小再現（`if(a) out=1; else if(b) out=2; else if(c) out=3;`、a=0,b=0,c=1）で`out`が
+  Xのまま（`else if(c)`が実行されない）ことを確認して再現成功
+- 根本原因: `frontend/src/lower.rs`の`lower_conditional`が、`sv_parser::
+  ConditionalStatement.nodes`のうち`nodes.4`（中間の全`else if`節を保持する`Vec`）を
+  一切参照しておらず、`nodes.2`（先頭if条件）・`nodes.3`（先頭then）・`nodes.5`
+  （末尾else、あれば）しか見ていなかった。結果、末尾`else`がない場合は中間`else if`が
+  全て消滅し、末尾`else`がある場合は`else if`の条件を一切評価せず先頭`if`が偽なら
+  即座に末尾`else`へ飛んでいた。`case`文中心の設計のため`if/else if`が2段以上かつ
+  実際に中間分岐が踏まれるテストケースがこれまで存在せず見逃されていたと推定
+- **A19**としてPLAN.md実装課題A節に追加（IEEE 1364-2001 9.4節違反、最重要）
+
+### What was done（Codexに委任・実装完了を確認、A19）
+
+- 検証専用ブランチ`fix/else-if-chain-dropped`を`feat/m1-milestone`から作成し、
+  具体的な修正方針（`cs.nodes.4`の各`else if`節を末尾から`Stmt::If`として畳み込み、
+  `cs.nodes.5`を初期値としてfoldし、先頭`if`はその結果を`else`節として包む、
+  A10/A18の二項演算子チェーン畳み込みと同型のfold処理）込みでCodexへ委任
+- Codexは提案通り`lower_conditional`に`for (_, _, else_if_cond, else_if_stmt) in
+  cs.nodes.4.iter().rev()`のfoldループを追加する最小差分で実装
+- 回帰テスト`tests/integration/cases/else_if_chain/`（末尾elseなしで最終else-ifが
+  効くケース、末尾elseありで中間else-if/最終else-if/最終elseそれぞれが効くケースの
+  計4パターン）を追加
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`lower_conditional`本体8行＋回帰テスト＋PLAN.md）に
+  収まっていることを確認
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy --workspace
+  --all-targets -- -D warnings`とも警告なし
+- `cargo test --workspace`で91テスト全通過（新規`test_else_if_chain`/
+  `compare_else_if_chain`含む、既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`回帰なし確認
+- `test_picorv32_smoke`（`--ignored`）を再実行 → **依然`TIMEOUT`で失敗**
+  （A19単独ではpicorv32.vのブロッカー解消に至らず、別の未特定原因が残っている）
+
+### Result
+
+✅ A19（`if`/`else if`チェーンの中間節が無言で消える、IEEE 1364-2001 9.4節違反）を修正。
+   `case`文に隠れて見逃されていた重大バグを解消
+✅ `cargo test --workspace`（91テスト）全通過を確認
+✅ PLAN.md実装課題A節にA19を追加
+❌ picorv32.vスモークテストは依然TIMEOUT。A19は必要条件だったが十分条件ではなかった
+
+### Next
+
+- `fix/else-if-chain-dropped`ブランチをPRとして`feat/m1-milestone`へマージする
+- picorv32.vスモークテストのタイムアウト原因調査を継続（推奨着手順11番、継続）。
+  今回と同じ調子（フォークで実測ベース調査→根本原因特定→Codexへ実装委任→独立検証）を
+  次のセッションでも継続する

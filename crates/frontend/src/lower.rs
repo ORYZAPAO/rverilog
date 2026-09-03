@@ -1701,11 +1701,18 @@ fn lower_conditional(
     //          Vec<(else_kw, if_kw, Paren<CondPredicate>, StatementOrNull)>, Option<(else_kw, StatementOrNull)>)
     let cond = lower_cond_pred(tree, &cs.nodes.2.nodes.1)?;
     let then_b = lower_stmt_or_null(tree, &cs.nodes.3)?;
-    let else_b = if let Some((_, else_s)) = &cs.nodes.5 {
+    let mut else_b = if let Some((_, else_s)) = &cs.nodes.5 {
         Some(Box::new(lower_stmt_or_null(tree, else_s)?))
     } else {
         None
     };
+
+    for (_, _, else_if_cond, else_if_stmt) in cs.nodes.4.iter().rev() {
+        let cond = lower_cond_pred(tree, &else_if_cond.nodes.1)?;
+        let then_b = lower_stmt_or_null(tree, else_if_stmt)?;
+        else_b = Some(Box::new(Stmt::If(cond, Box::new(then_b), else_b)));
+    }
+
     Ok(Stmt::If(cond, Box::new(then_b), else_b))
 }
 
