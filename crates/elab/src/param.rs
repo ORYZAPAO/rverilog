@@ -1,6 +1,6 @@
-use rverilog_hir::{HirModule, ParamOverride, Expr};
-use rverilog_mir::LogicVal;
 use crate::ElabError;
+use rverilog_hir::{Expr, HirModule, ParamOverride};
+use rverilog_mir::LogicVal;
 
 pub fn resolve_params(
     _module: &HirModule,

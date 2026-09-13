@@ -12,6 +12,8 @@ pub enum NetKind {
 pub enum SysFuncKind {
     Clog2,
     Random,
+    Signed,
+    Unsigned,
 }
 
 #[derive(Debug, Clone)]
@@ -115,8 +117,8 @@ pub struct TfArg {
 pub struct PortDecl {
     pub name: SmolStr,
     pub direction: PortDirection,
-    pub width: u32,        // static fallback (1 if param-dependent)
-    pub width_expr: Expr,  // authoritative width expression
+    pub width: u32,       // 静的フォールバック値（param依存の場合は1）
+    pub width_expr: Expr, // 正式な幅を表す式
     pub signed: bool,
 }
 
@@ -205,7 +207,11 @@ pub enum LValue {
     Net(SmolStr),
     BitSelect(Box<LValue>, u32),
     PartSelect(Box<LValue>, Range),
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数式、bool は true=`+:` / false=`-:`
+    IndexedPartSelect(Box<LValue>, Box<Expr>, Box<Expr>, bool),
     IndexSel(SmolStr, Box<Expr>),
+    Concat(Vec<LValue>),
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +224,12 @@ pub struct Range {
 pub enum Stmt {
     Block(Vec<Stmt>),
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
-    Case { sel: Expr, arms: Vec<(Vec<Expr>, Box<Stmt>)>, default: Option<Box<Stmt>>, kind: CaseKind },
+    Case {
+        sel: Expr,
+        arms: Vec<(Vec<Expr>, Box<Stmt>)>,
+        default: Option<Box<Stmt>>,
+        kind: CaseKind,
+    },
     BlockingAssign(LValue, Expr),
     NbaAssign(LValue, Expr),
     Delay(u64, Box<Stmt>),
@@ -257,6 +268,9 @@ pub enum Expr {
     StringLit(SmolStr),
     BitSel(Box<Expr>, Box<Expr>),
     PartSel(Box<Expr>, Box<Range>),
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数式、bool は true=`+:` / false=`-:`
+    IndexedPartSel(Box<Expr>, Box<Expr>, Box<Expr>, bool),
     Concat(Vec<Expr>),
     Repeat(Box<Expr>, Vec<Expr>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
@@ -269,16 +283,45 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    LogAnd, LogOr,
-    BitAnd, BitOr, BitXor, BitNand, BitNor, BitXnor,
-    Eq, Ne, CaseEq, CaseNe, Lt, Gt, Le, Ge,
-    Shl, Shr, Ashl, Ashr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    LogAnd,
+    LogOr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNand,
+    BitNor,
+    BitXnor,
+    Eq,
+    Ne,
+    CaseEq,
+    CaseNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    Ashl,
+    Ashr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Pos, Neg, LogNot, BitNot,
+    Pos,
+    Neg,
+    LogNot,
+    BitNot,
+    RedAnd,
+    RedNand,
+    RedOr,
+    RedNor,
+    RedXor,
+    RedXnor,
 }
 
 #[derive(Debug, Clone)]

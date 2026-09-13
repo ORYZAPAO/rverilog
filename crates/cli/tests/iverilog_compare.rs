@@ -1,5 +1,5 @@
 mod common;
-use common::{workspace_root, run_sim};
+use common::{run_sim, workspace_root};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,12 +20,16 @@ fn run_iverilog(files: &[PathBuf]) -> String {
 
     let compile = Command::new("iverilog")
         .arg("-g2001")
-        .arg("-o").arg(&vvp_path)
+        .arg("-o")
+        .arg(&vvp_path)
         .args(files)
         .output()
         .expect("failed to run iverilog");
-    assert!(compile.status.success(),
-        "iverilog compile failed: {}", String::from_utf8_lossy(&compile.stderr));
+    assert!(
+        compile.status.success(),
+        "iverilog compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
 
     let run = Command::new("vvp")
         .arg(&vvp_path)
@@ -58,23 +62,32 @@ fn compare_case(top: &str, files: &[PathBuf]) {
     let iverilog_out = run_iverilog(files);
     let got = strip_finish_line(&rverilog_out);
     let want = strip_finish_line(&iverilog_out);
-    assert_eq!(got, want,
-        "\n--- iverilog ---\n{}\n--- rverilog ---\n{}", want, got);
+    assert_eq!(
+        got, want,
+        "\n--- iverilog ---\n{}\n--- rverilog ---\n{}",
+        want, got
+    );
 }
 
 #[test]
 fn compare_counter4() {
     let root = workspace_root();
-    compare_case("tb_counter4", &[
-        root.join("samples/counter4/tb.v"),
-        root.join("samples/counter4/counter4.v"),
-    ]);
+    compare_case(
+        "tb_counter4",
+        &[
+            root.join("samples/counter4/tb.v"),
+            root.join("samples/counter4/counter4.v"),
+        ],
+    );
 }
 
 #[test]
 fn compare_func_task() {
     let root = workspace_root();
-    compare_case("dut", &[root.join("tests/integration/cases/func_task/dut.v")]);
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/func_task/dut.v")],
+    );
 }
 
 #[test]
@@ -86,19 +99,28 @@ fn compare_gates() {
 #[test]
 fn compare_generate() {
     let root = workspace_root();
-    compare_case("dut", &[root.join("tests/integration/cases/generate/dut.v")]);
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/generate/dut.v")],
+    );
 }
 
 #[test]
 fn compare_disable_fork() {
     let root = workspace_root();
-    compare_case("dut", &[root.join("tests/integration/cases/disable_fork/dut.v")]);
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/disable_fork/dut.v")],
+    );
 }
 
 #[test]
 fn compare_format_xz() {
     let root = workspace_root();
-    compare_case("dut", &[root.join("tests/integration/cases/format_xz/dut.v")]);
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/format_xz/dut.v")],
+    );
 }
 
 #[test]
@@ -108,10 +130,187 @@ fn compare_signed() {
 }
 
 #[test]
+fn compare_signed_cast() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/signed_cast/dut.v")],
+    );
+}
+
+#[test]
+fn compare_lvalue_select() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/lvalue_select/dut.v")],
+    );
+}
+
+#[test]
+fn compare_indexed_part_select() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/indexed_part_select/dut.v")],
+    );
+}
+
+#[test]
+fn compare_localparam_midmodule() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/localparam_midmodule/dut.v")],
+    );
+}
+
+#[test]
+fn compare_localparam_const_expr() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/localparam_const_expr/dut.v")],
+    );
+}
+
+#[test]
+fn compare_binop_precedence() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/binop_precedence/dut.v")],
+    );
+}
+
+#[test]
+fn compare_ternary_binop_precedence() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/ternary_binop_precedence/dut.v")],
+    );
+}
+
+#[test]
+fn compare_edge_x() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/edge_x/dut.v")]);
+}
+
+#[test]
+fn compare_monitor() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/monitor/dut.v")]);
+}
+
+#[test]
+fn compare_always_star() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/always_star/dut.v")],
+    );
+}
+
+#[test]
+fn compare_mem_write_sensitivity() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/mem_write_sensitivity/dut.v")],
+    );
+}
+
+#[test]
+fn compare_case_width_mismatch() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/case_width_mismatch/dut.v")],
+    );
+}
+
+#[test]
+fn compare_logical_x_shortcircuit() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")],
+    );
+}
+
+#[test]
+fn compare_reduction_ops() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/reduction_ops/dut.v")],
+    );
+}
+
+#[test]
+fn compare_ansi_port_comma_direction() {
+    let root = workspace_root();
+    compare_case(
+        "top",
+        &[root.join("tests/integration/cases/ansi_port_comma_direction/dut.v")],
+    );
+}
+
+#[test]
+fn compare_net_decl_assignment() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/net_decl_assignment/dut.v")],
+    );
+}
+
+#[test]
+fn compare_else_if_chain() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/else_if_chain/dut.v")],
+    );
+}
+
+#[test]
+fn compare_shift_context_width() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/shift_context_width/dut.v")],
+    );
+}
+
+#[test]
+fn compare_picorv32_smoke() {
+    let root = workspace_root();
+    compare_case(
+        "tb_picorv32",
+        &[
+            root.join("tests/integration/cases/picorv32_smoke/tb.v"),
+            root.join("tests/integration/cases/picorv32_smoke/picorv32.v"),
+        ],
+    );
+}
+
+#[test]
+fn compare_delay0() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/delay0/dut.v")]);
+}
+
+#[test]
 fn compare_fifo_sync() {
     let root = workspace_root();
-    compare_case("tb_fifo_sync", &[
-        root.join("samples/fifo_sync/tb/tb.v"),
-        root.join("samples/fifo_sync/rtl/fifo_sync.v"),
-    ]);
+    compare_case(
+        "tb_fifo_sync",
+        &[
+            root.join("samples/fifo_sync/tb/tb.v"),
+            root.join("samples/fifo_sync/rtl/fifo_sync.v"),
+        ],
+    );
 }

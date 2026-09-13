@@ -1,9 +1,9 @@
 #![allow(dead_code)]
-use smol_str::SmolStr;
 use indexmap::IndexMap;
 use smallvec::SmallVec;
+use smol_str::SmolStr;
 
-use rverilog_mir::{NetId, ProcessId, ContId, StmtId, ExprId, Sensitivity, LValue, NetKind};
+use rverilog_mir::{ContId, ExprId, LValue, NetId, NetKind, ProcessId, Sensitivity, StmtId};
 
 #[derive(Debug, Clone)]
 pub struct Range {
@@ -78,26 +78,63 @@ pub struct Expr {
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     Identifier(SmolStr),
-    Constant { value: String, range: Range },
+    Constant {
+        value: String,
+        range: Range,
+    },
     Concat(Vec<ExprId>),
-    Replicate { times: ExprId, body: ExprId },
-    Binary { op: BinaryOp, lhs: ExprId, rhs: ExprId },
-    Unary { op: UnaryOp, expr: ExprId },
-    Conditional { cond: ExprId, tbranch: ExprId, fbranch: ExprId },
-    PartSelect { base: ExprId, range: Range },
-    Indexed { expr: ExprId, index: ExprId },
+    Replicate {
+        times: ExprId,
+        body: ExprId,
+    },
+    Binary {
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: ExprId,
+    },
+    Conditional {
+        cond: ExprId,
+        tbranch: ExprId,
+        fbranch: ExprId,
+    },
+    PartSelect {
+        base: ExprId,
+        range: Range,
+    },
+    Indexed {
+        expr: ExprId,
+        index: ExprId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
-    Add, Sub, Mul, Div, Mod,
-    And, Or, Xor,
-    Lt, Le, Gt, Ge, Eq, Ne,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
-    Pos, Neg, Not, BitNot,
+    Pos,
+    Neg,
+    Not,
+    BitNot,
 }
 
 pub type ExprArena = Vec<Expr>;
@@ -109,16 +146,42 @@ pub struct Stmt {
 
 #[derive(Debug, Clone)]
 pub enum StmtKind {
-    Block { name: Option<SmolStr>, stmts: Vec<StmtId> },
-    Assign { lvalue: LValue, expr: ExprId },
-    If { cond: ExprId, tbranch: StmtId, fbranch: Option<StmtId> },
-    Case { expr: ExprId, cases: Vec<CaseItem> },
-    While { cond: ExprId, body: StmtId },
-    Loop { body: StmtId },
+    Block {
+        name: Option<SmolStr>,
+        stmts: Vec<StmtId>,
+    },
+    Assign {
+        lvalue: LValue,
+        expr: ExprId,
+    },
+    If {
+        cond: ExprId,
+        tbranch: StmtId,
+        fbranch: Option<StmtId>,
+    },
+    Case {
+        expr: ExprId,
+        cases: Vec<CaseItem>,
+    },
+    While {
+        cond: ExprId,
+        body: StmtId,
+    },
+    Loop {
+        body: StmtId,
+    },
     Disable(SmolStr),
-    Wait { cond: ExprId },
-    Delay { value: ExprId, body: StmtId },
-    SystemTask { name: SmolStr, args: Vec<ExprId> },
+    Wait {
+        cond: ExprId,
+    },
+    Delay {
+        value: ExprId,
+        body: StmtId,
+    },
+    SystemTask {
+        name: SmolStr,
+        args: Vec<ExprId>,
+    },
 }
 
 #[derive(Debug, Clone)]

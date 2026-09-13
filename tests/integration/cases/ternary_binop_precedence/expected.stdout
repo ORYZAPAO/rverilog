@@ -1,0 +1,10 @@
+const_or_true=0
+const_or_false=3
+or_10=00
+or_00=11
+or_01=00
+and_10=11
+and_11=00
+add_eq=00
+add_ne=11
+$finish at time 0

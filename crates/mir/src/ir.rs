@@ -1,6 +1,6 @@
+use crate::logicval::LogicVal;
 use indexmap::IndexMap;
 use smol_str::SmolStr;
-use crate::logicval::LogicVal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetId(pub u32);
@@ -43,8 +43,18 @@ pub struct ElaboratedDesign {
     pub top: ScopeId,
     /// net.0 → [process.0] sensitivity reverse table
     pub sensitivity_table: IndexMap<u32, Vec<u32>>,
+    /// net.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
+    pub cont_sensitivity: IndexMap<u32, Vec<u32>>,
+    /// mem_id.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
+    pub mem_sensitivity: IndexMap<u32, Vec<u32>>,
     /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）
     pub expr_signed: Vec<bool>,
+    /// exprs[i] がシフト演算子（`<<`/`>>`/`<<<`/`>>>`）のBin左辺として評価される場合の
+    /// 文脈幅（IEEE 1364-2001 5.4.1 Table 5-5: シフト演算子の左辺はcontext-determined、
+    /// 右辺（シフト量）のみself-determined）。Someのときはeval_expr側でシフト前に左辺値を
+    /// この幅へresize/extend_signしてから既存のshl/shr/ashl/ashrへ渡す。Noneの場合は従来通り
+    /// 左辺の自己決定幅（self.width()）で計算する（安全側フォールバック、A21）。
+    pub expr_shift_width: Vec<Option<u32>>,
 }
 
 impl ElaboratedDesign {
@@ -128,14 +138,24 @@ pub enum LValue {
     /// 動的インデックスでのビット選択（genvar 等、実行時に決まるインデックス）
     DynBitSelect(NetId, ExprId),
     PartSelect(NetId, u32, u32), // net, hi, lo
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数、bool は true=`+:` / false=`-:`
+    DynPartSelect(NetId, ExprId, u32, bool),
     MemWrite(MemId, ExprId),
+    /// LHS連結 `{a,b} <= x`。先頭要素がMSB。
+    Concat(Vec<LValue>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Block(Vec<StmtId>),
     If(ExprId, StmtId, Option<StmtId>),
-    Case { sel: ExprId, arms: Vec<(Vec<ExprId>, StmtId)>, default: Option<StmtId>, kind: CaseKind },
+    Case {
+        sel: ExprId,
+        arms: Vec<(Vec<ExprId>, StmtId)>,
+        default: Option<StmtId>,
+        kind: CaseKind,
+    },
     BlockingAssign(LValue, ExprId),
     NbaAssign(LValue, ExprId),
     Delay(u64, StmtId),
@@ -166,6 +186,9 @@ pub enum Expr {
     Net(NetId),
     BitSel(NetId, ExprId),
     PartSel(NetId, u32, u32), // net, hi, lo
+    /// indexed part-select (`net[base +: width]` / `net[base -: width]`)。
+    /// base は実行時式、width は定数、bool は true=`+:` / false=`-:`
+    DynPartSel(NetId, ExprId, u32, bool),
     Concat(Vec<ExprId>),
     Repeat(u32, ExprId),
     Bin(BinOp, ExprId, ExprId),
@@ -181,17 +204,45 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    LogAnd, LogOr,
-    BitAnd, BitOr, BitXor, BitNand, BitNor, BitXnor,
-    Eq, Ne, CaseEq, CaseNe, Lt, Gt, Le, Ge,
-    Shl, Shr, Ashl, Ashr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    LogAnd,
+    LogOr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNand,
+    BitNor,
+    BitXnor,
+    Eq,
+    Ne,
+    CaseEq,
+    CaseNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    Ashl,
+    Ashr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Pos, Neg, LogNot, BitNot,
-    RedAnd, RedNand, RedOr, RedNor, RedXor, RedXnor,
+    Pos,
+    Neg,
+    LogNot,
+    BitNot,
+    RedAnd,
+    RedNand,
+    RedOr,
+    RedNor,
+    RedXor,
+    RedXnor,
 }
 
 #[derive(Debug, Clone)]

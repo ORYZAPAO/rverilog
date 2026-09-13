@@ -326,22 +326,42 @@ iverilog 出力比較 CI 導入済み）。
 | # | 課題 | 箇所 | 状態 |
 |---|---|---|---|
 | A1 | signed 演算 | `hir::design.rs`/`mir::ir.rs`（`signed`/`is_signed`フィールド）、`elab::elaborate.rs`（`expr_signed`伝搬）、`mir::logicval.rs`（`*_signed`演算群） | **対応済み（2026-07-09）**。net/reg/port/integer/function/task 引数の `signed` 宣言、符号無し10進即値と `'s` 基数リテラルの既定signed扱い、signed比較（`<`/`>`/`<=`/`>=`）・signed除算/剰余・`>>>`の左辺signedness依存・signed `%d` 表示を実装。iverilogとのbit-exact比較テスト`tests/integration/cases/signed/`で検証済み。既知の残課題: 式の最終signednessは子ExprIdからの単純な機械的伝搬（IEEE 4.5.1のcontext-determined規則の一部簡略化）、`width.rs`自体は未着手のまま |
-| A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | aval のみで判定するため X→1 の posedge を検出できない（IEEE 1364 では 0→X、X→1 も posedge）。reg 初期値が X のためリセット系で実害が出やすい |
-| A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | monitor リージョンがなく値変化時の再表示なし |
-| A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | `#0` が future ヒープ（同時刻）経由のため NBA 適用の後に再開される。IEEE の inactive→NBA 順と逆 |
+| A2 | エッジ検出が IEEE 非準拠 | `sim/src/interp.rs` `trigger_sensitivity` | **対応済み（2026-07-14）**。aval/bval 両プレーンから `{0,1,X,Z}` を分類し、IEEE 表（posedge: `0→1`/`0→X`/`X→1`、negedge: `1→0`/`1→X`/`X→0`、Z は edge 判定上 X 相当）で判定するよう修正。iverilogとのbit-exact比較テスト`tests/integration/cases/edge_x/`で検証済み |
+| A3 | `$monitor` が `$display` と同一動作 | `sim/src/interp.rs` | **対応済み（2026-07-14）**。`$monitor`はシミュレーション全体で1つだけアクティブ（IEEE 1364通り、新規呼び出しが前の登録を置き換える）とし、`monitor_args`/`monitor_last`で登録・前回印字値を保持。呼び出し時は登録のみ行い、実際の印字は新設のmonitorリージョン（`flush_monitor`、active/inactive/NBA完全収束後・時刻前進前に1回）で、前回印字時から値が変化していた場合（初回登録直後を含む）のみ行うよう修正。iverilogとのbit-exact比較テスト`tests/integration/cases/monitor/`で検証済み |
+| A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | **対応済み（2026-07-14）**。`run()`のメインループにinactiveリージョンを新設し、同時刻(`#0`)で待っているプロセスをNBA適用より前に再開するよう修正（IEEE 1364のactive→inactive→NBA順に準拠）。iverilogとのbit-exact比較テスト`tests/integration/cases/delay0/`で検証済み |
 | A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
 | A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
 | A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
 | A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
+| A10 | 二項演算子の結合順序が壊れている（重大） | `frontend/src/lower.rs` `lower_expression`、根本原因は `sv-parser` クレート側 | **対応済み（2026-07-29）**。`sv_parser::Expression::Binary` が返す右結合の木を `lower_expression` 側で修正。`flatten_binary_chain` で木を in-order にフラットなオペランド列・演算子列へ展開し、`build_binop_tree` で IEEE 1364-2001 Table 5-4 の優先順位表（`binop_precedence`）に基づく演算子優先順位法（shunting-yard、全演算子左結合）で正しい二分木を再構築するよう変更。回帰テスト `tests/integration/cases/binop_precedence/` を追加し、iverilog実出力とbit-exact一致を確認 |
+| A11 | `localparam`宣言がモジュール本体途中にあると名前解決されない | `frontend/src/lower.rs`（`parse_simple_const_expr`）、`elab/src/elaborate.rs`（param登録パス） | **対応済み（2026-07-29、`cpu_state_*`パターンの範囲。2026-07-30に複雑な定数式の残課題も解消）**。宣言位置は無関係で、実際の原因は2つ: (1) `lower_localparam`が値をraw text経由の簡易パーサ`parse_simple_const_expr`で解釈しており、`8'b01000000`のようなサイズ付き基数リテラルを認識できず識別子（`Expr::Net`）として誤扱いしていた（elabで`UnresolvedName`エラーとなり黙って登録スキップ）。(2) 修正後も、名前解決されたparam/localparamの参照が`lower_expr`の`HirExpr::Net`アームで常に32bit固定（`LogicVal::new(32, val, 0)`）で復元されていたため、8bit `state`レジスタとのcase比較（`case_eq`は幅不一致だと即ZERO）が常にdefault分岐に落ちていた。`scope_params`にvalとwidthのタプルを保持し、宣言側HIR式（`Const`/`SignedConst`直書きの場合のみ）から幅を推定する`hir_const_width`を追加して解決。回帰テスト`tests/integration/cases/localparam_midmodule/`（picorv32.vと同じ「alwaysブロックの後でone-hot状態localparamを宣言→case文で比較」パターン）でiverilogとのbit-exact一致を確認。**2026-07-30追加対応**: `localparam integer irqregs_offset = ENABLE_REGS_16_31 ? 32 : 16;`等、三項演算子・`\|\|`・`*`・括弧を含む複雑な定数式が`parse_simple_const_expr`で解釈できず`unresolved net/param`になっていた残課題（`WITH_PCPI`/`regfile_size`/`regindex_bits`/`irqregs_offset`）を解消。原因は専用パーサの不在ではなく配線漏れ——localparam/parameter宣言値は文法上すでにsv-parserの`ConstantParamExpression`としてパースされており、genvar/generate文脈向けに実装済みの`lower_constant_expr`/`lower_constant_primary`（Bin/Un/Ternary対応）が既に存在していたが、localparam宣言・parameterポートのデフォルト値・インスタンスのparam override計5箇所がこれを使わず`parse_simple_const_expr`に丸投げしていた。`lower_constant_param_expr`/`lower_param_expr`等のブリッジ関数を新設して5箇所を配線し直し、`lower_constant_expr`のCE::BinaryアームにA10と同型の優先順位バグがあったためこちらも`flatten_constant_binary_chain`で修正、elabの`eval_const_hir_with`に`LogAnd`/`LogOr`/`CaseEq`/`CaseNe`/`BitNand`/`BitNor`/`BitXnor`の畳み込みを追加。回帰テスト`tests/integration/cases/localparam_const_expr/`でiverilogとのbit-exact一致を確認。picorv32.vスモークチェックで`unresolved net/param`警告が0件になったことを確認（パース8モジュール成功・elaboration完了）。**未解決の残課題**: elaboration完了後のフルシミュレーションが`--max-time`指定でも停止せずハングする（A10・A11とは独立の未特定原因、次の課題） |
+| A12 | `always @*` が完了後にイベント待ちへ戻らず無限ビジーループする（重大） | `sim/src/interp.rs`（`exec_proc`の`StepResult::Done`ハンドリング） | **対応済み（2026-08-03）**。`always`プロセス完了時のハンドリングが`Sensitivity::Items`かつ非空の場合のみ`event_waiters`に登録してreturnしており、`Sensitivity::All`（`always @*`）はどの分岐にもマッチせず素通りして本体を無条件に即再実行し続ける完全なビジーループになっていた（トリガー条件を一切見ない）。picorv32.vのようにcombinational `always @*`を含む設計で確実にハングする直接原因だった。デバッグ計装（`eval_expr`呼び出し数カウンタ等）で実際に無限ビジーループしていることを確認。修正は2段構え: (1) elaboration時（`elab/src/elaborate.rs`の`collect_sensitivity_stmt`/`collect_sensitivity_expr`/`collect_sensitivity_lvalue`を新設）に`always @*`本体のStmt/Expr木を再帰走査し、右辺値として読み出されるネット集合を収集して`Sensitivity::Items`へ変換（自動センシティビティリスト化、収集不能時は`Sensitivity::All`へフォールバック）。(2) `exec_proc`側も`Sensitivity::All`の場合（フォールバック時）に必ず`event_waiters`へ登録してreturnするよう修正（元のバグの最小修正）。付随して`eval_conts`の変化判定をRHS評価値の幅ではなくLHS書き込み後の実値比較に変更（幅差による見せかけの非収束を防止）。独立した既存バグだった`--max-time`未配線（`cli/src/cli.rs`の`max_time`フィールドがどこにも使われていなかった）も同時に修正し安全弁として機能させた。回帰テスト`tests/integration/cases/always_star/`（iverilog実出力とbit-exact一致確認済み）・`tests/integration/cases/max_time/`を追加。picorv32.vスモークチェックが0.55秒で正常終了することを確認（従来はtimeoutまでハングしていた） |
+| A13 | 論理演算子（`&&`/`||`）・if/while/三項演算子の条件判定がIEEE短絡規則に非準拠 | `mir/src/logicval.rs`、`sim/src/interp.rs` | **対応済み（2026-08-13）**。`LogicVal::is_true`を追加し、既知の1ビットを含む値を真として判定するよう修正。`log_and`は全ゼロ判定をX/Z判定より先に、`log_or`は既知1判定を同様に先に行うよう修正した。スケジューラ・関数/タスク同期実行のif/whileと三項演算子も同じ規則で評価する。`1'b1 || 1'bx`、`1'b0 && 1'bx`、Xを含む真条件、reset形状を保護する回帰テストを追加し、iverilogとのbit-exact比較を確認 |
+| A14 | ANSI ポートのカンマ区切り宣言（`input clk, resetn,`）で2番目以降のポート方向がIEEE非準拠（重大） | `frontend/src/lower.rs`（`lower_ansi_ports`/`lower_ansi_port`/`lower_ansi_port_net`/`lower_ansi_port_variable`） | **対応済み（2026-08-15）**。IEEE 1364-2001 12.3.3ではヘッダ（方向/型）省略時は直前のポート宣言と同じ方向を継承すべきところ、`lower_ansi_port_variable`がヘッダ省略時に無条件で`PortDirection::Output`へフォールバックしていた（`lower_ansi_port_net`側もヘッダ省略時`PortDirection::Input`固定で、先頭ポート以外では本来誤り）。sv-parserは`input clk, resetn,`の2番目`resetn`を`AnsiPortDeclaration::Variable`（ヘッダなし）として返すため、`resetn`が誤ってOutput（`NetKind::Reg`）として登録され、elab側のインスタンス接続ロジックが向きを逆に解釈し、親から子へ`resetn`の値が一切伝搬しない（子側は初期値Xのまま更新されない）不具合になっていた。`lower_ansi_ports`に`prev_dir`（直前確定方向、先頭はIEEE既定のInput）を追加し、各`lower_ansi_port*`関数のヘッダ省略時フォールバックを継承方向に変更。回帰テスト`tests/integration/cases/ansi_port_comma_direction/`でiverilogとのbit-exact一致を確認。picorv32.v（`input clk, resetn,`を使用）で`dut.resetn`が正しく0→1遷移するようになったことをVCDで確認したが、`mem_do_prefetch`が立たない別の未特定原因により依然`picorv32_smoke`はPASSまで到達しない（推奨着手順11番、継続課題） |
+| A15 | ネット宣言時の初期化式（`wire foo = expr;`）が黙って捨てられる（重大） | `frontend/src/lower.rs`（`lower_net_decl`） | **対応済み（2026-08-15）**。`wire foo = expr;`という宣言と連続代入を1文で書く一般的なイディオム（`assign foo = expr;`と別文にする書き方とは異なる`NetDeclAssignment`構文）で、`lower_net_decl`が`unwrap_all_net_identifiers`でネット名だけを抜き出し、初期化式（sv-parserの`NetDeclAssignment.nodes.2: Option<(Symbol, Expression)>`）を一切見ていなかったため、該当ネットが誰からも駆動されないまま（IEEE既定のZに永久に張り付く）になっていた。picorv32.vはこのイディオムを多用しており（`wire mem_done = resetn && (...) && (...);`等数十箇所）、特に`mem_done`がZに張り付くことで命令フェッチ完了パルス`decoder_trigger`が一切発火しない、picorv32スモークテストのタイムアウトの一因になっていた。`lower_net_decl`の戻り値を`(Vec<NetDecl>, Vec<ContinuousAssign>)`に変更し、初期化式があれば`ContinuousAssign`を生成、呼び出し元（モジュール直下・generate内・関数/タスク内ローカル宣言の3経路）全てで`assigns`に合流させるよう修正。回帰テスト`tests/integration/cases/net_decl_assignment/`（単一代入・複数代入混在）でiverilogとのbit-exact一致を確認。修正によりpicorv32.vの`mem_done`はZから抜け出したが、picorv32スモークテストは依然PASS未到達（別原因が残っている、下記A16参照） |
+| A16 | 単項リダクション演算子（`&`/`\|`/`^`/`~&`/`~\|`/`~^`）が全て`~`（ビット反転）として誤ってlowingされる（最重要） | `frontend/src/lower.rs`（`lower_unary_op`）、`hir/src/design.rs`（`UnOp`）、`elab/src/elaborate.rs`（`lower_unop`/`eval_const_hir_with`） | **対応済み（2026-08-15）**。`lower_unary_op`が`+`/`-`/`!`/`~`のみ明示的に扱い、それ以外（単項の`&`/`\|`/`^`/`~&`/`~\|`/`~^`＝リダクション演算子全種）は全て`_ => Ok(UnOp::BitNot)`のcatch-allで`UnOp::BitNot`に丸め込まれていた。`mir::ir::UnOp`には`RedAnd`/`RedNand`/`RedOr`/`RedNor`/`RedXor`/`RedXnor`が既に定義され`logicval.rs`の`reduce_and`等の実装も正しかったが、frontendから一度も生成されず死んでいたため、プロジェクト全体でリダクション演算子が一度も正しく動作していなかった（最小再現`reg [1:0] x; wire o=\|x; wire a=&x;`で確認）。`lower_unary_op`が実際のトークン文字列を判定して対応する`UnOp::Red*`を返すよう修正（未知の演算子は無言フォールバックせず`UnsupportedConstruct`エラーに変更）。あわせて`hir::UnOp`にも同6バリアントを追加し、`elab::lower_unop`（HIR→MIR変換）と`elab::eval_const_hir_with`（コンパイル時定数畳み込み、genvar/localparam文脈で使用）にリダクション演算子の評価を追加。回帰テスト`tests/integration/cases/reduction_ops/`（2bit/4bit、AND/NAND/OR/NOR/XOR/XNOR全6種、`~^`と`^~`両表記）でiverilogとのbit-exact一致を確認。picorv32.vスモークは本修正単独では依然PASS未到達（A15の未統合との組み合わせが必要、A15マージ後に再確認予定） |
+| A17 | `case`文の比較（`case_eq`）がセレクタとcase項の幅が完全一致しないと常に不一致と判定する（最重要） | `mir/src/logicval.rs`（`case_eq`） | **対応済み（2026-08-15）**。IEEE 1364-2001 9.5節では`case`文の比較は`===`と同じルールでビット単位比較するが、幅の異なるオペランドは狭い方をゼロ拡張して広い方に合わせてから比較するのが正しい（通常の`==`用`eq`関数は`w = self.width().max(rhs.width())`で正しくこれを行っている）。ところが`case_eq`は`if self.width() != rhs.width() { return LogicVal::ZERO; }`という早期returnがあり、幅が完全一致しない限り無条件で不一致と判定していた。`reg [1:0] st; case (st) 0: ...; 1: ...; endcase`のように、セレクタが2bitでcase項がサイズ指定なし10進リテラル（既定32bit幅）という非常に一般的な書き方で、一度もcase項がマッチせず`default`にも該当なしで素通りする、という重大な不具合になっていた。picorv32.vのメモリアクセスFSM（`case (mem_state) 0: ...; 1: ...; 2: ...; 3: ...; endcase`、`mem_state`は2bit）がまさにこのパターンで、A14・A15・A16を全て適用した状態でもFSMが`mem_state=0`から一切進行せずpicorv32スモークテストがタイムアウトし続ける直接原因になっていた。`case_eq`を`eq`と同じ`w = self.width().max(rhs.width())`方式に修正（X/Z平面の厳密一致判定ロジック自体は変更なし）。回帰テスト`tests/integration/cases/case_width_mismatch/`（2bitセレクタ対32bit既定幅リテラルのcase文、`===`/`!==`の幅不一致比較）でiverilogとのbit-exact一致を確認。修正によりpicorv32.vの`mem_state`が`00`から`01`へ進行するようになったことをVCDで確認（推奨着手順11番、継続。A15・A16・A17を統合した状態でのpicorv32.vフル動作確認は次のステップ）。調査中に`casez`/`casex`が同じ`case_eq`を呼んでおりワイルドカード（Z/X）マッチが未実装の疑いを新たに確認したが、今回は対象外（F節の既知課題を参照、次の課題候補） |
+| A18 | 二項演算子チェーン末尾の裸の三項演算子が優先順位を誤る（`a \|\| b ? c : d` が `a \|\| (b ? c : d)` になる、最重要） | `frontend/src/lower.rs`（`flatten_binary_chain`/`flatten_constant_binary_chain`） | **対応済み（2026-08-15）**。IEEE 1364-2001 Table 5-4では`?:`は代入を除く全演算子中最も優先順位が低く、`a \|\| b ? c : d`は`(a \|\| b) ? c : d`と解釈されるべきところ、sv-parserが`a \|\| b ? c : d`を`E::Binary(a, "\|\|", E::ConditionalExpression(b,c,d))`という形（三項演算子全体が丸ごと`\|\|`の右オペランドとしてネスト）で返すため、A10で導入した`flatten_binary_chain`（`E::Binary`以外を不透明な1オペランドとして扱う設計）が三項演算子全体を「ただのオペランド」として扱ってしまい、優先順位が逆転していた。picorv32.vの`mem_state <= mem_do_rinst \|\| mem_do_rdata ? 0 : 3;`（メモリアクセスFSMのstate 1→0/3遷移）がこのパターンに該当し、A14・A15・A16・A17を全て適用した状態でもFSMがstate 1から一切進行しない直接原因になっていた。`flatten_binary_chain`をチェーン末尾に裸の`E::ConditionalExpression`が現れた場合、条件部を最後のオペランドとしてチェーンへ合流させ、then/else部を戻り値`Option<(Expr,Expr)>`として呼び出し元へ伝播させる方式に変更（呼び出し元`lower_expression`が最終的な二項演算子木を三項演算子の条件として包む）。同型のバグを抱えていた定数式版`flatten_constant_binary_chain`（`CE::Ternary`、localparam/genvar文脈）にも同じ修正を適用。回帰テスト`tests/integration/cases/ternary_binop_precedence/`（`\|\|`・`&&`・`+`/`==`との組み合わせ、localparam定数式での`?:`優先順位）でiverilogとのbit-exact一致を確認。A15〜A18を統合した状態でのpicorv32.vフル動作確認は次のステップ（推奨着手順11番、継続） |
+| A19 | `if`/`else if`/`else if`.../`else` 多段チェーンで中間の `else if` 節が全て無言で消える（最重要・IEEE 1364-2001 9.4節違反） | `frontend/src/lower.rs`（`lower_conditional`） | **2026-09-03 原因特定（未修正）**。A14〜A18を全て統合した状態で`picorv32_smoke`を再実行しても依然タイムアウト（`--max-time`到達で停止、PASS未到達）。VCD波形と`interp.rs`への一時的なデバッグ計装（調査後revert済み）で`cpu_state`が起動直後の`cpu_state_fetch`から一度も遷移しないことを確認し、`decoder_trigger`が正しく`1`になっているにもかかわらずFSM本体の`if (decoder_trigger) begin ... cpu_state <= cpu_state_ld_rs1; end`（picorv32.v 1557行目、`else if (ENABLE_IRQ && ...) ... else if (ENABLE_IRQ && ...) ... else if (decoder_trigger) ...`という3段の`else if`チェーンの最終節）が一度も評価されていないことをif文評価ログで確認。最小再現（`if(a) out=1; else if(b) out=2; else if(c) out=3;`、a=0,b=0,c=1）で`out`がXのまま（`else if(c)`が実行されない）を確認し再現成功。原因は`frontend/src/lower.rs`の`lower_conditional`関数: `sv_parser::ConditionalStatement.nodes`は`(Option<UniquePriority>, "if", Paren<CondPredicate>, StatementOrNull, Vec<(else_kw, if_kw, Paren<CondPredicate>, StatementOrNull)>, Option<(else_kw, StatementOrNull)>)`で、`nodes.4`が中間の全`else if`節（`Vec`）を保持しているにもかかわらず、現在の実装は`nodes.2`（先頭if条件）・`nodes.3`（先頭then）・`nodes.5`（末尾else、あれば）しか参照しておらず、`nodes.4`を完全に無視している。結果: 末尾`else`がない場合は`else if`が1個以上あっても`if`が偽なら何もしない（中間分岐が消滅）、末尾`else`がある場合は`else if`の条件を一切評価せず先頭`if`が偽なら即座に末尾`else`へ飛ぶ（`case4`実験で確認: a=0,b=0,c=1でも`else`節の値になった）。`case`文中心の設計のため`if/else if`が2段以上かつ実際に中間分岐が踏まれるテストケースがこれまで存在せず見逃されていたと推定。**未修正**（実装はCodexへ委任予定）。修正方針: `cs.nodes.4`の各`(else_kw, if_kw, paren_cond, stmt)`を末尾から`Stmt::If`として畳み込み、`cs.nodes.5`（末尾else、あれば）を初期値としてfoldし、先頭の`if`はその結果を`else`節として包む（`A10`/`A18`の二項演算子チェーン畳み込みと同型のfold処理だが対象は文レベルの`if`チェーン）。回帰テストは`tests/integration/cases/`に新規ケース追加（2段以上の`else if`が実際に中間分岐へ到達するパターン、iverilog比較込み）を推奨 |
+| A20 | メモリ配列（`reg [W:0] arr[...]`）への書き込みがsensitivityを一切起動しない（最重要） | `sim/src/interp.rs`（`trigger_sensitivity`）、`elab/src/elaborate.rs`（`collect_sensitivity_expr`/`_stmt`/`_lvalue`、`mem_sensitivity`構築）、`mir/src/ir.rs`（`ElaboratedDesign::mem_sensitivity`） | **対応済み（2026-09-13）**。picorv32.vのレジスタファイル`cpuregs`はMIR上`MemId`/`MemInfo`で表現され、読み出しは`Expr::MemRead`、書き込みは`LValue::MemWrite`となる。2つの独立した欠陥が組み合わさっていた: (1) `trigger_sensitivity`が`LValue::MemWrite(_, _) => return`で、`any_change`判定・`event_waiters`起床（`Sensitivity::All => any_change`含む）・`cont_sensitivity`のdirty化に到達する前に即returnしており、メモリ書き込みが一切のプロセス再起動・連続代入再評価をトリガーしなかった。(2) `collect_sensitivity_expr`の`Expr::MemRead`アームがindex式の依存ネットだけを収集してその結果（多くは`true`）をそのまま返しており、「メモリ読み出しは解決済み」扱いになっていた（A12で確立済みの「収集不能時は`Sensitivity::All`へフォールバック」の仕組みが発動しない）。具体的発現: `cpuregs[latched_rd] <= cpuregs_wrdata;`（LUI命令の書き戻し、NBA）が着地しても、`cpuregs_rs1 = decoded_rs1 ? cpuregs[decoded_rs1] : 0;`という別の`always @*`ブロックが再評価されず、`reg_op1`が古い値をロードし続ける。修正: `Expr::MemRead`アームをindexのネットは収集しつつ`false`（未解決）を返すよう分離、`collect_sensitivity_expr`/`_stmt`/`_lvalue`に`mems: &mut HashSet<MemId>`引数を追加して`elaborate()`内で`cont_sensitivity`と対になる`mem_sensitivity`（mem_id.0 → cont_id一覧）を構築、`trigger_sensitivity`で`LValue::MemWrite`を`any_change`判定・`mem_sensitivity`経由のcont dirty化・`Sensitivity::All`waiter起床の対象に含めるよう変更（`Sensitivity::Items`はnet_idベースなのでメモリ書き込みでは対象外）。回帰テスト`tests/integration/cases/mem_write_sensitivity/`（固定indexでメモリを読む`always @*`が、別プロセスのNBA書き込み後に正しく再評価されることを確認、iverilogとのbit-exact一致確認済み）を追加。`cargo test --workspace`（29テスト）・fmt・clippy全通過、`samples/counter4`・`samples/fifo_sync`回帰なし確認。**picorv32スモークテストは本修正だけではPASSに至らず**: 調査の結果、`lui x4, 0x10000`命令自体の書き戻し値が0になる（A20が対象とした「別プロセスが古い値を読む」問題より手前の段階で、そもそも書き込まれる値が誤り）という独立した新規バグを発見。詳細はA21参照 |
+| A21 | シフト演算子の左辺がself-determined幅で評価される（IEEE 1364-2001 5.4.1節 Table 5-5違反） | `mir/src/ir.rs`（`ElaboratedDesign::expr_shift_width`）、`elab/src/elaborate.rs`（文脈幅後置伝播）、`sim/src/interp.rs`（シフト前左辺拡張） | **対応済み（2026-09-13）**。`LogicVal::shl`/`shr`が左オペランド自身の幅を結果幅としてマスクする一方、シフトの左辺は代入文脈幅で評価すべきだった。picorv32.vの`decoded_imm <= mem_rdata_q[31:12] << 12;`では20bitのpart-selectを20bitのままシフトするため上位ビットが消え、`lui x4, 0x10000`が本来の`0x10000000`ではなく0を書き込んでいた。`ElaboratedDesign`にexprごとの`expr_shift_width`を追加し、elaboration完了後にblocking/NBA/連続代入のLHS幅を起点として、context-determinedな算術・ビット演算・単項演算・三項演算子を下向きにたどり、4種のシフト演算子の左辺文脈幅だけを記録する後置パスを実装。実行時は記録幅へ左辺を符号拡張/ゼロ拡張して既存の`LogicVal::shl`/`shr`/`ashl`/`ashr`へ渡すため、logicval側の変更は不要。回帰テスト`tests/integration/cases/shift_context_width/`でblocking/NBA/連続代入の全経路についてiverilogとbit-exact一致（全て`10000000`）を確認。`eval_const_hir_with`は生の`u64`シフトを行い自己決定幅のマスクを行わないため、本バグの影響なしと確認済みで変更していない。picorv32スモークはrverilog実行・iverilog比較の両方で`RESULT=42`と`PASS: picorv32 executed addi/add/lui/sw correctly`を確認したため、両テストの`#[ignore]`を解除した。 |
 
 ### B. 未対応の言語機能
 
-- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: `defparam`、`specify`、UDP は
-  `lower.rs` の `_ => {}` catch-all で無言スキップされる。最低限 `UnsupportedConstruct` エラーに
-  すべき
-- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子、
-  式中の関数呼び出し
+- **サイレントスキップ（診断なしで捨てられる — 最も危険）**: **対応済み（2026-08-12）**。
+  `defparam`（`process_mogi`の`MOGI::Parameter`）、`specify`ブロック（`lower_nonport_items`・
+  `lower_module_items`の`NonPortModuleItem::SpecifyBlock`、モジュール本体・generate外の2箇所）、
+  UDPインスタンス化（`process_mogi`の`MOGI::Udp`）が`lower.rs`の`_ => {}` catch-allで無言
+  スキップされていた計4箇所を`FrontendError::UnsupportedConstruct`エラーに置換。回帰テスト
+  `crates/cli/tests/unsupported_construct.rs`（defparam/specify/UDP各1件、`parse_files`が
+  `Err(UnsupportedConstruct)`を返しメッセージに該当語を含むことを確認）を新規追加し、プロジェクト
+  初のサブセット外構文の負パステストとした。**未対応のまま残した範囲**（意図的にスコープ外）:
+  generate block内でのdefparam/UDP（`process_generate_mogi`は`()`を返す設計で子呼び出しの
+  エラーも既存で無視される別問題）、トップレベルの`primitive`宣言自体の無言スキップ（UDP
+  インスタンス化のエラー化で実質カバー）、ゲートプリミティブの`switch`/`cmos`/`pass`/
+  `pullup`/`pulldown`（既知の別課題、コード内コメントで明記済み）
+- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子
 - `real`/`realtime` が型検査なしで 1bit reg として解釈される
 - `disable` は同一プロセス内のみ対応、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
 
@@ -355,40 +375,86 @@ iverilog 出力比較 CI 導入済み）。
 
 ### D. 設計と実装の乖離・死コード
 
-- `sim/src/scheduler.rs` が TODO スタブのまま死コード。実イベントループは `Interpreter::run` に
-  別実装されており、未使用の `future: VecDeque` は時刻順ソートされないバグも内包。
-  削除するか interp ループを移設して一本化する
-- `sim/src/systask.rs` も全関数 TODO スタブで `interp.rs::exec_syscall` と重複（`lib.rs` で
-  pub use されたまま）
-- 連続代入が計画の「NetId→プロセス逆引きテーブル」方式でなく総当たり固定点ループ
+- ~~`sim/src/scheduler.rs`・`sim/src/systask.rs` が TODO スタブのまま死コード~~
+  **対応済み（2026-08-12）**。両ファイルとも `interp.rs` に実装が重複しており
+  ワークスペース全体を検索してもこの2ファイル以外から一切参照されていなかったため削除。
+  `lib.rs` から該当 `pub mod`/`pub use` を除去
+- ~~連続代入が計画の「NetId→プロセス逆引きテーブル」方式でなく総当たり固定点ループ
   （`interp.rs` `eval_conts`、最大 200 回打ち切り）。規模で性能劣化し、発振回路で黙って誤結果
-  （最低限、打ち切り時に警告を出す）
+  （最低限、打ち切り時に警告を出す）~~ **対応済み（2026-08-12）**。`always @*` の自動
+  センシティビティリスト化（A12）と同じ `collect_sensitivity_expr` を再利用し、
+  `ElaboratedDesign` に `cont_sensitivity: IndexMap<u32, Vec<u32>>`（net.0 → \[cont_id\]、
+  cont_idは`design.conts`のインデックス）を新設。`elaborate()` で各`ContAssign`のRHS式が
+  読み出すネット集合を収集して構築。sim側は `Interpreter` に `cont_dirty: VecDeque<u32>` +
+  `cont_queued: Vec<bool>`（重複enqueue防止）のdirtyワークリストを追加し、
+  `trigger_sensitivity` が対象ネットの実変化（`any_change`）を検知した際に該当contを
+  dirty化するよう変更。`eval_conts` は全conts総当たりではなくdirtyワークリストのみを
+  drainする実装に置換。無限発振（組み合わせループ、例: `assign a = ~a;`）検出のため
+  pop回数上限（`conts.len() * 64`、最低1000）を設け、超過時は`eprintln!`で警告を出して
+  打ち切るよう変更（従来は無警告で200回スイープ後に黙って打ち切っていた）。回帰テスト
+  `tests/integration/cases/cont_loop/`（組み合わせループがハングせず警告を出しつつ
+  `$finish`まで到達することを確認、iverilog比較は対象外—未定義動作に近いため）を追加。
+  `cargo test --workspace`（39テスト）全通過、`samples/counter4`・`samples/fifo_sync`・
+  picorv32.vスモークチェック（0.57秒、A12時点の0.55秒から性能劣化なし）で回帰なしを確認
 - `elab/src/width.rs` が実質スタブ（14 行）。IEEE の context-determined 幅推論が体系実装されず
   幅処理が elaborate.rs に分散。A1（signed 対応）の障害になる
 
 ### E. テスト・CI
 
 - iverilog 出力比較 CI 導入済み（`.github/workflows/ci.yml`、`crates/cli/tests/iverilog_compare.rs`）
-- fmt/clippy ジョブは未導入
+- ~~fmt/clippy ジョブは未導入~~ **対応済み（2026-08-13）**。`fmt` ジョブで
+  `cargo fmt --check`、`clippy` ジョブで `cargo clippy --workspace --all-targets -- -D warnings`
+  を実行するよう追加。既存コードベース全体に `cargo fmt` を適用し、clippy 指摘を解消
 - 統合テストは 8 ケース（counter4/fifo_sync/disable_fork/format_xz/func_task/gates/generate/
-  readmem_random）。サブセット外構文のエラーを確認する負パステストはまだない
+  readmem_random）。`unsupported_construct.rs` でdefparam/specify/UDPに加え、while/repeat/
+  forever・`**` 演算子の明示エラーを回帰テスト化。式中の関数呼び出しは実装どおり受理される
+  ことも確認した
 
 ### F. 軽微
 
 - `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
 - `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
 - `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
-- 連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）
+- ~~連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）~~
+  **対応済み（2026-07-16）**。$signed 対応作業（2026-07-12 節参照）の Task 2d として修正
 - リポジトリの CLAUDE.md が空、`tests/rtl/fifo_counter.v` が未使用
 
 ### 推奨着手順
 
 1. ~~A1: signed 対応~~ 完了（2026-07-09）
-2. A2: エッジ検出の IEEE 準拠化
-3. A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正（イベントループ再構成として一括）
-4. D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理はどのタイミングでも安価）
-5. B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）
-6. E: fmt/clippy ジョブの CI 追加、負パステストの拡充
+2. ~~A2: エッジ検出の IEEE 準拠化~~ 完了（2026-07-14）
+3. ~~A3・A4: monitor リージョン実装 + `#0`（inactive）順序修正~~ 完了（2026-07-14、イベントループ再構成として一括対応）
+4. ~~indexed part-select (`+:`/`-:`) 対応~~ 完了（2026-07-23、picorv32.v スモークチェックの
+   ブロッカー解消のため）
+5. ~~A10: 二項演算子の結合順序バグ~~ 完了（2026-07-29）
+6. ~~A11: モジュール中盤の `localparam` 名前解決~~ 完了（2026-07-29に`cpu_state_*`パターンの範囲、
+   2026-07-30に三項演算子・`||`・`*`・括弧を含む複雑な定数式（`WITH_PCPI`等）の残課題も解消）
+7. ~~picorv32.v フルシミュレーションのハング原因調査~~ 完了（2026-08-03、A12参照）
+8. ~~D: 連続代入の sensitivity 駆動化（scheduler.rs/systask.rs の死コード整理含む）~~
+   完了（2026-08-12、D節参照）
+9. ~~B: サイレントスキップの診断化（`_ => {}` を `UnsupportedConstruct` エラーに置換）~~
+   完了（2026-08-12、defparam/specify/UDP の計4箇所）
+10. ~~E: fmt/clippy ジョブの CI 追加、負パステストの拡充~~ 完了（2026-08-13、fmt/clippy
+    CIジョブ追加、全体fmt・clippy警告解消、負パステスト拡充）
+11. picorv32.v にテストベンチ・クロック生成を追加した上でのフル命令実行シミュレーション確認
+    （A13修正とスモークテスト`tests/integration/cases/picorv32_smoke/`は追加済みだが、現時点の
+    rverilogは不正命令トラップへ入りtimeoutするため`RESULT=42`の確認は未達成。テストは
+    `cargo test --workspace`を赤くしないよう`#[ignore]`付きで登録済み、継続調査中）。
+    **2026-08-15**: A14（ANSIポートのカンマ区切り方向継承バグ）を修正し`dut.resetn`の
+    伝搬は解消したが、`mem_do_prefetch`が立たず最初の命令フェッチが発行されない別の
+    未特定原因が残っており、依然PASS未到達。
+    **2026-09-03**: A15〜A18を`feat/m1-milestone`へ統合済みの状態で再実行しても依然
+    タイムアウト。原因調査の結果A19（`if`/`else if`チェーンの中間節が消える、最重要）を
+    新規発見（詳細はA節参照）。picorv32.vのFSMが`decoder_trigger`を正しく`1`にしても
+    3段目の`else if (decoder_trigger)`が一度も評価されず`cpu_state`が`cpu_state_fetch`
+    から永久に遷移しないことが直接原因。修正はCodexへ委任予定、継続
+    **2026-09-13**: A19マージ済み状態で再実行しても依然TIMEOUT。フォーク（Explore→Plan
+    サブエージェント2段階）による実測ベース調査でA20（メモリ配列書き込みがsensitivityを
+    起動しない、最重要）を新規発見・Codexへ委任し修正・独立検証済み（詳細はA節参照）。
+    A20修正後に発見したA21（シフト左辺のcontext-determined幅評価漏れ）も修正済み。
+    `lui x4, 0x10000`の書き戻し値が`0x10000000`になることを回帰ケースで確認し、
+    picorv32スモークはrverilog実行・iverilog比較とも`RESULT=42`でPASSしたため、
+    両テストの`#[ignore]`を解除済み。
 
 補足: A1 で `width.rs` 自体の context-determined 幅推論再設計は見送った（signedness 伝搬のみ
 `ElabCtx.expr_signed` として別経路で実装し、幅計算は既存の elaborate.rs 分散実装のまま）。
@@ -396,3 +462,169 @@ width.rs のスタブ化（D 参照）は依然未解消。
 
 修正前に対応するテストケース（X→1 posedge、`$monitor`、`#0` レース、発振検出）を
 iverilog 比較 CI へ追加してから直すこと（テスト先行）。
+
+## SystemVerilog 準拠度調査（2026-07-10）
+
+コードベース全体（`crates/frontend/src/lower.rs` の SV 構文分岐、`crates/mir/src/ir.rs` の
+`SysTask`/`BinOp`/`Stmt` 列挙、`crates/sim/src/interp.rs` のシステムタスク実装）を実地調査した
+結果。「SystemVerilog 準拠シミュレータ」としての評価であり、本プロジェクトの目標である
+Verilog-2001 サブセットとしての評価とは分けて記録する。
+
+### 結論
+
+このプロジェクトは **SystemVerilog(IEEE 1800) 準拠を目標にしていない**（Context 節に明記の
+通り目標は Verilog-2001 サブセット）。SV 固有機能はほぼ全て未対応で、SV 準拠度としては
+5% 未満。パーサに `sv-parser` を使うため SV 構文の**構文解析自体は通る**ことがあるが、
+frontend lowering 段でサブセット外として弾かれる・無言スキップされる・`reg` に縮退する、
+のいずれかになる。Verilog-2001 サブセットとしては M1+M2 で主要機能を実装済みで実用域にある。
+
+### SystemVerilog 固有機能の対応状況
+
+| 機能 | 状態 | 根拠 |
+|---|---|---|
+| `logic`/`bit` 型 | ❌ 非対応 | 専用分岐なし。`integer` 判定（`has_integer_type`）以外は `reg` 相当に縮退 |
+| `always_ff`/`always_comb`/`always_latch` | ❌ 非対応 | `lower_always` は `always @(...)` のみ想定 |
+| `typedef`/`struct`/`union`/`enum` | ❌ 非対応 | lowering に分岐なし |
+| `interface`/`modport`/`class`/`package`/`import` | ❌ 非対応 | Context 節で明示的に対象外 |
+| assertion（`assert`/`property`/`sequence`） | ❌ 非対応 | 同上 |
+| `unique`/`priority` case、`final` block | ❌ 非対応 | 分岐なし |
+| `$signed`/`$unsigned`/`$stop`/`$strobe`/ファイル I/O | ❌ 非対応 | `SysTask` 列挙に存在せず |
+
+実装済みシステムタスクは `SysTask` 列挙 (`crates/mir/src/ir.rs`) と
+`crates/sim/src/interp.rs::exec_syscall` の実装ベースで
+`$display`/`$write`/`$monitor`（実体は `$display` と同一動作）/`$finish`/`$time`/
+`$dumpfile`/`$dumpvars`/`$readmemh`/`$readmemb`/`$random`/`$clog2`（elaboration 時定数畳込みのみ）
+の11個のみ。
+
+### Verilog-2001 サブセットとしての対応状況（本来の評価軸）
+
+対応済み: `module`/ANSI・non-ANSI ポート、`parameter`/`localparam`、`wire`/`reg`/`integer`、
+`assign`/`initial`/`always`、`if`/`case`/`casez`/`casex`、`for` ループ、階層インスタンス、
+主要演算子群、signed 演算、`function`/`task`、`generate`/`genvar`、ゲートプリミティブ、
+`disable`/`fork`-`join`（いずれも M1/M2 で実装済み、上記マイルストーン節参照）。
+
+Verilog-2001 の範囲でも未対応:
+- `while`/`repeat`/`forever`（`for` のみ。`lower_loop_stmt` で `LS::For` 以外は
+  `unsupported("loop statement variant")` として明示エラー）
+- `**`（べき乗）演算子、式中の関数呼び出し
+- `defparam`/`specify`/UDP が `lower.rs` 内の複数箇所の `_ => {}` catch-all で
+  診断なく無言スキップされる（実装課題 B 節と同一問題。最優先で診断化すべき）
+
+### 推奨
+
+SV 対応そのものを追うより、実装課題節の推奨着手順（A2 エッジ検出 → A3/A4 monitor・`#0` →
+D 連続代入 sensitivity 化 → B 無言スキップの診断化）を優先する方が費用対効果が高い。
+`logic`/`always_ff` 等の SV 拡張受け入れは M2 残タスク5「SystemVerilog 拡張」として
+ロードマップ上に既に位置づけられており、着手する場合は `width.rs` の
+context-determined 幅推論再設計（実装課題 D 節）とセットで行う必要がある。
+
+## $signed/$unsigned 対応と部分選択/連結バグ修正（2026-07-12開始、2026-07-16 Task2c/2d/3/4完了）
+
+picorv32.v（`$signed` を25箇所使用）のシミュレーションを目標とした対応。
+設計書: `docs/superpowers/specs/2026-07-12-signed-support-design.md`
+実装プラン: `docs/superpowers/plans/2026-07-12-signed-support.md`
+作業ブランチ: `feat/signed-impl`
+
+### 完了（コミット済み）
+
+- **Task 1**: `signed_cast` 統合テストケース追加（`tests/integration/cases/signed_cast/`）。
+  期待値は iverilog 実出力から作成。TDD アンカーとして**意図的に FAIL 状態**
+  （符号拡張の実装完了で全行一致する設計）
+- **Task 2**: `$signed`/`$unsigned` のパイプライン貫通。`SysFuncKind::Signed/Unsigned`
+  追加、frontend パース（引数1個検証）、elab は inner のトップ `Expr` を
+  `alloc_expr_signed` で複製登録（アプローチB: MIR ノード追加なし）
+- **Task 2a**: 連結 lowering のバグ修正。`{imm[11], x}` で全子孫走査により
+  インデックス式が parts に混入していた（`P::Concatenation` を直接の子のみ走査に修正）
+- **Task 2b**: RHS 式の部分選択を実装。`imm[10:5]` が**全ビット値に化けていた**
+  （式コンテキストの `PartSel` lowering が未実装だった）。`ConstantRange` を
+  `HirExpr::PartSel` へ lowering、`+:`/`-:` は明示エラー
+
+### 作業中に発見した既存バグ（$signed とは独立、いずれも黙って誤値になる）
+
+| # | 問題 | 状態 |
+|---|---|---|
+| 1 | RHS 式の部分選択が全ビット値に化ける | ✅ 修正済み（Task 2b） |
+| 2 | 連結 parts にネストした式が混入 | ✅ 修正済み（Task 2a） |
+| 3 | LHS 部分選択 `q[31:20] <= x` が全ビット代入になる | ✅ 修正済み（Task 2c、2026-07-16） |
+| 4 | LHS 連結 `{a,b} <= x` が先頭要素のみ（F 節既知） | ✅ 修正済み（Task 2d、2026-07-16） |
+
+### Task 2c・2d・3・4（2026-07-16 完了）
+
+- **Task 2c**: `frontend/src/lower.rs` の `lower_var_lvalue` に part-select 分岐を追加
+  （`lower_lvalue_part_select` 新設、`lower_part_select`（式版）と同型）。elab の
+  `lower_lvalue`（`HirLValue::PartSelect` アーム）は元々対応済みだったため変更不要
+- **Task 2d**: `hir::LValue`/`mir::LValue` に `Concat(Vec<LValue>)` を追加。
+  `lower_var_lvalue` の `VL::Lvalue` アーム（従来は先頭要素のみ返す既知バグ）を修正し
+  `LValue::Concat` を返すよう変更。elab の `lower_lvalue` に再帰変換アームを追加。
+  sim側は新設 `lvalue_width`（lvalue の合計ビット幅を再帰計算するヘルパー）を軸に、
+  `write_lvalue`（MSBから幅で切り出して各部分へ再帰書き込み）・`get_lval_val`
+  （各部分の値をMSB順に concat）・`trigger_sensitivity`（合計幅で old/new を揃えてから
+  各部分へ再帰分割）にそれぞれ `Concat` アームを追加
+- **Task 3**: `write_lvalue` に `signed: bool` 引数を追加。`LValue::Net` アームで
+  signed なら `extend_sign`、そうでなければ従来通り `resize`（切り詰め/ゼロ拡張）。
+  呼び出し元4箇所（`BlockingAssign`/`NbaAssign`×2＋`ContAssign`）で
+  `ElaboratedDesign::expr_signed` から signed を取得して渡す。`nba_queue` の要素も
+  `(LValue, LogicVal, bool)` に変更しNBA適用時までsignedを保持
+- **Task 4**: `apply_binop` で `both_signed` かつ幅が異なる場合、演算前に両辺を
+  共通の最大幅へ `extend_sign` で揃えるよう修正。シフト演算（右辺は self-determined
+  unsigned）と `===`/`!==`（暗黙のコンテキスト拡張をしない厳密比較）は対象外
+- 新規テスト `tests/integration/cases/lvalue_select/`（LHS部分選択・LHS連結、
+  blocking/nonblocking 双方）を追加、iverilog 実出力から期待値作成
+- 既存の `signed_cast`/`compare_signed_cast`（Task 3・4 の TDD アンカー）が
+  新規追加なしで FAIL→PASS に変化することを確認
+
+### Task 5（2026-07-23 実施）
+
+picorv32.v が入手できたため実施。1回目の実行で `picorv32_pcpi_fast_mul` モジュール内の
+indexed part-select（`next_rd[j +: CARRY_CHAIN]`等）が `Unsupported construct` で
+パースを止めていたことが判明し、`+:`/`-:` indexed part-select 対応を実装（下記
+「indexed part-select 対応」節参照）。実装後の再実行結果は以下の通り:
+
+- パースは8モジュールすべて成功（indexed part-selectのブロッカーは解消）
+- elaboration も `picorv32` トップまで到達するが、モジュール中盤で宣言された
+  `localparam`（`cpu_state_fetch`等）が名前解決できず大量の `unresolved net/param` 警告
+  → **新規発見 A11**（PLAN.md 実装課題A節参照）
+- シミュレーション開始後、`--max-time 10` を指定してもハングし停止しない
+  （state machine の case 文がすべてX比較になるため、A11が原因と推定、未確定）
+- 調査の過程で **A10（二項演算子の結合順序が壊れている、重大）** を発見。
+  `a-b+c`や`a*b+c`のような3項以上の演算子チェーンが優先順位・結合則を無視して
+  常に右結合で評価される、`sv-parser`クレート由来の不具合。picorv32.vのような
+  実RTLでは高確率で誤動作すると見られる
+
+Task 5自体（parse/elabスモークチェック）は「エラー内容を明らかにする」という目的は
+達成したが、A10・A11という新たな重大課題が見つかったため、picorv32.vのフル
+シミュレーションはまだ未達成。次の一手はユーザーと相談（A10優先が妥当と推測: 影響範囲が
+広く、算術式を含む既存の全機能の正しさに関わるため）。
+
+### indexed part-select (`+:` / `-:`) 対応（2026-07-23 実装）
+
+Task 5のブロッカー解消のため実装。`DynBitSelect`（既存の動的1bitビット選択）と同型の
+パターンで、「base は実行時式、width は定数」の part-select を追加:
+
+- HIR: `Expr::IndexedPartSel`/`LValue::IndexedPartSelect`（net, base式, width式, plus_dir）
+- MIR: `Expr::DynPartSel`/`LValue::DynPartSelect`（NetId, base ExprId, 定数width, plus_dir）
+- frontend: `lower_part_select`/`lower_lvalue_part_select` の `IndexedRange` 明示エラー
+  分岐を実装に置換
+- elab: `lower_expr`/`lower_lvalue` に新アーム追加、baseは定数畳み込みせずExprIdのまま
+  伝搬、widthのみ`eval_const_hir`で確定。`compute_expr_signed`にself-determined
+  unsignedとして追加
+- sim: `eval_expr`/`write_lvalue`/`lvalue_width`/`get_lval_val`/`trigger_sensitivity`に
+  新アーム追加。範囲外アクセス（負のbase、ネット幅超過）は既存の`PartSelect`と同水準の
+  簡略化（読み出しは全体X、書き込みは無視）
+- `LogicVal::x_of_width`ヘルパーを新設（範囲外アクセス時の正しい幅のX値生成用）
+- 新規テスト `tests/integration/cases/indexed_part_select/`（RHS `+:`/`-:`、LHS
+  `+:`/`-:`のblocking/nonblocking、実行時変数をbaseに使用）。iverilog実出力から
+  期待値作成
+- テスト作成中にA10（二項演算子結合順序バグ）を発見したため、`i*8+7`のような
+  「乗算の後に加算」の順序を避け`7+i*8`（数学的に等価、バグの影響を受けない順序）で
+  記述した
+
+### 検証状態（2026-07-23 時点）
+
+- `cargo build --workspace` / `cargo test --workspace` 全通過（新規
+  `test_indexed_part_select`/`compare_indexed_part_select` 含む、既存テストへの回帰なし）
+- `signed_cast`/`compare_signed_cast` は引き続きPASS
+- `samples/counter4`・`samples/fifo_sync`（M1受入れサンプル）を実行し VCD 生成・
+  正常終了を確認（回帰なし）
+- picorv32.v: パース成功（indexed part-selectブロッカー解消）、ただしA10・A11により
+  フルシミュレーションは未達成（上記Task 5節参照）
