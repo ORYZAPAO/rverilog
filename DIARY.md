@@ -3035,3 +3035,69 @@ A20のsensitivity経路自体は正しく機能している（`cpuregs`書き込
 - A21（`lui`命令の書き戻し値が0になる原因）の調査を次セッションで継続
   （推奨着手順11番、継続）。同じ運用（フォークで実測ベース調査→根本原因特定→
   Codexへ実装委任→独立検証）を継続する
+
+### 追記: A20のマージとA21の調査・修正（同日継続）
+
+PR #36（A20）はユーザー承認を得てCI通過確認後マージ済み（`feat/m1-milestone`へ
+squashマージ、リモートブランチ削除）。続けてA21の調査をExplore→Planサブエージェント
+2段階に委任。
+
+- Exploreサブエージェントがpicorv32.vのLUI命令パスを実測調査。`lui x4, 0x10000`の
+  書き戻し値が0になる原因を、最小再現（`imm = instr[31:12] << 12;`、
+  `instr=32'h100000B7`）で「rverilogは`imm=00000000`、iverilogは`imm=10000000`」と
+  切り分け、picorv32固有ではなく汎用のシフト演算バグと特定
+- 根本原因: `mir/src/logicval.rs`の`shl`/`shr`が左オペランド自身の幅
+  （self-determined）を結果幅としてマスクしていたが、IEEE 1364-2001 5.4.1節
+  Table 5-5ではシフト演算子の左辺はcontext-determined（周囲の代入文脈の幅で
+  評価されるべき）であり、self-determinedなのはシフト量（右辺）のみ。
+  `decoded_imm <= mem_rdata_q[31:12] << 12;`の`mem_rdata_q[31:12]`は20bit幅の
+  part-selectで、20bit幅のままシフトすると本来28bit目に来るはずのビットが
+  マスクされて消える
+- ユーザーに「シフト演算子のみの最小修正」か「幅推論全体の再設計」かを確認し、
+  前者を選択（幅推論全体の再設計はwidth.rsの既存の大きな残課題として引き続き
+  先送り）
+- Planサブエージェントで、既存の`expr_signed`（A1）パターンに倣った
+  `expr_shift_width: Vec<Option<u32>>`側チャネル方式の具体的な実装ステップを設計
+- **A21**としてCodexへ委任: `ElaboratedDesign::expr_shift_width`新設、
+  `elaborate()`内の後置パス（`lvalue_width`/`propagate_shift_context`、
+  blocking/NBA/連続代入のLHS幅を起点にIEEE Table 5-5のcontext-determined演算子
+  （算術・ビット単位・単項・三項の両分岐）をたどりシフト演算子の左辺にのみ
+  文脈幅を記録）、`interp.rs`の`eval_expr`でシフト前に左辺を記録幅へ
+  resize/extend_signしてから既存の`shl`/`shr`/`ashl`/`ashr`へ渡すよう変更
+- 回帰テスト`tests/integration/cases/shift_context_width/`（blocking/NBA/連続代入
+  の3経路、iverilogとbit-exact一致）を追加
+
+Codex実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`ir.rs`・`elaborate.rs`・`interp.rs`・回帰テスト・
+  PLAN.md）に収まっていることを確認。`propagate_shift_context`のmatchが
+  全バリアントを明示的に分類しワイルドカードで握りつぶしていないことも確認
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy --workspace
+  --all-targets -- -D warnings`とも警告なし
+- `cargo test --workspace`で全通過（integration 31件・iverilog比較28件、
+  既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`を実行し回帰なし確認
+- `cargo test -p rverilog-cli --test integration test_picorv32_smoke`
+  （`#[ignore]`解除済み）を実行 → **`RESULT=42`／`PASS: picorv32 executed
+  addi/add/lui/sw correctly`でPASS**
+- `cargo test -p rverilog-cli --test iverilog_compare compare_picorv32_smoke`
+  も同様にPASS（iverilogとの比較込み）
+
+### Result（A21・picorv32スモーク達成）
+
+✅ A21（シフト演算子の左辺がself-determined幅で評価される、IEEE 1364-2001
+   5.4.1節Table 5-5違反）を修正
+✅ `cargo test --workspace`（integration 31件・iverilog比較28件）全通過、
+   fmt/clippy警告なし
+✅ PLAN.md実装課題A節のA21行を更新（未調査プレースホルダ→対応済み）
+✅ **picorv32.vスモークテストが初めてPASS**（`RESULT=42`、`$finish at time 205`）。
+   A14（2026-08-15）から数えてA14〜A21の8件の重大バグを積み上げて解消した末の達成。
+   PLAN.md推奨着手順11番（picorv32.vフル命令実行シミュレーション確認）が完了
+✅ `test_picorv32_smoke`・`compare_picorv32_smoke`双方の`#[ignore]`を解除
+
+### Next
+
+- `fix/shift-context-width`ブランチをPRとして`feat/m1-milestone`へマージする
+- picorv32.vスモークテストのPASSにより推奨着手順11番は完了。次の優先課題は
+  PLAN.md実装課題節に残る他項目（A5: 64bit超ネットへの部分書き込み、A7: 64bit超
+  乗除算、A8: inout、`casez`/`casex`のワイルドカードマッチ疑い等）から選定する
