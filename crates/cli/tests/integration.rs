@@ -239,6 +239,19 @@ fn test_always_star() {
 }
 
 #[test]
+fn test_mem_write_sensitivity() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/mem_write_sensitivity/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("mem_write_sensitivity");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_case_width_mismatch() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/case_width_mismatch/dut.v")];

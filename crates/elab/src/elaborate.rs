@@ -316,11 +316,16 @@ pub fn elaborate(
     elab_module(&mut ctx, top, None, SmolStr::from(top_name), &[])?;
 
     let mut cont_sensitivity: IndexMap<u32, Vec<u32>> = IndexMap::new();
+    let mut mem_sensitivity: IndexMap<u32, Vec<u32>> = IndexMap::new();
     for (i, cont) in ctx.conts.iter().enumerate() {
         let mut nets = std::collections::HashSet::new();
-        collect_sensitivity_expr(&ctx, cont.expr, &mut nets);
+        let mut mems = std::collections::HashSet::new();
+        collect_sensitivity_expr(&ctx, cont.expr, &mut nets, &mut mems);
         for net in nets {
             cont_sensitivity.entry(net.0).or_default().push(i as u32);
+        }
+        for mem in mems {
+            mem_sensitivity.entry(mem.0).or_default().push(i as u32);
         }
     }
 
@@ -336,6 +341,7 @@ pub fn elaborate(
         top: top_scope,
         sensitivity_table: ctx.sensitivity_table,
         cont_sensitivity,
+        mem_sensitivity,
         expr_signed: ctx.expr_signed,
     })
 }
@@ -1310,7 +1316,8 @@ fn lower_sensitivity(
                 return Ok(Sensitivity::All);
             };
             let mut nets = std::collections::HashSet::new();
-            if !collect_sensitivity_stmt(ctx, body, &mut nets) || nets.is_empty() {
+            let mut mems = std::collections::HashSet::new();
+            if !collect_sensitivity_stmt(ctx, body, &mut nets, &mut mems) || nets.is_empty() {
                 return Ok(Sensitivity::All);
             }
             Ok(Sensitivity::Items(
@@ -1343,42 +1350,44 @@ fn collect_sensitivity_stmt(
     ctx: &ElabCtx,
     stmt_id: StmtId,
     nets: &mut std::collections::HashSet<NetId>,
+    mems: &mut std::collections::HashSet<MemId>,
 ) -> bool {
     match &ctx.stmts[stmt_id.0 as usize] {
         Stmt::Block(stmts) | Stmt::NamedBlock(_, stmts) | Stmt::Fork(stmts) => stmts
             .iter()
-            .all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets)),
+            .all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets, mems)),
         Stmt::If(cond, then_stmt, else_stmt) => {
-            collect_sensitivity_expr(ctx, *cond, nets)
-                && collect_sensitivity_stmt(ctx, *then_stmt, nets)
-                && else_stmt.is_none_or(|stmt| collect_sensitivity_stmt(ctx, stmt, nets))
+            collect_sensitivity_expr(ctx, *cond, nets, mems)
+                && collect_sensitivity_stmt(ctx, *then_stmt, nets, mems)
+                && else_stmt.is_none_or(|stmt| collect_sensitivity_stmt(ctx, stmt, nets, mems))
         }
         Stmt::Case {
             sel, arms, default, ..
         } => {
-            collect_sensitivity_expr(ctx, *sel, nets)
+            collect_sensitivity_expr(ctx, *sel, nets, mems)
                 && arms.iter().all(|(patterns, body)| {
                     patterns
                         .iter()
-                        .all(|&expr| collect_sensitivity_expr(ctx, expr, nets))
-                        && collect_sensitivity_stmt(ctx, *body, nets)
+                        .all(|&expr| collect_sensitivity_expr(ctx, expr, nets, mems))
+                        && collect_sensitivity_stmt(ctx, *body, nets, mems)
                 })
-                && default.is_none_or(|stmt| collect_sensitivity_stmt(ctx, stmt, nets))
+                && default.is_none_or(|stmt| collect_sensitivity_stmt(ctx, stmt, nets, mems))
         }
         Stmt::BlockingAssign(lval, expr) | Stmt::NbaAssign(lval, expr) => {
-            collect_sensitivity_lvalue(ctx, lval, nets)
-                && collect_sensitivity_expr(ctx, *expr, nets)
+            collect_sensitivity_lvalue(ctx, lval, nets, mems)
+                && collect_sensitivity_expr(ctx, *expr, nets, mems)
         }
         Stmt::Delay(_, body) | Stmt::EventCtl(_, body) => {
-            collect_sensitivity_stmt(ctx, *body, nets)
+            collect_sensitivity_stmt(ctx, *body, nets, mems)
         }
         Stmt::SysCall(_, args) => args
             .iter()
-            .all(|&expr| collect_sensitivity_expr(ctx, expr, nets)),
+            .all(|&expr| collect_sensitivity_expr(ctx, expr, nets, mems)),
         Stmt::While(cond, body) => {
-            collect_sensitivity_expr(ctx, *cond, nets) && collect_sensitivity_stmt(ctx, *body, nets)
+            collect_sensitivity_expr(ctx, *cond, nets, mems)
+                && collect_sensitivity_stmt(ctx, *body, nets, mems)
         }
-        Stmt::ReadMem(_, path, _) => collect_sensitivity_expr(ctx, *path, nets),
+        Stmt::ReadMem(_, path, _) => collect_sensitivity_expr(ctx, *path, nets, mems),
         Stmt::Null | Stmt::Disable(_) => true,
     }
 }
@@ -1388,15 +1397,16 @@ fn collect_sensitivity_lvalue(
     ctx: &ElabCtx,
     lval: &LValue,
     nets: &mut std::collections::HashSet<NetId>,
+    mems: &mut std::collections::HashSet<MemId>,
 ) -> bool {
     match lval {
         LValue::Net(_) | LValue::BitSelect(_, _) | LValue::PartSelect(_, _, _) => true,
         LValue::DynBitSelect(_, index)
         | LValue::DynPartSelect(_, index, _, _)
-        | LValue::MemWrite(_, index) => collect_sensitivity_expr(ctx, *index, nets),
+        | LValue::MemWrite(_, index) => collect_sensitivity_expr(ctx, *index, nets, mems),
         LValue::Concat(parts) => parts
             .iter()
-            .all(|part| collect_sensitivity_lvalue(ctx, part, nets)),
+            .all(|part| collect_sensitivity_lvalue(ctx, part, nets, mems)),
     }
 }
 
@@ -1404,6 +1414,7 @@ fn collect_sensitivity_expr(
     ctx: &ElabCtx,
     expr_id: ExprId,
     nets: &mut std::collections::HashSet<NetId>,
+    mems: &mut std::collections::HashSet<MemId>,
 ) -> bool {
     match &ctx.exprs[expr_id.0 as usize] {
         Expr::Const(_) | Expr::StringLit(_) => true,
@@ -1414,32 +1425,38 @@ fn collect_sensitivity_expr(
             nets.insert(*net);
             match &ctx.exprs[expr_id.0 as usize] {
                 Expr::BitSel(_, index) | Expr::DynPartSel(_, index, _, _) => {
-                    collect_sensitivity_expr(ctx, *index, nets)
+                    collect_sensitivity_expr(ctx, *index, nets, mems)
                 }
                 _ => true,
             }
         }
         Expr::Concat(parts) => parts
             .iter()
-            .all(|&expr| collect_sensitivity_expr(ctx, expr, nets)),
-        Expr::Repeat(_, expr) | Expr::Un(_, expr) => collect_sensitivity_expr(ctx, *expr, nets),
+            .all(|&expr| collect_sensitivity_expr(ctx, expr, nets, mems)),
+        Expr::Repeat(_, expr) | Expr::Un(_, expr) => {
+            collect_sensitivity_expr(ctx, *expr, nets, mems)
+        }
         Expr::Bin(_, lhs, rhs) => {
-            collect_sensitivity_expr(ctx, *lhs, nets) && collect_sensitivity_expr(ctx, *rhs, nets)
+            collect_sensitivity_expr(ctx, *lhs, nets, mems)
+                && collect_sensitivity_expr(ctx, *rhs, nets, mems)
         }
         Expr::Cond(cond, then_expr, else_expr) => {
-            collect_sensitivity_expr(ctx, *cond, nets)
-                && collect_sensitivity_expr(ctx, *then_expr, nets)
-                && collect_sensitivity_expr(ctx, *else_expr, nets)
+            collect_sensitivity_expr(ctx, *cond, nets, mems)
+                && collect_sensitivity_expr(ctx, *then_expr, nets, mems)
+                && collect_sensitivity_expr(ctx, *else_expr, nets, mems)
         }
-        Expr::MemRead(_, index) | Expr::Random(Some(index)) => {
-            collect_sensitivity_expr(ctx, *index, nets)
+        Expr::MemRead(mem, index) => {
+            mems.insert(*mem);
+            collect_sensitivity_expr(ctx, *index, nets, mems);
+            false
         }
+        Expr::Random(Some(index)) => collect_sensitivity_expr(ctx, *index, nets, mems),
         Expr::Random(None) => true,
         // 関数呼び出しは、lowering済みの引数セットアップ文と関数本体を辿る。
         // 返り値ネット自体は呼び出し内で書かれる左辺なので感度に含めない。
         Expr::CallResult(stmts, _) => stmts
             .iter()
-            .all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets)),
+            .all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets, mems)),
     }
 }
 

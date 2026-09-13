@@ -937,13 +937,17 @@ impl Interpreter {
             }
             return;
         }
+        let mem_id = match lval {
+            LValue::MemWrite(id, _) => Some(*id),
+            _ => None,
+        };
         let net_id = match lval {
             LValue::Net(id)
             | LValue::BitSelect(id, _)
             | LValue::PartSelect(id, _, _)
             | LValue::DynBitSelect(id, _)
-            | LValue::DynPartSelect(id, _, _, _) => *id,
-            LValue::MemWrite(_, _) => return, // メモリ書き込みはネットのsensitivityを起動しない
+            | LValue::DynPartSelect(id, _, _, _) => Some(*id),
+            LValue::MemWrite(_, _) => None,
             LValue::Concat(_) => unreachable!("handled by the early return above"),
         };
 
@@ -966,7 +970,11 @@ impl Interpreter {
         let any_change = old.map(|o| o != new).unwrap_or(true);
 
         if any_change {
-            if let Some(conts) = self.design.cont_sensitivity.get(&net_id.0).cloned() {
+            let conts = match mem_id {
+                Some(mem_id) => self.design.mem_sensitivity.get(&mem_id.0),
+                None => net_id.and_then(|net_id| self.design.cont_sensitivity.get(&net_id.0)),
+            };
+            if let Some(conts) = conts.cloned() {
                 for cont_id in conts {
                     self.mark_cont_dirty(cont_id);
                 }
@@ -980,6 +988,9 @@ impl Interpreter {
             let wake = match &sens {
                 Sensitivity::All => any_change,
                 Sensitivity::Items(edges) => edges.iter().any(|e| {
+                    let Some(net_id) = net_id else {
+                        return false;
+                    };
                     if e.net != net_id {
                         return false;
                     }
