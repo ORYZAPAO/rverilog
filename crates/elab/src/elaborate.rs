@@ -329,6 +329,18 @@ pub fn elaborate(
         }
     }
 
+    let mut expr_shift_width = vec![None; ctx.exprs.len()];
+    for stmt in &ctx.stmts {
+        if let Stmt::BlockingAssign(lval, expr) | Stmt::NbaAssign(lval, expr) = stmt {
+            let width = lvalue_width(&ctx, lval);
+            propagate_shift_context(&ctx, *expr, width, &mut expr_shift_width);
+        }
+    }
+    for cont in &ctx.conts {
+        let width = lvalue_width(&ctx, &cont.lval);
+        propagate_shift_context(&ctx, cont.expr, width, &mut expr_shift_width);
+    }
+
     let top_scope = ScopeId(0);
     Ok(ElaboratedDesign {
         nets: ctx.nets,
@@ -343,6 +355,7 @@ pub fn elaborate(
         cont_sensitivity,
         mem_sensitivity,
         expr_signed: ctx.expr_signed,
+        expr_shift_width,
     })
 }
 
@@ -1457,6 +1470,86 @@ fn collect_sensitivity_expr(
         Expr::CallResult(stmts, _) => stmts
             .iter()
             .all(|&stmt| collect_sensitivity_stmt(ctx, stmt, nets, mems)),
+    }
+}
+
+/// lvalue が指す代入先の幅（ビット数）。シフト文脈幅伝播の起点として使う
+/// （sim/src/interp.rs の同名関数と同一ロジック。ElaboratedDesign組み立て前の
+/// ElabCtx段階で必要なため、クレートをまたいで共有できず複製している）。
+fn lvalue_width(ctx: &ElabCtx, lval: &LValue) -> u32 {
+    match lval {
+        LValue::Net(id) => ctx.nets[id.0 as usize].width,
+        LValue::BitSelect(_, _) | LValue::DynBitSelect(_, _) => 1,
+        LValue::PartSelect(_, hi, lo) => hi - lo + 1,
+        LValue::DynPartSelect(_, _, width, _) => *width,
+        LValue::MemWrite(mem_id, _) => ctx.memories[mem_id.0 as usize].elem_width,
+        LValue::Concat(parts) => parts.iter().map(|part| lvalue_width(ctx, part)).sum(),
+    }
+}
+
+/// 代入文のLHS幅を起点に、IEEE 1364-2001 5.4.1 Table 5-5 のcontext-determined演算子を
+/// たどって文脈幅をRHS式木へ下向きに伝播し、シフト演算子のBinノードに到達するたびその時点の
+/// 文脈幅を記録する。self-determinedな境界では伝播を打ち切る。
+fn propagate_shift_context(ctx: &ElabCtx, expr_id: ExprId, width: u32, out: &mut [Option<u32>]) {
+    match &ctx.exprs[expr_id.0 as usize] {
+        Expr::Bin(op, l, r) => match op {
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Mod
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::BitNand
+            | BinOp::BitNor
+            | BinOp::BitXnor => {
+                propagate_shift_context(ctx, *l, width, out);
+                propagate_shift_context(ctx, *r, width, out);
+            }
+            BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr => {
+                out[expr_id.0 as usize] = Some(width);
+                propagate_shift_context(ctx, *l, width, out);
+            }
+            BinOp::LogAnd
+            | BinOp::LogOr
+            | BinOp::Eq
+            | BinOp::Ne
+            | BinOp::CaseEq
+            | BinOp::CaseNe
+            | BinOp::Lt
+            | BinOp::Gt
+            | BinOp::Le
+            | BinOp::Ge => {}
+        },
+        Expr::Un(UnOp::Pos | UnOp::Neg | UnOp::BitNot, expr) => {
+            propagate_shift_context(ctx, *expr, width, out);
+        }
+        Expr::Un(
+            UnOp::LogNot
+            | UnOp::RedAnd
+            | UnOp::RedNand
+            | UnOp::RedOr
+            | UnOp::RedNor
+            | UnOp::RedXor
+            | UnOp::RedXnor,
+            _,
+        ) => {}
+        Expr::Cond(_, then_expr, else_expr) => {
+            propagate_shift_context(ctx, *then_expr, width, out);
+            propagate_shift_context(ctx, *else_expr, width, out);
+        }
+        Expr::Const(_)
+        | Expr::StringLit(_)
+        | Expr::Net(_)
+        | Expr::BitSel(_, _)
+        | Expr::PartSel(_, _, _)
+        | Expr::DynPartSel(_, _, _, _)
+        | Expr::Concat(_)
+        | Expr::Repeat(_, _)
+        | Expr::MemRead(_, _)
+        | Expr::Random(_)
+        | Expr::CallResult(_, _) => {}
     }
 }
 

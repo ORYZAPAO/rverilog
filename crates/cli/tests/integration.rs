@@ -330,7 +330,19 @@ fn test_else_if_chain() {
 }
 
 #[test]
-#[ignore = "既知の未解決課題: A13修正後もPicoRV32が最初の命令fetch前に不正命令トラップへ入りtimeoutする（PLAN.md推奨着手順11番参照）"]
+fn test_shift_context_width() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/shift_context_width/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("shift_context_width");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_picorv32_smoke() {
     let root = workspace_root();
     let files = vec![
