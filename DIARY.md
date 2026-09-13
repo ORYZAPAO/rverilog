@@ -2949,3 +2949,89 @@ Codex側の実装完了後、こちらで独立に検証:
 - picorv32.vスモークテストのタイムアウト原因調査を継続（推奨着手順11番、継続）。
   今回と同じ調子（フォークで実測ベース調査→根本原因特定→Codexへ実装委任→独立検証）を
   次のセッションでも継続する
+
+## 2026-09-13
+
+### Task
+
+PLAN.md・DIARY.mdを読んで状況を把握し、picorv32.vスモークテストのタイムアウト原因調査を
+継続（推奨着手順11番）。A19マージ済み（PR #35、`feat/m1-milestone`統合済み）の状態で
+`test_picorv32_smoke`（`--ignored`）を再実行し、依然TIMEOUTすることを確認。前回と同じ
+運用（フォークで実測ベース調査→根本原因特定→Codexへ実装委任→独立検証→記録）を継続した。
+
+### 原因調査（Explore→Planサブエージェント2段階に委任、実測ベースで実施）
+
+- Exploreサブエージェントに、レジスタ書き戻しタイミング・連続代入のsensitivity機構・
+  picorv32.vのメモリアクセスFSM関連コードの実地調査を委任
+- `crates/sim/src/interp.rs::trigger_sensitivity`（922行目〜）が`LValue::MemWrite(_, _)
+  => return`（946行目）で、`any_change`判定・`event_waiters`起床処理（`Sensitivity::All
+  => any_change`含む）・`cont_sensitivity`のdirty化に到達する前に即returnしていることを
+  発見。メモリ配列（`reg`配列、MIR上`MemId`/`MemInfo`）への書き込みが一切のプロセス
+  再起動・連続代入再評価をトリガーしないバグと特定
+- 併せて`crates/elab/src/elaborate.rs::collect_sensitivity_expr`の`Expr::MemRead`
+  アームがindex式の依存ネットだけを収集してその結果（多くは`true`）をそのまま返しており、
+  「メモリ読み出しは解決済み」扱いになっている（A12で確立済みの`Sensitivity::All`
+  フォールバックが発動しない）ことも発見。2つの欠陥は独立しており両方の修正が必要と判断
+- Planサブエージェントで、上記2つを実際のコード（行番号・シグネチャ）で再確認した上で、
+  既存の`cont_sensitivity`/`cont_dirty`（D節、A12参照）パターンを再利用する4箇所の
+  具体的な修正方針（`mem_sensitivity`テーブル新設、`collect_sensitivity_expr`等への
+  `mems: &mut HashSet<MemId>`引数追加、`trigger_sensitivity`のMemWrite分岐修正）に
+  詳細化
+- **A20**としてPLAN.md実装課題A節に追加。picorv32.vの`cpuregs[latched_rd] <=
+  cpuregs_wrdata;`（LUI書き戻し、NBA）が着地しても、`cpuregs_rs1 = decoded_rs1 ?
+  cpuregs[decoded_rs1] : 0;`という別の`always @*`が再評価されず`reg_op1`が古い値を
+  ロードし続けることが、`sw x3,0(x4)`で`mem_addr=0`（期待値`0x10000000`）になる
+  直接原因と特定
+
+### What was done（Codexに委任・実装完了を確認、A20）
+
+- 検証専用ブランチ`fix/mem-array-write-sensitivity`を`feat/m1-milestone`から作成し、
+  上記4Editの具体的な方針（該当ファイル・関数・行番号・理由）込みでCodexへ委任
+- Codexは依頼通り: (1) `mir/src/ir.rs`に`mem_sensitivity`フィールド追加、
+  (2) `elaborate.rs`の`collect_sensitivity_expr`の`MemRead`アームを分離し`false`を
+  返すよう修正、(3) `collect_sensitivity_expr`/`_stmt`/`_lvalue`に`mems`引数を
+  スレッドして`elaborate()`内で`mem_sensitivity`を構築、(4) `interp.rs`の
+  `trigger_sensitivity`で`LValue::MemWrite`を`any_change`判定・`mem_sensitivity`
+  dirty化・`Sensitivity::All`waiter起床の対象に含めるよう修正、を実装
+- 回帰テスト`tests/integration/cases/mem_write_sensitivity/`（固定indexでメモリを
+  読む`always @*`が別プロセスのNBA書き込み後に正しく再評価されることを確認）を追加、
+  iverilogとのbit-exact一致も確認
+
+Codex側の実装完了後、こちらで独立に検証:
+
+- `git diff`で変更が依頼範囲（`ir.rs`・`elaborate.rs`・`interp.rs`・回帰テスト関連）に
+  収まっていることを確認
+- `cargo build --workspace`成功、`cargo fmt --check`・`cargo clippy --workspace
+  --all-targets -- -D warnings`とも警告なし
+- `cargo test --workspace`で29テスト全通過（新規`test_mem_write_sensitivity`/
+  `compare_mem_write_sensitivity`含む、既存回帰なし）
+- `samples/counter4`・`samples/fifo_sync`を実行し回帰なし確認
+- `cargo test -p rverilog-cli --test integration test_picorv32_smoke -- --ignored
+  --nocapture`を実行 → **依然`TIMEOUT`で失敗**
+
+### 新規発見（A21、未調査）
+
+Codex自身の調査（依頼範囲外の修正はせず報告のみ）と、こちらの独立検証により、
+A20のsensitivity経路自体は正しく機能している（`cpuregs`書き込み後の再評価は実際に
+起きている）ことを確認した一方、`lui x4, 0x10000`命令が本来書き込むべき
+`0x10000000`ではなく`0`を書き込んでいることが判明。A20が対象とした「別プロセスが
+古い値を読む」問題よりさらに手前の段階、つまりLUI命令のデコード・ALU演算・書き戻し値
+生成のいずれかにある別の独立したバグと推定。**A21**としてPLAN.md実装課題A節に追加
+（原因未特定、未調査）。
+
+### Result
+
+✅ A20（メモリ配列書き込みがsensitivityを一切起動しない、最重要）を修正。
+   `always @*`がメモリ配列の内容変化に反応しない重大バグを解消
+✅ `cargo test --workspace`（29テスト）全通過を確認、fmt/clippy警告なし
+✅ PLAN.md実装課題A節にA20を追加
+🆕 A21（`lui`命令の書き戻し値が0になる、原因未特定）を新規発見、PLAN.mdに記録
+❌ picorv32.vスモークテストは依然TIMEOUT。A20は必要条件だったが十分条件ではなかった
+
+### Next
+
+- `fix/mem-array-write-sensitivity`ブランチをPRとして`feat/m1-milestone`へマージする
+  かユーザーに確認する
+- A21（`lui`命令の書き戻し値が0になる原因）の調査を次セッションで継続
+  （推奨着手順11番、継続）。同じ運用（フォークで実測ベース調査→根本原因特定→
+  Codexへ実装委任→独立検証）を継続する
