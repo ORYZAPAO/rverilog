@@ -2,8 +2,8 @@ mod cli;
 mod driver;
 
 use anyhow::Result;
-use cli::Args;
 use clap::Parser;
+use cli::Args;
 
 fn main() -> Result<()> {
     let args = Args::parse();

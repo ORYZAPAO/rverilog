@@ -1,0 +1,6 @@
+signed: a<b true
+unsigned: ua<ub false
+a=-1 ua=15
+div=         -3 mod=         -1
+a>>>1=1111 ua>>>1=0111
+$finish at time 0

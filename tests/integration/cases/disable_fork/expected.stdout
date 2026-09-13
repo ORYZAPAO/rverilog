@@ -1,0 +1,14 @@
+i=0
+i=1
+i=2
+i=3
+i=5
+i=6
+i=7
+i=8
+i=9
+after loop i=10
+branch b done at 2
+branch a done at 5
+joined at 5 a=1 b=2
+$finish at time 6
