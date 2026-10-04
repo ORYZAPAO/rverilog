@@ -513,6 +513,66 @@ impl LogicVal {
         Self::from_chunks(w, &a, &b)
     }
 
+    /// 強度つきドライバの解決（wire/tri）。`drivers` は (ネット幅の値, (0側強度, 1側強度))。
+    /// ビットごとに、非Zの駆動のうち最も強いレベルを選び、同レベルで0と1が競合する場合はX、
+    /// 駆動が無ければZ。Xの駆動は「0の場合」「1の場合」の両方で解決し、結果が一致するビットだけを
+    /// 採用する（例: `(highz0, strong1)` のXは0ならZ・1ならstrong1なので、weak1とは常に1になる）。
+    pub fn resolve_strength(width: u32, drivers: &[(&LogicVal, (u8, u8))]) -> LogicVal {
+        let r0 = Self::resolve_strength_with_x(width, drivers, false);
+        let r1 = Self::resolve_strength_with_x(width, drivers, true);
+        let n = num_chunks(width);
+        let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let (a0, b0) = (r0.get_chunk(i), r0.get_chunk_b(i));
+            let (a1, b1) = (r1.get_chunk(i), r1.get_chunk_b(i));
+            let diff = (a0 ^ a1) | (b0 ^ b1);
+            a.push(a0 | diff);
+            b.push(b0 | diff);
+        }
+        Self::from_chunks(width, &a, &b)
+    }
+
+    /// Xの駆動ビットを `x_as_one` の値として扱う強度つき解決（X以外の結果はX/Zを含まない）。
+    fn resolve_strength_with_x(
+        width: u32,
+        drivers: &[(&LogicVal, (u8, u8))],
+        x_as_one: bool,
+    ) -> LogicVal {
+        let n = num_chunks(width);
+        let mut ra = vec![0u64; n];
+        let mut rb = vec![u64::MAX; n]; // 既定はZ (a=0, b=1)
+        let mut decided = vec![0u64; n];
+        for level in (1..=7u8).rev() {
+            for i in 0..n {
+                let (mut has0, mut has1) = (0u64, 0u64);
+                for (v, (s0, s1)) in drivers {
+                    let (a, b) = (v.get_chunk(i), v.get_chunk_b(i));
+                    let x = a & b;
+                    let (zero, one) = (!a & !b, a & !b);
+                    let (zero, one) = if x_as_one {
+                        (zero, one | x)
+                    } else {
+                        (zero | x, one)
+                    };
+                    if *s0 == level {
+                        has0 |= zero;
+                    }
+                    if *s1 == level {
+                        has1 |= one;
+                    }
+                }
+                let present = (has0 | has1) & !decided[i];
+                let conflict = has0 & has1 & present;
+                let one = has1 & !conflict & present;
+                // present のビット: 競合→X(1,1) / 1→(1,0) / 0→(0,0)
+                ra[i] = (ra[i] & !present) | conflict | one;
+                rb[i] = (rb[i] & !present) | conflict;
+                decided[i] |= present;
+            }
+        }
+        Self::from_chunks(width, &ra, &rb)
+    }
+
     /// wand/triand 用の解決: Zは中立、0が支配（0 > X > 1）。
     pub fn resolve_wand(&self, other: &LogicVal) -> LogicVal {
         self.resolve_dominant(other, false)
@@ -1796,5 +1856,70 @@ mod tests {
         assert_eq!(m.bit_ab(2), (0, 0));
         assert_eq!(m.bit_ab(1), (1, 1));
         assert_eq!(m.bit_ab(0), (1, 1));
+    }
+
+    #[test]
+    fn test_resolve_strength() {
+        let (z, o, l, x) = (LogicVal::Z, LogicVal::ONE, LogicVal::ZERO, LogicVal::X);
+        let (strong, weak, pull, supply) = ((6u8, 6u8), (3u8, 3u8), (5u8, 5u8), (7u8, 7u8));
+        // 強い駆動が勝つ
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&l, strong), (&o, weak)]),
+            l
+        );
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&l, weak), (&o, strong)]),
+            o
+        );
+        assert_eq!(LogicVal::resolve_strength(1, &[(&o, weak), (&l, pull)]), l);
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&o, supply), (&l, strong)]),
+            o
+        );
+        // 同強度の競合はX、同値なら値
+        assert!(LogicVal::resolve_strength(1, &[(&l, strong), (&o, strong)]).is_x());
+        assert_eq!(LogicVal::resolve_strength(1, &[(&o, weak), (&o, weak)]), o);
+        // Zは中立、駆動なしはZ
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&z, strong), (&o, weak)]),
+            o
+        );
+        assert!(LogicVal::resolve_strength(1, &[(&z, strong)]).is_z());
+        assert!(LogicVal::resolve_strength(1, &[]).is_z());
+        // X駆動は強度レベルで扱う
+        assert!(LogicVal::resolve_strength(1, &[(&x, strong), (&o, weak)]).is_x());
+        assert!(LogicVal::resolve_strength(1, &[(&x, strong)]).is_x());
+        // (highz0, strong1) のXは0ならZ・1ならstrong1なので、weak1とは常に1
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&x, (0, 6)), (&o, weak)]),
+            o
+        );
+        assert!(LogicVal::resolve_strength(1, &[(&x, (0, 6))]).is_x());
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&x, weak), (&o, strong)]),
+            o
+        );
+        // 0側/1側で強度が異なる駆動: (strong0, weak1)
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&o, (6, 3)), (&l, (5, 5))]),
+            l
+        );
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&l, (6, 3)), (&o, (5, 5))]),
+            l
+        );
+        assert_eq!(
+            LogicVal::resolve_strength(1, &[(&o, (6, 3)), (&o, (2, 2))]),
+            o
+        );
+        // highz強度（0）の側は駆動しない
+        assert!(LogicVal::resolve_strength(1, &[(&o, (6, 0))]).is_z());
+        // 64bit超のビット単位
+        let a = LogicVal::z_of_width(100).insert_bits(90, 2, &LogicVal::new(2, 0b10, 0));
+        let b = LogicVal::z_of_width(100).insert_bits(90, 2, &LogicVal::new(2, 0b01, 0));
+        let r = LogicVal::resolve_strength(100, &[(&a, weak), (&b, strong)]);
+        assert_eq!(r.bit_ab(90), (1, 0));
+        assert_eq!(r.bit_ab(91), (0, 0));
+        assert_eq!(r.bit_ab(0), (0, 1));
     }
 }

@@ -9,7 +9,7 @@ use rverilog_hir::{
 use rverilog_mir::{
     BinOp, CaseKind, ContAssign, EdgeType, ElaboratedDesign, Expr, ExprId, LValue, LogicVal, MemId,
     MemInfo, NetId, NetInfo, NetKind, NetResolve, Process, ProcessId, ProcessKind, Scope, ScopeId,
-    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, UnOp,
+    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, UnOp, STRENGTH_PULL, STRENGTH_STRONG,
 };
 use smol_str::SmolStr;
 
@@ -51,7 +51,7 @@ struct ElabCtx<'a> {
     /// 既定のwire以外のネット型（`ElaboratedDesign::net_resolve`）
     net_resolve: IndexMap<u32, NetResolve>,
     /// pull指定のビット範囲（`ElaboratedDesign::net_pulls`）
-    net_pulls: IndexMap<u32, Vec<(u32, u32, bool)>>,
+    net_pulls: IndexMap<u32, Vec<(u32, u32, bool, u8)>>,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -190,7 +190,10 @@ impl<'a> ElabCtx<'a> {
             HirNetResolve::Tri0 | HirNetResolve::Tri1 => {
                 let width = self.nets[id.0 as usize].width;
                 let up = ty == HirNetResolve::Tri1;
-                self.net_pulls.entry(id.0).or_default().push((0, width, up));
+                self.net_pulls
+                    .entry(id.0)
+                    .or_default()
+                    .push((0, width, up, STRENGTH_PULL.0));
                 return;
             }
         };
@@ -382,6 +385,21 @@ pub fn elaborate(
         _ => ctx.net_pulls.contains_key(net) || v.len() >= 2,
     });
 
+    // 既定(strong)以外の強度のドライバ、または既定以外のpull強度を持つネットは強度つき解決にする
+    let mut strength_nets: indexmap::IndexSet<u32> = indexmap::IndexSet::new();
+    for (net, drivers) in &net_drivers {
+        let custom_driver = drivers
+            .iter()
+            .any(|(c, _)| ctx.conts[*c as usize].strength != STRENGTH_STRONG);
+        let custom_pull = ctx
+            .net_pulls
+            .get(net)
+            .is_some_and(|ps| ps.iter().any(|p| p.3 != STRENGTH_PULL.0));
+        if custom_driver || custom_pull {
+            strength_nets.insert(*net);
+        }
+    }
+
     let expr_ctx_width = compute_expr_ctx_widths(&ctx);
 
     let top_scope = ScopeId(0);
@@ -397,6 +415,7 @@ pub fn elaborate(
         sensitivity_table: ctx.sensitivity_table,
         cont_sensitivity,
         net_drivers,
+        strength_nets,
         net_resolve: ctx.net_resolve,
         net_pulls: ctx.net_pulls,
         mem_sensitivity,
@@ -452,7 +471,10 @@ fn elab_assign(
                 ))
             }
         };
-        ctx.net_pulls.entry(id.0).or_default().push((lo, w, up));
+        ctx.net_pulls
+            .entry(id.0)
+            .or_default()
+            .push((lo, w, up, assign.strength.0));
         return Ok(());
     }
     let lval = lower_lvalue(ctx, scope, &assign.lval)?;
@@ -460,6 +482,7 @@ fn elab_assign(
     ctx.conts.push(ContAssign {
         lval,
         expr: expr_id,
+        strength: assign.strength,
     });
     Ok(())
 }
@@ -831,6 +854,7 @@ fn elab_module(
                             ctx.conts.push(ContAssign {
                                 lval: parent_lval,
                                 expr: ce,
+                                strength: STRENGTH_STRONG,
                             });
                         }
                     }
@@ -839,6 +863,7 @@ fn elab_module(
                         ctx.conts.push(ContAssign {
                             lval: LValue::Net(child_id),
                             expr: parent_expr_id,
+                            strength: STRENGTH_STRONG,
                         });
                     }
                 }
@@ -1009,6 +1034,7 @@ fn elab_generate_items(
                             ctx.conts.push(ContAssign {
                                 lval: parent_lval,
                                 expr: ce,
+                                strength: STRENGTH_STRONG,
                             });
                         }
                     }
@@ -1016,6 +1042,7 @@ fn elab_generate_items(
                         ctx.conts.push(ContAssign {
                             lval: LValue::Net(child_id),
                             expr: parent_expr_id,
+                            strength: STRENGTH_STRONG,
                         });
                     }
                 }

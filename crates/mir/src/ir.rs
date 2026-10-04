@@ -47,14 +47,18 @@ pub struct ElaboratedDesign {
     pub cont_sensitivity: IndexMap<u32, Vec<u32>>,
     /// net.0 → 既定のwire以外のネット型（wand/wor/trireg/supply0/supply1）。
     pub net_resolve: IndexMap<u32, NetResolve>,
-    /// net.0 → [(lo, width, one)] pull指定のビット範囲（tri0/tri1/pullup/pulldown）。
-    /// Zのビットを `one` の値（pullup=1 / pulldown=0）へ置き換える。
-    pub net_pulls: IndexMap<u32, Vec<(u32, u32, bool)>>,
+    /// net.0 → [(lo, width, one, level)] pull指定のビット範囲（tri0/tri1/pullup/pulldown）。
+    /// Zのビットを `one` の値（pullup=1 / pulldown=0）へ置き換える。強度レベル `level` は
+    /// 強度付きドライバと解決する場合（`strength_nets`）に弱いドライバとして参加する強さ。
+    pub net_pulls: IndexMap<u32, Vec<(u32, u32, bool, u8)>>,
     /// net.0 → [(cont_id, part_idx)] 解決が必要なネットのドライバ一覧。`part_idx` は連続代入の
     /// lvalueを `LValue::flatten_parts` で展開したときの位置（連結でなければ0）。
     /// wire/wand/worは2つ以上、pull・tregは1つ以上のドライバを持つネットのみ。
     /// simは各ドライバ値のビット単位解決（Z中立・不一致はX）でネット値を更新する。
     pub net_drivers: IndexMap<u32, Vec<(u32, u32)>>,
+    /// 既定(strong)以外の強度のドライバ/pullを持つネット。simはこれらを強度つき解決
+    /// （`LogicVal::resolve_strength`）で更新し、それ以外は強度なしの高速パスを使う。
+    pub strength_nets: indexmap::IndexSet<u32>,
     /// mem_id.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub mem_sensitivity: IndexMap<u32, Vec<u32>>,
     /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）
@@ -160,10 +164,19 @@ pub enum EdgeType {
     Negedge,
 }
 
+/// ドライバ強度（0側, 1側）。supply=7, strong=6, pull=5, weak=3, highz=0。
+pub type DriveStrength = (u8, u8);
+/// 既定のドライバ強度（strong0, strong1）。
+pub const STRENGTH_STRONG: DriveStrength = (6, 6);
+/// pull系の既定強度。
+pub const STRENGTH_PULL: DriveStrength = (5, 5);
+
 #[derive(Debug, Clone)]
 pub struct ContAssign {
     pub lval: LValue,
     pub expr: ExprId,
+    /// 駆動強度（0側, 1側）。supply=7, strong=6, pull=5, weak=3, highz=0。既定は(6, 6)。
+    pub strength: DriveStrength,
 }
 
 #[derive(Debug, Clone)]

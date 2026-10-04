@@ -358,6 +358,15 @@ fn compare_expr_context_width() {
 }
 
 #[test]
+fn compare_drive_strength() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/drive_strength/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

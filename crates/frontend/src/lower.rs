@@ -1,11 +1,12 @@
 use crate::error::FrontendError;
 use indexmap::IndexMap;
 use rverilog_hir::{
-    AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, EdgeType, Expr, FunctionDecl,
-    GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems, HirModule,
-    InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind,
+    AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, DriveStrength, EdgeType, Expr,
+    FunctionDecl, GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems,
+    HirModule, InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind,
     NetResolve, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, Range, RegDecl,
-    Sensitivity, SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, UnOp,
+    Sensitivity, SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, UnOp, STRENGTH_PULL,
+    STRENGTH_STRONG,
 };
 use rverilog_mir::LogicVal;
 use smol_str::SmolStr;
@@ -162,6 +163,71 @@ fn lower_module_nonansi(
         tasks,
         generates,
     })
+}
+
+// ── drive strength ────────────────────────────────────────────────────────────
+
+fn strength0_level(s: &sv_parser::Strength0) -> u8 {
+    use sv_parser::Strength0 as S;
+    match s {
+        S::Supply0(_) => 7,
+        S::Strong0(_) => 6,
+        S::Pull0(_) => 5,
+        S::Weak0(_) => 3,
+    }
+}
+
+fn strength1_level(s: &sv_parser::Strength1) -> u8 {
+    use sv_parser::Strength1 as S;
+    match s {
+        S::Supply1(_) => 7,
+        S::Strong1(_) => 6,
+        S::Pull1(_) => 5,
+        S::Weak1(_) => 3,
+    }
+}
+
+/// `(strong1, weak0)` 等の駆動強度を (0側, 1側) のレベルに変換する。`highz` の側は0（駆動しない）。
+fn drive_strength(ds: &sv_parser::DriveStrength) -> DriveStrength {
+    use sv_parser::DriveStrength as D;
+    match ds {
+        D::Strength01(d) => {
+            let (s0, _, s1) = &d.nodes.0.nodes.1;
+            (strength0_level(s0), strength1_level(s1))
+        }
+        D::Strength10(d) => {
+            let (s1, _, s0) = &d.nodes.0.nodes.1;
+            (strength0_level(s0), strength1_level(s1))
+        }
+        D::Strength0z(d) => (strength0_level(&d.nodes.0.nodes.1 .0), 0),
+        D::Strength1z(d) => (0, strength1_level(&d.nodes.0.nodes.1 .0)),
+        D::Strengthz0(d) => (strength0_level(&d.nodes.0.nodes.1 .2), 0),
+        D::Strengthz1(d) => (0, strength1_level(&d.nodes.0.nodes.1 .2)),
+    }
+}
+
+fn opt_drive_strength(ds: &Option<sv_parser::DriveStrength>) -> DriveStrength {
+    ds.as_ref().map(drive_strength).unwrap_or(STRENGTH_STRONG)
+}
+
+/// `pullup (pull1)` 等の引く強さ（pullupは1側、pulldownは0側）。指定なしはpull。
+fn pull_strength(gi: &sv_parser::GateInstantiation) -> DriveStrength {
+    use sv_parser::GateInstantiation as GI;
+    let level = match gi {
+        GI::Pullup(p) => p.nodes.1.as_ref().map(|s| match s {
+            sv_parser::PullupStrength::Strength01(d) => strength1_level(&d.nodes.0.nodes.1 .2),
+            sv_parser::PullupStrength::Strength10(d) => strength1_level(&d.nodes.0.nodes.1 .0),
+            sv_parser::PullupStrength::Strength1(d) => strength1_level(&d.nodes.0.nodes.1),
+        }),
+        GI::Pulldown(p) => p.nodes.1.as_ref().map(|s| match s {
+            sv_parser::PulldownStrength::Strength01(d) => strength0_level(&d.nodes.0.nodes.1 .0),
+            sv_parser::PulldownStrength::Strength10(d) => strength0_level(&d.nodes.0.nodes.1 .2),
+            sv_parser::PulldownStrength::Strength0(d) => strength0_level(&d.nodes.0.nodes.1),
+        }),
+        _ => None,
+    };
+    let level = level.unwrap_or(STRENGTH_PULL.0);
+    (level, level)
 }
 
 // ── non-ANSI ports ────────────────────────────────────────────────────────────
@@ -1338,6 +1404,11 @@ fn lower_net_decl(
         let (width, width_expr) = packed_width_expr(tree, RefNode::NetDeclarationNetType(nt));
         let signed = has_signed(RefNode::NetDeclarationNetType(nt));
         let net_type = net_type_to_resolve(&nt.nodes.0)?;
+        // `wire (weak1, weak0) w = ...;` の駆動強度は宣言時代入に適用される
+        let decl_strength = match &nt.nodes.1 {
+            Some(sv_parser::Strength::Drive(d)) => drive_strength(d),
+            _ => STRENGTH_STRONG,
+        };
         for assignment in nt.nodes.5.nodes.0.contents() {
             if let Some(name) = get_id(tree, RefNode::NetIdentifier(&assignment.nodes.0)) {
                 nets.push(NetDecl {
@@ -1354,6 +1425,7 @@ fn lower_net_decl(
                         lval: LValue::Net(name),
                         expr: lower_expression(tree, expr)?,
                         weak: false,
+                        strength: decl_strength,
                     });
                 }
             }
@@ -1570,6 +1642,7 @@ fn lower_continuous_assign(
     if let sv_parser::ContinuousAssign::Net(n) = ca {
         // ListOfNetAssignments: List<Symbol, NetAssignment>
         // NetAssignment: (NetLvalue, Symbol, Expression)
+        let strength = opt_drive_strength(&n.nodes.1);
         for na_node in unwrap_all_net_assignments(RefNode::ContinuousAssignNet(n)) {
             if let RefNode::NetAssignment(na) = na_node {
                 let lval = lower_net_lvalue(tree, RefNode::NetLvalue(&na.nodes.0))?;
@@ -1578,6 +1651,7 @@ fn lower_continuous_assign(
                     lval,
                     expr,
                     weak: false,
+                    strength,
                 });
             }
         }
@@ -1600,6 +1674,7 @@ fn switch_assign(lval: LValue, data: Expr, en: Expr, active_low: bool) -> Contin
         lval,
         expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
         weak: false,
+        strength: STRENGTH_STRONG,
     }
 }
 
@@ -1611,6 +1686,7 @@ fn lower_gate_inst(
     let mut out = Vec::new();
     match gi {
         GI::NInput(n) => {
+            let strength = opt_drive_strength(&n.nodes.1);
             let (op, negate) = match gate_keyword_text(tree, &n.nodes.0.nodes.0) {
                 "and" => (BinOp::BitAnd, false),
                 "nand" => (BinOp::BitAnd, true),
@@ -1645,10 +1721,12 @@ fn lower_gate_inst(
                     lval,
                     expr,
                     weak: false,
+                    strength,
                 });
             }
         }
         GI::NOutput(n) => {
+            let strength = opt_drive_strength(&n.nodes.1);
             let negate = match gate_keyword_text(tree, &n.nodes.0.nodes.0) {
                 "buf" => false,
                 "not" => true,
@@ -1671,12 +1749,14 @@ fn lower_gate_inst(
                             lval,
                             expr: in_expr.clone(),
                             weak: false,
+                            strength,
                         });
                     }
                 }
             }
         }
         GI::Enable(e) => {
+            let strength = opt_drive_strength(&e.nodes.1);
             // bufif0/bufif1/notif0/notif1: `out = en ? data : 1'bz`（0系は枝を入れ替え）。
             // 入力のZ/Xは出力Xになる（bufifは `~~in` でZをXへ落とす）。strength/delayは無視。
             let kind = gate_keyword_text(tree, &e.nodes.0.nodes.0);
@@ -1700,6 +1780,7 @@ fn lower_gate_inst(
                     lval,
                     expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
                     weak: false,
+                    strength,
                 });
             }
         }
@@ -1722,6 +1803,7 @@ fn lower_gate_inst(
                     lval,
                     expr: Expr::Const(lv(up as u64, 1)),
                     weak: true,
+                    strength: pull_strength(gi),
                 });
             }
         }

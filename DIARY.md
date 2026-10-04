@@ -3352,3 +3352,26 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ### Next
 
 - PRマージ後、A8最終残りのPR2（strength）→PR3（双方向スイッチ）
+
+## 2026-10-05（続き3）A8最終残り PR2: strength
+
+ブランチ`feat/drive-strength`（PR3の双方向スイッチは次）。
+
+### What was done
+
+- HIR/MIR: `DriveStrength=(s0,s1)`（supply=7/strong=6/pull=5/weak=3/highz=0）を`ContinuousAssign`/`ContAssign`に追加。
+  `net_pulls`は(lo, width, one, level)、`ElaboratedDesign.strength_nets`（既定以外の強度を持つネット）を追加
+- frontend: `assign (s1,s0)`、`wire (s1,s0) w = ...`、ゲート（NInput/NOutput/Enable）の強度、`pullup/pulldown`の強度指定を解釈。
+  `highz0/highz1`側は強度0（駆動しない）
+- `LogicVal::resolve_strength`: ビットごとに最強の非Z駆動を選択、同強度の0/1競合はX。Xの駆動は0/1の両ケースで解決して
+  一致するビットのみ採用（例: `(highz0, strong1)`のXはweak1と常に1）
+- sim: `strength_nets`のネットは強度つき解決（pullは弱い定数ドライバとして参加）。それ以外とwand/worは従来経路
+- `drive_strength`（iverilogとbit-exact）と`resolve_strength`単体テストを追加。既存テストは無修正で全通過
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- PR3: 双方向スイッチ（tran/tranif0/tranif1/rtran系）

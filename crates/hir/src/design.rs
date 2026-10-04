@@ -8,6 +8,13 @@ pub enum NetKind {
     Integer,
 }
 
+/// ドライバ強度（0側, 1側）。supply=7, strong=6, pull=5, weak=3, highz=0。
+pub type DriveStrength = (u8, u8);
+/// 既定のドライバ強度（strong0, strong1）。
+pub const STRENGTH_STRONG: DriveStrength = (6, 6);
+/// pullup/pulldown/tri0/tri1 の既定強度（pull）。
+pub const STRENGTH_PULL: DriveStrength = (5, 5);
+
 /// ネット宣言の型による解決規則（`wire`/`tri`/`uwire` は `Wire`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetResolve {
@@ -190,6 +197,8 @@ pub struct ContinuousAssign {
     /// `pullup`/`pulldown` 由来の弱いドライバ。`expr` の定数（1/0）が引く方向を表し、
     /// elabは連続代入ではなくネットのpull指定として扱う。
     pub weak: bool,
+    /// 駆動強度（`assign (strong1, weak0) ...` 等）。pullup/pulldownでは引く強さ。
+    pub strength: DriveStrength,
 }
 
 #[derive(Debug, Clone)]
