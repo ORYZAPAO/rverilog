@@ -79,14 +79,9 @@ impl Interpreter {
         let cont_len = design.conts.len();
         let mut net_values = HashMap::new();
         for (i, net) in design.nets.iter().enumerate() {
-            let x_mask = if net.width >= 64 {
-                u64::MAX
-            } else {
-                (1u64 << net.width) - 1
-            };
             let init = match net.kind {
-                NetKind::Wire => LogicVal::new(net.width as u16, 0, x_mask), // Z
-                _ => LogicVal::new(net.width as u16, x_mask, x_mask),        // X
+                NetKind::Wire => LogicVal::z_of_width(net.width),
+                _ => LogicVal::x_of_width(net.width),
             };
             net_values.insert(NetId(i as u32), init);
         }
@@ -756,11 +751,10 @@ impl Interpreter {
     }
 
     fn read_net(&self, id: NetId) -> LogicVal {
-        self.net_values.get(&id).cloned().unwrap_or_else(|| {
-            let w = self.design.get_net(id).width;
-            let xm = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
-            LogicVal::new(w as u16, xm, xm)
-        })
+        self.net_values
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| LogicVal::x_of_width(self.design.get_net(id).width))
     }
 
     /// lvalue が指す値の幅（ビット数）。`Concat` の書き込み分割・センシティビティ分割で使う。
@@ -790,11 +784,8 @@ impl Interpreter {
                 let vals: Vec<LogicVal> = parts
                     .iter()
                     .map(|p| {
-                        self.get_lval_val(p).unwrap_or_else(|| {
-                            let w = self.lvalue_width(p);
-                            let xm = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
-                            LogicVal::new(w as u16, xm, xm)
-                        })
+                        self.get_lval_val(p)
+                            .unwrap_or_else(|| LogicVal::x_of_width(self.lvalue_width(p)))
                     })
                     .collect();
                 Some(
@@ -804,6 +795,20 @@ impl Interpreter {
                 )
             }
         }
+    }
+
+    /// ネット `net_id` の `lo` から `sel_w` ビットを `val` で置き換える（任意幅対応）。
+    /// ネット幅の範囲外の位置への書き込みは無視する。
+    fn write_bits(&mut self, net_id: NetId, lo: u32, sel_w: u32, val: &LogicVal) {
+        let w = self.design.get_net(net_id).width;
+        let old = self
+            .net_values
+            .get(&net_id)
+            .cloned()
+            .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
+        let new_val = old.insert_bits(lo, sel_w, val);
+        self.net_values.insert(net_id, new_val.clone());
+        self.vcd_record_net_change(net_id, &new_val);
     }
 
     fn write_lvalue(&mut self, lval: &LValue, val: LogicVal, signed: bool) {
@@ -821,99 +826,21 @@ impl Interpreter {
                 self.net_values.insert(net_id, val.clone());
                 self.vcd_record_net_change(net_id, &val);
             }
-            LValue::BitSelect(id, bit) => {
-                let net_id = *id;
-                let w = self.design.get_net(net_id).width;
-                let old = self
-                    .net_values
-                    .get(&net_id)
-                    .cloned()
-                    .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
-                let oa = old.pad_to_width(w);
-                let ob = old.pad_to_width_b(w);
-                let ba = val.pad_to_width(1);
-                let bb = val.pad_to_width_b(1);
-                let m = 1u64 << bit;
-                let na = (oa & !m) | (ba << bit);
-                let nb = (ob & !m) | (bb << bit);
-                let new_val = LogicVal::new(w as u16, na, nb);
-                self.net_values.insert(net_id, new_val.clone());
-                self.vcd_record_net_change(net_id, &new_val);
-            }
+            LValue::BitSelect(id, bit) => self.write_bits(*id, *bit, 1, &val),
             LValue::DynBitSelect(id, idx_id) => {
-                let net_id = *id;
                 let bit = self.eval_expr(*idx_id).pad_to_width(32) as u32;
-                let w = self.design.get_net(net_id).width;
-                let old = self
-                    .net_values
-                    .get(&net_id)
-                    .cloned()
-                    .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
-                let oa = old.pad_to_width(w);
-                let ob = old.pad_to_width_b(w);
-                let ba = val.pad_to_width(1);
-                let bb = val.pad_to_width_b(1);
-                let m = 1u64 << bit;
-                let na = (oa & !m) | (ba << bit);
-                let nb = (ob & !m) | (bb << bit);
-                let new_val = LogicVal::new(w as u16, na, nb);
-                self.net_values.insert(net_id, new_val.clone());
-                self.vcd_record_net_change(net_id, &new_val);
+                self.write_bits(*id, bit, 1, &val);
             }
-            LValue::PartSelect(id, hi, lo) => {
-                let net_id = *id;
-                let w = self.design.get_net(net_id).width;
-                let old = self
-                    .net_values
-                    .get(&net_id)
-                    .cloned()
-                    .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
-                let oa = old.pad_to_width(w);
-                let ob = old.pad_to_width_b(w);
-                let sel_w = hi - lo + 1;
-                let m = if sel_w >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << sel_w) - 1
-                };
-                let va = val.pad_to_width(sel_w);
-                let vb = val.pad_to_width_b(sel_w);
-                let na = (oa & !(m << lo)) | (va << lo);
-                let nb = (ob & !(m << lo)) | (vb << lo);
-                let new_val = LogicVal::new(w as u16, na, nb);
-                self.net_values.insert(net_id, new_val.clone());
-                self.vcd_record_net_change(net_id, &new_val);
-            }
+            LValue::PartSelect(id, hi, lo) => self.write_bits(*id, *lo, hi - lo + 1, &val),
             LValue::DynPartSelect(id, base_id, width, plus_dir) => {
-                let net_id = *id;
-                let w = self.design.get_net(net_id).width;
+                let w = self.design.get_net(*id).width;
                 let base = self.eval_expr(*base_id).pad_to_width(32) as i64;
                 // 範囲外（負のbase等）は書き込みを無視する。ネット幅を超える場合も
-                // 無視する（PartSelect の書き込みと同水準の割り切り、部分的な
-                // ビット単位書き込みまではやらない）
+                // 無視する（部分的なビット単位書き込みまではやらない）
                 if let Some((hi, lo)) = indexed_part_select_bounds(base, *width, *plus_dir) {
                     if hi >= 0 && (hi as u32) < w {
                         let (hi, lo) = (hi as u32, lo as u32);
-                        let old = self
-                            .net_values
-                            .get(&net_id)
-                            .cloned()
-                            .unwrap_or_else(|| LogicVal::new(w as u16, 0, 0));
-                        let oa = old.pad_to_width(w);
-                        let ob = old.pad_to_width_b(w);
-                        let sel_w = hi - lo + 1;
-                        let m = if sel_w >= 64 {
-                            u64::MAX
-                        } else {
-                            (1u64 << sel_w) - 1
-                        };
-                        let va = val.pad_to_width(sel_w);
-                        let vb = val.pad_to_width_b(sel_w);
-                        let na = (oa & !(m << lo)) | (va << lo);
-                        let nb = (ob & !(m << lo)) | (vb << lo);
-                        let new_val = LogicVal::new(w as u16, na, nb);
-                        self.net_values.insert(net_id, new_val.clone());
-                        self.vcd_record_net_change(net_id, &new_val);
+                        self.write_bits(*id, lo, hi - lo + 1, &val);
                     }
                 }
             }
