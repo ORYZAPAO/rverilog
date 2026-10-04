@@ -3163,3 +3163,25 @@ PLAN.md・DIARY.mdを読み、A21完了後の次課題として、F節の既知�
 
 - PR作成（`feat/m1-milestone`向け）
 - 次候補: A5（64bit超部分書き込み）、A7（64bit超乗除算）、`**`演算子
+
+## 2026-10-04（続き）
+
+### Task
+
+A7（64bit超の乗除算・剰余）をブランチ`feat/wide-muldiv`で実装。直前にPR #43（while/repeat/forever）をCI通過後マージ済み。
+
+### What was done
+
+- `logicval.rs`: `mul`/`div`/`mod_`/`div_signed`/`mod_signed`のw>64をmulti-word化（`mul_chunks`・`divmod_chunks`・
+  `wide_divmod[_signed]`）。除数0/X入力は演算幅の全X（従来は1bit X）
+- 発見・修正: `interp.rs`の単項マイナスが64bit固定（`-(a as i64)`）だった。`0 - v`のmulti-word `sub`に変更
+- 単体テスト3件、`wide_muldiv`（`test_wide_muldiv`・`compare_wide_muldiv`、iverilogとbit-exact）を追加
+- 未対応のまま残したもの（PLAN.md A22/A23に記録）: 64bit超の`%h`等の表示、64bit超の10進リテラル
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32スモーク含む）、samples exit 0
+
+### Next
+
+- PR作成→CI通過後マージ。次候補: A22（64bit超表示）・A23（64bit超10進リテラル）、A5、`**`演算子
