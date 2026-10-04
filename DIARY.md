@@ -3101,3 +3101,41 @@ Codex実装完了後、こちらで独立に検証:
 - picorv32.vスモークテストのPASSにより推奨着手順11番は完了。次の優先課題は
   PLAN.md実装課題節に残る他項目（A5: 64bit超ネットへの部分書き込み、A7: 64bit超
   乗除算、A8: inout、`casez`/`casex`のワイルドカードマッチ疑い等）から選定する
+## 2026-10-04
+
+### Task
+
+PLAN.md・DIARY.mdを読み、A21完了後の次課題として、F節の既知課題
+「`casez`/`casex`のワイルドカードマッチが`case`と同一実装」を確認・修正した。
+
+### 確認
+
+`crates/sim/src/interp.rs`の`Stmt::Case`が`CaseZ | CaseX`でも`case_eq`を呼んでおり、
+ワイルドカード（`?`/`z`/`x`）が一切効かないことをコードで確認（同期実行パス
+`exec_sync_stmt`側は`kind`自体を無視していた）。
+
+### What was done（Codexに委任、ブランチ`fix/casez-casex-wildcard-v2`）
+
+- `mir/src/logicval.rs`に`casez_eq`/`casex_eq`（共通実装`case_wild_eq`）を追加。
+  casezは両辺のZ、casexは両辺のX/Zをdon't careとして除外し、残りをa/b両平面で
+  厳密比較。幅は`case_eq`と同じく狭い方をゼロ拡張。Small/Large両対応
+- `interp.rs`のスケジューラ側`Stmt::Case`と関数/タスク用同期実行側`Stmt::Case`の
+  両方をkind別に配線
+- 単体テスト2件、回帰テスト`tests/integration/cases/casez_casex/`
+  （task内casez・function内casex、iverilogとbit-exact一致）を追加
+
+### 独立検証
+
+- `git diff`が依頼範囲に収まっていることを確認
+- `cargo fmt --check`・`cargo clippy --workspace --all-targets -- -D warnings`警告なし
+- `cargo test --workspace`全通過（`test_casez_casex`・`compare_casez_casex`含む）
+- `samples/counter4`（tb_counter4）・`samples/fifo_sync`（tb_fifo_sync）exit 0
+
+### Result
+
+✅ `casez`/`casex`のワイルドカードマッチを実装（PLAN.md F節に対応済みとして記録）
+
+### Next
+
+- ブランチをコミット・PRするかユーザーに確認
+- 次候補: `while`/`repeat`/`forever`対応、A5（64bit超部分書き込み）、A7（64bit超乗除算）

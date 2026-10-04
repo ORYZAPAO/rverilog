@@ -1,0 +1,12 @@
+casez priority=a1
+casez zpat=b2
+casez zsel=a1
+casez width=c3
+casez default=d0
+casex xsel=ea
+casex xpat=e1
+casex zsel=eb
+casex zpat=e2
+casex width=f4
+casex default=fd
+$finish at time 0
