@@ -1433,12 +1433,49 @@ fn unwrap_all_net_assignments(node: RefNode) -> Vec<RefNode> {
 }
 
 fn lower_net_lvalue(tree: &SyntaxTree, node: RefNode) -> Result<LValue, FrontendError> {
-    if let Some(name_node) = unwrap_node!(node, NetIdentifier) {
-        if let Some(name) = get_id(tree, name_node) {
-            return Ok(LValue::Net(name));
+    use sv_parser::ConstantPartSelectRange as CPR;
+    use sv_parser::NetLvalue as NL;
+    let RefNode::NetLvalue(nl) = node else {
+        return Err(FrontendError::ParseError("unsupported net lvalue".into()));
+    };
+    match nl {
+        NL::Identifier(ni) => {
+            let name = unwrap_node!(RefNode::NetLvalueIdentifier(ni), NetIdentifier)
+                .and_then(|n| get_id(tree, n))
+                .ok_or_else(|| FrontendError::ParseError("unsupported net lvalue".into()))?;
+            let sel = &ni.nodes.1.nodes;
+            // ビット選択 `net[i]`（メモリ要素の場合もelab側で解決される）
+            if let Some(bracket) = sel.1.nodes.0.first() {
+                let idx = lower_const_expr(tree, &bracket.nodes.1)?;
+                return Ok(LValue::IndexSel(name, Box::new(idx)));
+            }
+            // 部分選択 `net[hi:lo]`。選択を黙って無視して全ビットへ代入しない。
+            if let Some(bracket) = &sel.2 {
+                return match &bracket.nodes.1 {
+                    CPR::ConstantRange(cr) => Ok(LValue::PartSelect(
+                        Box::new(LValue::Net(name)),
+                        Range {
+                            left: Box::new(lower_const_expr(tree, &cr.nodes.0)?),
+                            right: Box::new(lower_const_expr(tree, &cr.nodes.2)?),
+                        },
+                    )),
+                    _ => Err(unsupported("indexed part-select in net lvalue")),
+                };
+            }
+            Ok(LValue::Net(name))
         }
+        NL::Lvalue(c) => {
+            let mut parts = Vec::new();
+            for inner in c.nodes.0.nodes.1.contents() {
+                parts.push(lower_net_lvalue(tree, RefNode::NetLvalue(inner))?);
+            }
+            if parts.is_empty() {
+                return Err(FrontendError::ParseError("empty concat lvalue".into()));
+            }
+            Ok(LValue::Concat(parts))
+        }
+        NL::Pattern(_) => Err(unsupported("net lvalue pattern")),
     }
-    Err(FrontendError::ParseError("unsupported net lvalue".into()))
 }
 
 // ── always / initial ──────────────────────────────────────────────────────────

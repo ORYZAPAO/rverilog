@@ -125,3 +125,27 @@ fn test_function_call_in_expression_is_accepted() {
         "expected function call expression to parse: {result:?}"
     );
 }
+
+#[test]
+fn test_inout_non_plain_net_connection_is_unsupported() {
+    let design = parse_source(
+        "inout_bit_select",
+        r#"
+            module child(inout p); endmodule
+            module top;
+                wire [3:0] bus;
+                child u(.p(bus[1]));
+            endmodule
+        "#,
+    )
+    .expect("parse");
+    let result = rverilog_elab::elaborate(&design, "top", &[]);
+    assert!(
+        matches!(
+            &result,
+            Err(rverilog_elab::ElabError::UnsupportedConstruct(m)) if m.contains("inout")
+        ),
+        "expected UnsupportedConstruct(inout), got {:?}",
+        result.err()
+    );
+}

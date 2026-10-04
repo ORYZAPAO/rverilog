@@ -1,0 +1,13 @@
+1 en=000 bus=zzzzzzzz split=zzzzzzzz mod=zzzzzzzz wide=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+2 en=100 bus=10100101 split=zzzzzzzz mod=10100101 wide=deadbeefcafef00d0123456789abcdef
+3 en=110 bus=xxxxxxxx split=zzzzzzzz mod=xxxxxxxx wide=deadbeefcafef00d0123456789abcdef
+4 en=110 bus=10100101 split=zzzzzzzz mod=10100101 wide=deadbeefcafef00d0123456789abcdef
+5 en=110 bus=1010010x split=zzzzzzzz mod=1010010x wide=deadbeefcafef00d0123456789abcdef
+6 en=010 bus=10100100 split=zzzzzzzz mod=10100100 wide=deadbeefcafef00d0123456789abcdef
+7 en=011 bus=xxxxxxxx split=zzzzzzzz mod=10100100 wide=deadbeefcafef00d0123456789abcdef
+8 en=000 bus=zzzzzzzz split=zzzzzzzz mod=zzzzzzzz wide=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+9 en=000 bus=zzzzzzzz split=zzzz0011 mod=zzzzzzzz wide=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+10 en=000 bus=zzzzzzzz split=11000011 mod=zzzzzzzz wide=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+11 en=000 bus=zzzzzzzz split=1100zzzz mod=zzzzzzzz wide=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+12 en=110 bus=1010010x split=1100zzzz mod=1010010x wide=deadbeefcafef00d0123456789abcdeX
+$finish at time 12

@@ -72,6 +72,8 @@ pub struct Interpreter {
     cont_dirty: VecDeque<u32>,
     /// cont_dirtyへの重複enqueueを防ぐビットセット。
     cont_queued: Vec<bool>,
+    /// 多重ドライバネットの各連続代入の現在のドライバ値（cont_id → ネット幅の値、駆動外はZ）。
+    driver_vals: HashMap<u32, LogicVal>,
 }
 
 impl Interpreter {
@@ -110,6 +112,7 @@ impl Interpreter {
             monitor_last: None,
             cont_dirty: VecDeque::new(),
             cont_queued: vec![false; cont_len],
+            driver_vals: HashMap::new(),
         }
     }
 
@@ -967,6 +970,52 @@ impl Interpreter {
         }
     }
 
+    /// lvalue が複数ドライバのネット（`net_drivers`）を指す場合、そのネットIDを返す。
+    fn multi_driven_target(&self, lval: &LValue) -> Option<NetId> {
+        match lval {
+            LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _)
+                if self.design.net_drivers.contains_key(&id.0) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        }
+    }
+
+    /// 多重ドライバネットへの連続代入: このドライバの値を更新し、全ドライバを
+    /// ビット単位で解決（Z中立・不一致はX）してネット値を更新する。
+    fn write_multi_driver(
+        &mut self,
+        cont_id: u32,
+        net_id: NetId,
+        lval: &LValue,
+        val: LogicVal,
+        signed: bool,
+    ) {
+        let w = self.design.get_net(net_id).width;
+        let z = LogicVal::z_of_width(w);
+        let drv = match lval {
+            LValue::BitSelect(_, bit) => z.insert_bits(*bit, 1, &val),
+            LValue::PartSelect(_, hi, lo) => z.insert_bits(*lo, hi - lo + 1, &val),
+            _ if val.width() == w => val,
+            _ if signed => val.extend_sign(w),
+            _ => val.resize(w),
+        };
+        self.driver_vals.insert(cont_id, drv);
+        let mut resolved = z;
+        for c in &self.design.net_drivers[&net_id.0] {
+            if let Some(v) = self.driver_vals.get(c) {
+                resolved = resolved.resolve(v);
+            }
+        }
+        let old = self.net_values.get(&net_id).cloned();
+        if old.as_ref() != Some(&resolved) {
+            self.net_values.insert(net_id, resolved.clone());
+            self.vcd_record_net_change(net_id, &resolved);
+            self.trigger_sensitivity(&LValue::Net(net_id), old.as_ref(), &resolved);
+        }
+    }
+
     fn eval_conts(&mut self) {
         let limit = self.design.conts.len().saturating_mul(64).max(1000);
         let mut iterations = 0usize;
@@ -987,6 +1036,10 @@ impl Interpreter {
             let cont = self.design.conts[cont_id as usize].clone();
             let signed = self.design.expr_signed[cont.expr.0 as usize];
             let val = self.eval_expr(cont.expr);
+            if let Some(net_id) = self.multi_driven_target(&cont.lval) {
+                self.write_multi_driver(cont_id, net_id, &cont.lval, val, signed);
+                continue;
+            }
             let old = self.get_lval_val(&cont.lval);
             self.write_lvalue(&cont.lval, val, signed);
             let new = self.get_lval_val(&cont.lval);

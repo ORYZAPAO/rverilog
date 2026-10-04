@@ -45,6 +45,9 @@ pub struct ElaboratedDesign {
     pub sensitivity_table: IndexMap<u32, Vec<u32>>,
     /// net.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub cont_sensitivity: IndexMap<u32, Vec<u32>>,
+    /// net.0 → [cont_id] 複数の連続代入が駆動するWireのドライバ一覧（ドライバが2つ以上のネットのみ）。
+    /// simはこれらのネットを各ドライバ値のビット単位解決（Z中立・不一致はX）で更新する。
+    pub net_drivers: IndexMap<u32, Vec<u32>>,
     /// mem_id.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub mem_sensitivity: IndexMap<u32, Vec<u32>>,
     /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）

@@ -3232,3 +3232,29 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ## 2026-10-04（続き4）
 
 本日の成果（PR #41, #43〜#46）を`docs/session-2026-10-04-summary.md`にまとめた（ブランチ`docs/session-2026-10-04-summary`）。
+
+## 2026-10-05
+
+### Task
+
+A8（inout・多重ドライバ）をブランチ`feat/inout-multidriver`で実装。範囲は「多重ドライバ解決＋inout結線」
+（strength・wand/wor/tri0/tri1は対象外、ユーザー承認済み）。
+
+### What was done
+
+- `mir`: `ElaboratedDesign.net_drivers`、`LogicVal::resolve`（Z中立・不一致X、任意幅）
+- `elab`: 2つ以上の連続代入が駆動するWireを`net_drivers`に集計。inoutポートは親子でNetIdを共有
+  （`pending_port_aliases`）。単純でない接続は`UnsupportedConstruct`
+- `sim`: `write_multi_driver`でドライバ値を保持→全ドライバを`resolve`→変化時のみsensitivity発火。単一ドライバは従来パス
+- 副次的に発見・修正（既存バグ）: `lower_net_lvalue`が連続代入/ゲート出力/ポート出力の部分選択・ビット選択・連結を
+  無視して全体へ代入していた（`assign s[7:4]=x`が下位に入る等。master上でも再現）
+- `tristate_bus`・`inout_port`（`test_*`/`compare_*`、iverilogとbit-exact）、`resolve`単体テスト、
+  inout非単純接続の明示エラーテストを追加
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32スモーク含む）、samples exit 0
+
+### Next
+
+- PR作成→CI通過後マージ。次候補: `**`演算子、A8の残（wand/wor/tri0/tri1、bufif/notif）
