@@ -1,0 +1,7 @@
+x: 1010x10x f0f0xxxxffff0000123456789abcdefX
+z: 1010x10x f0f0xxxxffff0000123456789abcdefX
+xz: xz01xxxx
+1: xz01xz01
+0: xz01zx10
+w: 00001010
+$finish at time 0

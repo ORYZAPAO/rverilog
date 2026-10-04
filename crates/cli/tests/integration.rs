@@ -382,6 +382,59 @@ fn test_enable_gates() {
 }
 
 #[test]
+fn test_mos_switches() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/mos_switches/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("mos_switches");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
+fn test_net_ports_pulls_concat() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/net_ports_pulls_concat/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("net_ports_pulls_concat");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+// iverilogがtriregを未対応のため、期待値はIEEE 1364の規則から手で導出（比較テストなし）
+#[test]
+fn test_trireg_net() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/trireg_net/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("trireg_net");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
+fn test_ternary_x_cond() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/ternary_x_cond/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("ternary_x_cond");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];

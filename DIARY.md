@@ -3281,3 +3281,27 @@ fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32含む）�
 ### Next
 
 - PR作成→マージ。次候補: `**`演算子、A8の残（strength・スイッチレベルゲート・trireg）
+
+### Task（続き）A8の残り2: mos/trireg/ポートnet型/pull選択/連結lvalue
+
+ブランチ`feat/a8-remaining`（ユーザー選択: nmos系・trireg・「ポートnet型・pull選択・連結lvalue」。双方向スイッチとstrengthは対象外）。
+
+### What was done
+
+- MIR: `NetResolve`をWand/Wor/Trireg/Supply0/Supply1に整理し、pullは`net_pulls`（lo, width, one）のビット範囲へ。
+  `net_drivers`のドライバを`(cont_id, part_idx)`化し、`LValue::flatten_parts`で連結lvalueを展開
+- `LogicVal`: `pull_z_range`・`keep_on_z`（trireg）・`merge_unknown`
+- frontend: Mos/Cmosを条件付きドライバに（cmos=nmos+pmos）。ANSIヘッダのnet型を`PortDecl.net_type`へ。
+  pullup/pulldownのビット/部分選択を許可。tran系のエラーメッセージを`bidirectional switch`に変更
+- elab/sim: net型付きポートはWire扱い、trireg/pull/連結の解決を`write_cont`/`write_multi_driver`に統合
+- 副次的な既存バグ修正: 条件X/Zの三項演算子が1bit Xだった→IEEE通りの両枝ビット単位マージ
+- テスト: `mos_switches`・`net_ports_pulls_concat`・`ternary_x_cond`（iverilog比較）、`trireg_net`（iverilog未対応のため手導出の期待値）、
+  単体テスト追加、明示エラーテストを更新
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32含む）、samples exit 0
+
+### Next
+
+- PR作成→マージ。次候補: `**`演算子、A8の最終残（strength・tran系・refポート）

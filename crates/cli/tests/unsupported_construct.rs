@@ -164,22 +164,17 @@ fn assert_unsupported(name: &str, source: &str, needle: &str) {
 }
 
 #[test]
-fn test_switch_level_gates_are_unsupported() {
+fn test_bidirectional_switches_are_unsupported() {
     assert_unsupported(
         "tran_gate",
         "module top; wire a, b; tran (a, b); endmodule",
-        "switch-level gate",
+        "bidirectional switch",
     );
     assert_unsupported(
-        "nmos_gate",
-        "module top; wire o, i, c; nmos (o, i, c); endmodule",
-        "switch-level gate",
+        "tranif_gate",
+        "module top; wire a, b, c; tranif1 (a, b, c); endmodule",
+        "bidirectional switch",
     );
-}
-
-#[test]
-fn test_trireg_is_unsupported() {
-    assert_unsupported("trireg_net", "module top; trireg t; endmodule", "trireg");
 }
 
 #[test]
@@ -190,6 +185,6 @@ fn test_unsupported_gate_inside_generate_is_reported() {
             wire a, b;
             generate if (1) begin : g tran (a, b); end endgenerate
         endmodule"#,
-        "switch-level gate",
+        "bidirectional switch",
     );
 }

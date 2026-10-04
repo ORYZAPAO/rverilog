@@ -212,6 +212,7 @@ fn lower_ansi_port(
                 width: 1,
                 width_expr: Expr::Const(lv(1, 32)),
                 signed: false,
+                net_type: NetResolve::Wire,
             })
         }
     }
@@ -239,12 +240,47 @@ fn lower_ansi_port_net(
     let signed = has_signed(RefNode::AnsiPortDeclarationNet(x));
     let name = get_id(tree, RefNode::PortIdentifier(&x.nodes.1))
         .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
+    let net_type = match net_port_type(&x.nodes.0) {
+        Some(nt) => net_type_to_resolve(nt)?,
+        None => NetResolve::Wire,
+    };
     Ok(PortDecl {
         name,
         direction: dir,
         width,
         width_expr,
         signed,
+        net_type,
+    })
+}
+
+/// ANSIポートヘッダの `NetType`（`output wand x` の `wand` 等）を取り出す。
+fn net_port_type(
+    hdr: &Option<sv_parser::NetPortHeaderOrInterfacePortHeader>,
+) -> Option<&sv_parser::NetType> {
+    use sv_parser::NetPortHeaderOrInterfacePortHeader as H;
+    use sv_parser::NetPortType as NPT;
+    match hdr {
+        Some(H::NetPortHeader(h)) => match &h.nodes.1 {
+            NPT::DataType(d) => d.nodes.0.as_ref(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// net型キーワードを解決規則へ変換する（tri/uwire=wire、triand=wand、trior=wor）。
+fn net_type_to_resolve(nt: &sv_parser::NetType) -> Result<NetResolve, FrontendError> {
+    use sv_parser::NetType as NT;
+    Ok(match nt {
+        NT::Wire(_) | NT::Tri(_) | NT::Uwire(_) => NetResolve::Wire,
+        NT::Wand(_) | NT::Triand(_) => NetResolve::Wand,
+        NT::Wor(_) | NT::Trior(_) => NetResolve::Wor,
+        NT::Tri0(_) => NetResolve::Tri0,
+        NT::Tri1(_) => NetResolve::Tri1,
+        NT::Trireg(_) => NetResolve::Trireg,
+        NT::Supply0(_) => NetResolve::Supply0,
+        NT::Supply1(_) => NetResolve::Supply1,
     })
 }
 
@@ -272,6 +308,7 @@ fn lower_ansi_port_variable(
         width,
         width_expr,
         signed,
+        net_type: NetResolve::Wire,
     })
 }
 
@@ -1137,17 +1174,7 @@ fn lower_net_decl(
     if let sv_parser::NetDeclaration::NetType(nt) = nd {
         let (width, width_expr) = packed_width_expr(tree, RefNode::NetDeclarationNetType(nt));
         let signed = has_signed(RefNode::NetDeclarationNetType(nt));
-        use sv_parser::NetType as NT;
-        let net_type = match &nt.nodes.0 {
-            NT::Wire(_) | NT::Tri(_) | NT::Uwire(_) => NetResolve::Wire,
-            NT::Wand(_) | NT::Triand(_) => NetResolve::Wand,
-            NT::Wor(_) | NT::Trior(_) => NetResolve::Wor,
-            NT::Tri0(_) => NetResolve::Tri0,
-            NT::Tri1(_) => NetResolve::Tri1,
-            NT::Supply0(_) => NetResolve::Supply0,
-            NT::Supply1(_) => NetResolve::Supply1,
-            NT::Trireg(_) => return Err(unsupported("trireg net (charge storage)")),
-        };
+        let net_type = net_type_to_resolve(&nt.nodes.0)?;
         for assignment in nt.nodes.5.nodes.0.contents() {
             if let Some(name) = get_id(tree, RefNode::NetIdentifier(&assignment.nodes.0)) {
                 nets.push(NetDecl {
@@ -1402,6 +1429,17 @@ fn gate_keyword_text<'a>(tree: &'a SyntaxTree, kw: &sv_parser::Keyword) -> &'a s
     tree.get_str(kw).unwrap_or("").trim()
 }
 
+/// `out = en ? data : 1'bz`（`active_low` なら `en ? 1'bz : data`）の連続代入。
+fn switch_assign(lval: LValue, data: Expr, en: Expr, active_low: bool) -> ContinuousAssign {
+    let z = Expr::Const(LogicVal::Z);
+    let (t, f) = if active_low { (z, data) } else { (data, z) };
+    ContinuousAssign {
+        lval,
+        expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
+        weak: false,
+    }
+}
+
 fn lower_gate_inst(
     tree: &SyntaxTree,
     gi: &sv_parser::GateInstantiation,
@@ -1511,8 +1549,11 @@ fn lower_gate_inst(
             for inst in terms.contents() {
                 let lval =
                     lower_net_lvalue(tree, RefNode::NetLvalue(&inst.nodes.1.nodes.1.nodes.0))?;
-                if !matches!(lval, LValue::Net(_)) {
-                    return Err(unsupported("pullup/pulldown on a bit/part-select"));
+                if !matches!(
+                    lval,
+                    LValue::Net(_) | LValue::IndexSel(..) | LValue::PartSelect(..)
+                ) {
+                    return Err(unsupported("pullup/pulldown target"));
                 }
                 out.push(ContinuousAssign {
                     lval,
@@ -1521,9 +1562,41 @@ fn lower_gate_inst(
                 });
             }
         }
-        GI::Cmos(_) | GI::Mos(_) | GI::PassEn(_) | GI::Pass(_) => {
+        GI::Mos(m) => {
+            // nmos: ctrl==1で導通、pmos: ctrl==0で導通。rnmos/rpmosは抵抗性（strength減衰）だが
+            // strengthを持たないため同じ扱い。導通しないときはZ。
+            let active_low = match gate_keyword_text(tree, &m.nodes.0.nodes.0) {
+                "nmos" | "rnmos" => false,
+                "pmos" | "rpmos" => true,
+                other => return Err(unsupported(&format!("mos switch: {other}"))),
+            };
+            for inst in m.nodes.2.contents() {
+                let (out_term, _, in_term, _, en_term) = &inst.nodes.1.nodes.1;
+                let lval = lower_net_lvalue(tree, RefNode::NetLvalue(&out_term.nodes.0))?;
+                let data = lower_expression(tree, &in_term.nodes.0)?;
+                let en = lower_expression(tree, &en_term.nodes.0)?;
+                out.push(switch_assign(lval, data, en, active_low));
+            }
+        }
+        GI::Cmos(c) => {
+            // cmos(out, in, nctrl, pctrl) は nmos と pmos の並列（同じ出力を2つのドライバで駆動）
+            match gate_keyword_text(tree, &c.nodes.0.nodes.0) {
+                "cmos" | "rcmos" => {}
+                other => return Err(unsupported(&format!("cmos switch: {other}"))),
+            }
+            for inst in c.nodes.2.contents() {
+                let (out_term, _, in_term, _, n_term, _, p_term) = &inst.nodes.1.nodes.1;
+                let lval = lower_net_lvalue(tree, RefNode::NetLvalue(&out_term.nodes.0))?;
+                let data = lower_expression(tree, &in_term.nodes.0)?;
+                let n = lower_expression(tree, &n_term.nodes.0)?;
+                let p = lower_expression(tree, &p_term.nodes.0)?;
+                out.push(switch_assign(lval.clone(), data.clone(), n, false));
+                out.push(switch_assign(lval, data, p, true));
+            }
+        }
+        GI::PassEn(_) | GI::Pass(_) => {
             return Err(unsupported(
-                "switch-level gate (cmos/nmos/pmos/tran/tranif/rtran)",
+                "bidirectional switch (tran/tranif0/tranif1/rtran/rtranif)",
             ));
         }
     }

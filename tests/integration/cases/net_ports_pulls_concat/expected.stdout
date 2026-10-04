@@ -1,0 +1,6 @@
+1 yw=zzzz yo=1110 bus=1zzz00z1 hi=zzzz lo=zzzz big=zzzzzzzzzzzz
+2 yw=1100 yo=1110 bus=1zzz0101 hi=1100 lo=0011 big=1100zzzz0011
+3 yw=1000 yo=1110 bus=101000z1 hi=x1x0 lo=0011 big=110001100011
+4 yw=1010 yo=1110 bus=10100101 hi=0110 lo=zzzz big=zzzz0110zzzz
+5 yw=x1z0 yo=x110 bus=1zzz00z1 hi=1x0z lo=01xz big=1x0zzzzz01xz
+$finish at time 5

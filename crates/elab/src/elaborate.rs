@@ -50,6 +50,8 @@ struct ElabCtx<'a> {
     pending_port_aliases: IndexMap<SmolStr, NetId>,
     /// 既定のwire以外のネット型（`ElaboratedDesign::net_resolve`）
     net_resolve: IndexMap<u32, NetResolve>,
+    /// pull指定のビット範囲（`ElaboratedDesign::net_pulls`）
+    net_pulls: IndexMap<u32, Vec<(u32, u32, bool)>>,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -74,6 +76,7 @@ impl<'a> ElabCtx<'a> {
             next_block_id: 0,
             pending_port_aliases: IndexMap::new(),
             net_resolve: IndexMap::new(),
+            net_pulls: IndexMap::new(),
         }
     }
 
@@ -181,10 +184,15 @@ impl<'a> ElabCtx<'a> {
             HirNetResolve::Wire => return,
             HirNetResolve::Wand => NetResolve::Wand,
             HirNetResolve::Wor => NetResolve::Wor,
-            HirNetResolve::Tri0 => NetResolve::Pull0,
-            HirNetResolve::Tri1 => NetResolve::Pull1,
+            HirNetResolve::Trireg => NetResolve::Trireg,
             HirNetResolve::Supply0 => NetResolve::Supply0,
             HirNetResolve::Supply1 => NetResolve::Supply1,
+            HirNetResolve::Tri0 | HirNetResolve::Tri1 => {
+                let width = self.nets[id.0 as usize].width;
+                let up = ty == HirNetResolve::Tri1;
+                self.net_pulls.entry(id.0).or_default().push((0, width, up));
+                return;
+            }
         };
         self.net_resolve.insert(id.0, r);
     }
@@ -350,22 +358,28 @@ pub fn elaborate(
         }
     }
 
-    // 複数の連続代入が駆動するWire（ビット/部分選択の分割駆動を含む）はsimでドライバ解決する
-    let mut net_drivers: IndexMap<u32, Vec<u32>> = IndexMap::new();
+    // 複数の連続代入が駆動するWire（ビット/部分選択・連結による分割駆動を含む）はsimでドライバ解決する
+    let mut net_drivers: IndexMap<u32, Vec<(u32, u32)>> = IndexMap::new();
     for (i, cont) in ctx.conts.iter().enumerate() {
-        if let LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) =
-            &cont.lval
-        {
-            if matches!(ctx.nets[id.0 as usize].kind, NetKind::Wire) {
-                net_drivers.entry(id.0).or_default().push(i as u32);
+        for (j, part) in cont.lval.flatten_parts().into_iter().enumerate() {
+            if let LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) = part
+            {
+                let resolved_kind =
+                    ctx.net_resolve.contains_key(&id.0) || ctx.net_pulls.contains_key(&id.0);
+                if matches!(ctx.nets[id.0 as usize].kind, NetKind::Wire) || resolved_kind {
+                    net_drivers
+                        .entry(id.0)
+                        .or_default()
+                        .push((i as u32, j as u32));
+                }
             }
         }
     }
-    // pull系はZを0/1へ変えるため1ドライバでも解決経路が必要。supplyは定数ネットなので対象外。
+    // pull/trireg は1ドライバでも解決経路が必要（Zの置換・値の保持）。supplyは定数ネットなので対象外。
     net_drivers.retain(|net, v| match ctx.net_resolve.get(net) {
-        Some(NetResolve::Pull0 | NetResolve::Pull1) => true,
         Some(NetResolve::Supply0 | NetResolve::Supply1) => false,
-        _ => v.len() >= 2,
+        Some(NetResolve::Trireg) => true,
+        _ => ctx.net_pulls.contains_key(net) || v.len() >= 2,
     });
 
     let mut expr_shift_width = vec![None; ctx.exprs.len()];
@@ -394,6 +408,7 @@ pub fn elaborate(
         cont_sensitivity,
         net_drivers,
         net_resolve: ctx.net_resolve,
+        net_pulls: ctx.net_pulls,
         mem_sensitivity,
         expr_signed: ctx.expr_signed,
         expr_shift_width,
@@ -407,21 +422,50 @@ fn elab_assign(
     scope: ScopeId,
     assign: &rverilog_hir::ContinuousAssign,
 ) -> Result<(), ElabError> {
-    let lval = lower_lvalue(ctx, scope, &assign.lval)?;
     if assign.weak {
-        let (LValue::Net(id), HirExpr::Const(v)) = (&lval, &assign.expr) else {
-            return Err(ElabError::UnsupportedConstruct(
-                "pullup/pulldown requires a plain net".into(),
-            ));
+        // pullup/pulldown: 対象ビット範囲をpull指定として記録する（連続代入にはしない）
+        let up = match &assign.expr {
+            HirExpr::Const(v) => v.pad_to_width(1) != 0,
+            _ => {
+                return Err(ElabError::UnsupportedConstruct(
+                    "pullup/pulldown with a non-constant value".into(),
+                ))
+            }
         };
-        let up = v.pad_to_width(1) != 0;
-        ctx.net_resolve.entry(id.0).or_insert(if up {
-            NetResolve::Pull1
-        } else {
-            NetResolve::Pull0
-        });
+        let const_idx = |ctx: &ElabCtx, e: &HirExpr| {
+            eval_const_hir(ctx, scope, e)
+                .map(|v| v as u32)
+                .map_err(|_| {
+                    ElabError::UnsupportedConstruct("pullup/pulldown index must be constant".into())
+                })
+        };
+        let net_of = |ctx: &ElabCtx, name: &SmolStr| {
+            ctx.resolve_net(scope, name.as_str())
+                .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))
+        };
+        let (id, lo, w) = match &assign.lval {
+            HirLValue::Net(n) => {
+                let id = net_of(ctx, n)?;
+                (id, 0, ctx.nets[id.0 as usize].width)
+            }
+            HirLValue::IndexSel(n, idx) => (net_of(ctx, n)?, const_idx(ctx, idx)?, 1),
+            HirLValue::PartSelect(base, range) => {
+                let HirLValue::Net(n) = base.as_ref() else {
+                    return Err(ElabError::UnsupportedConstruct("nested lvalue".into()));
+                };
+                let (hi, lo) = (const_idx(ctx, &range.left)?, const_idx(ctx, &range.right)?);
+                (net_of(ctx, n)?, lo, hi - lo + 1)
+            }
+            _ => {
+                return Err(ElabError::UnsupportedConstruct(
+                    "pullup/pulldown target".into(),
+                ))
+            }
+        };
+        ctx.net_pulls.entry(id.0).or_default().push((lo, w, up));
         return Ok(());
     }
+    let lval = lower_lvalue(ctx, scope, &assign.lval)?;
     let expr_id = lower_expr(ctx, scope, &assign.expr)?;
     ctx.conts.push(ContAssign {
         lval,
@@ -475,8 +519,9 @@ fn elab_module(
 
     // Register ports
     for port in &hir.ports {
+        // net型付きのポート（`output wand x` 等）は変数ではなくネットなのでWire
         let kind = match port.direction {
-            PortDirection::Output => NetKind::Reg,
+            PortDirection::Output if port.net_type == HirNetResolve::Wire => NetKind::Reg,
             _ => NetKind::Wire,
         };
         let width = eval_const_hir(ctx, scope, &port.width_expr)
@@ -503,6 +548,7 @@ fn elab_module(
             is_signed: port.signed,
         });
         ctx.register_net(scope, port.name.clone(), net_id);
+        ctx.set_net_type(net_id, port.net_type);
     }
 
     // Register wire nets

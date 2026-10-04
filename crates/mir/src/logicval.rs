@@ -552,13 +552,39 @@ impl LogicVal {
 
     /// Zのビットを `one` の値（pullup=1 / pulldown=0）へ置き換える。
     pub fn pull_z(&self, one: bool) -> LogicVal {
+        self.pull_z_range(0, self.width(), one)
+    }
+
+    /// `lo` から `w` ビットの範囲内のZを `one` の値へ置き換える。
+    pub fn pull_z_range(&self, lo: u32, w: u32, one: bool) -> LogicVal {
         let n = num_chunks(self.width());
         let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
         for i in 0..n {
             let (ai, bi) = (self.get_chunk(i), self.get_chunk_b(i));
-            let z = !ai & bi;
+            let mut m = 0u64;
+            for bit in 0..64u32 {
+                let pos = i as u32 * 64 + bit;
+                if pos >= lo && pos < lo + w {
+                    m |= 1u64 << bit;
+                }
+            }
+            let z = !ai & bi & m;
             a.push(if one { ai | z } else { ai });
             b.push(bi & !z);
+        }
+        Self::from_chunks(self.width(), &a, &b)
+    }
+
+    /// Zのビットを `prev` の対応ビットで置き換える（trireg: 全ドライバZなら直前の値を保持）。
+    pub fn keep_on_z(&self, prev: &LogicVal) -> LogicVal {
+        let n = num_chunks(self.width());
+        let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let (ai, bi) = (self.get_chunk(i), self.get_chunk_b(i));
+            let (pa, pb) = (prev.get_chunk(i), prev.get_chunk_b(i));
+            let z = !ai & bi;
+            a.push((ai & !z) | (z & pa));
+            b.push((bi & !z) | (z & pb));
         }
         Self::from_chunks(self.width(), &a, &b)
     }
@@ -798,13 +824,29 @@ impl LogicVal {
 
     pub fn cond(&self, true_val: &LogicVal, false_val: &LogicVal) -> LogicVal {
         if !self.is_known() {
-            return LogicVal::X;
+            return true_val.merge_unknown(false_val);
         }
         if self.is_zero() {
             false_val.clone()
         } else {
             true_val.clone()
         }
+    }
+
+    /// 条件がX/Zの三項演算子の結果（IEEE 1364 5.1.13）: 両枝をビット単位で比較し、
+    /// 同じ値のビットはそのまま、異なるビットはXにする。幅は広い方に揃える。
+    pub fn merge_unknown(&self, other: &LogicVal) -> LogicVal {
+        let w = self.width().max(other.width());
+        let n = num_chunks(w);
+        let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let (a1, b1) = (self.get_chunk(i), self.get_chunk_b(i));
+            let (a2, b2) = (other.get_chunk(i), other.get_chunk_b(i));
+            let diff = (a1 ^ a2) | (b1 ^ b2);
+            a.push(a1 | diff);
+            b.push(b1 | diff);
+        }
+        Self::from_chunks(w, &a, &b)
     }
 
     // ── shift operators ───────────────────────────────────────────────────────
@@ -1724,5 +1766,35 @@ mod tests {
         assert_eq!(p.bit_ab(0), (1, 0));
         assert_eq!(p.bit_ab(90), (0, 0));
         assert_eq!(LogicVal::all_bits(100, true).bit_ab(99), (1, 0));
+        // pull_z_range: 範囲内のZだけ置換
+        let m = LogicVal::z_of_width(8);
+        let p = m.pull_z_range(2, 3, true);
+        assert_eq!(p.bit_ab(1), (0, 1));
+        assert_eq!(p.bit_ab(2), (1, 0));
+        assert_eq!(p.bit_ab(4), (1, 0));
+        assert_eq!(p.bit_ab(5), (0, 1));
+        // keep_on_z: Zだけ直前の値に
+        let cur = LogicVal::new(4, 0b0101, 0b0010).keep_on_z(&LogicVal::new(4, 0b1111, 0));
+        assert_eq!(cur.bit_ab(0), (1, 0));
+        assert_eq!(cur.bit_ab(1), (1, 0));
+        assert_eq!(cur.bit_ab(2), (1, 0));
+    }
+
+    #[test]
+    fn test_merge_unknown() {
+        let (z, x, o, l) = (LogicVal::Z, LogicVal::X, LogicVal::ONE, LogicVal::ZERO);
+        assert_eq!(o.merge_unknown(&o), o);
+        assert_eq!(z.merge_unknown(&z), z);
+        assert!(o.merge_unknown(&l).is_x());
+        assert!(o.merge_unknown(&z).is_x());
+        assert!(x.merge_unknown(&x).is_x());
+        // ビット単位: 一致するビットは保持
+        let a = LogicVal::new(4, 0b1010, 0);
+        let b = LogicVal::new(4, 0b1001, 0);
+        let m = a.merge_unknown(&b);
+        assert_eq!(m.bit_ab(3), (1, 0));
+        assert_eq!(m.bit_ab(2), (0, 0));
+        assert_eq!(m.bit_ab(1), (1, 1));
+        assert_eq!(m.bit_ab(0), (1, 1));
     }
 }

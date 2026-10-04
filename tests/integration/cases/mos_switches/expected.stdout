@@ -1,0 +1,45 @@
+d=0 c=0 nmos=z pmos=0 rnmos=z rpmos=0
+d=0 c=1 nmos=0 pmos=z rnmos=0 rpmos=z
+d=0 c=x nmos=x pmos=x rnmos=x rpmos=x
+d=0 c=z nmos=x pmos=x rnmos=x rpmos=x
+d=1 c=0 nmos=z pmos=1 rnmos=z rpmos=1
+d=1 c=1 nmos=1 pmos=z rnmos=1 rpmos=z
+d=1 c=x nmos=x pmos=x rnmos=x rpmos=x
+d=1 c=z nmos=x pmos=x rnmos=x rpmos=x
+d=x c=0 nmos=z pmos=x rnmos=z rpmos=x
+d=x c=1 nmos=x pmos=z rnmos=x rpmos=z
+d=x c=x nmos=x pmos=x rnmos=x rpmos=x
+d=x c=z nmos=x pmos=x rnmos=x rpmos=x
+d=z c=0 nmos=z pmos=z rnmos=z rpmos=z
+d=z c=1 nmos=z pmos=z rnmos=z rpmos=z
+d=z c=x nmos=z pmos=z rnmos=z rpmos=z
+d=z c=z nmos=z pmos=z rnmos=z rpmos=z
+d=0 n=0 p=0 cmos=0 rcmos=0
+d=0 n=0 p=1 cmos=z rcmos=z
+d=0 n=1 p=0 cmos=0 rcmos=0
+d=0 n=1 p=1 cmos=0 rcmos=0
+d=1 n=0 p=0 cmos=1 rcmos=1
+d=1 n=0 p=1 cmos=z rcmos=z
+d=1 n=1 p=0 cmos=1 rcmos=1
+d=1 n=1 p=1 cmos=1 rcmos=1
+d=z n=0 p=0 cmos=z rcmos=z
+d=z n=0 p=1 cmos=z rcmos=z
+d=z n=1 p=0 cmos=z rcmos=z
+d=z n=1 p=1 cmos=z rcmos=z
+e1=0 e2=0 d1=0 d2=0 bus=0
+e1=0 e2=0 d1=0 d2=1 bus=1
+e1=0 e2=0 d1=1 d2=0 bus=0
+e1=0 e2=0 d1=1 d2=1 bus=1
+e1=0 e2=1 d1=0 d2=0 bus=z
+e1=0 e2=1 d1=0 d2=1 bus=z
+e1=0 e2=1 d1=1 d2=0 bus=z
+e1=0 e2=1 d1=1 d2=1 bus=z
+e1=1 e2=0 d1=0 d2=0 bus=0
+e1=1 e2=0 d1=0 d2=1 bus=x
+e1=1 e2=0 d1=1 d2=0 bus=x
+e1=1 e2=0 d1=1 d2=1 bus=1
+e1=1 e2=1 d1=0 d2=0 bus=0
+e1=1 e2=1 d1=0 d2=1 bus=0
+e1=1 e2=1 d1=1 d2=0 bus=1
+e1=1 e2=1 d1=1 d2=1 bus=1
+$finish at time 44
