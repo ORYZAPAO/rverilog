@@ -8,6 +8,18 @@ pub enum NetKind {
     Integer,
 }
 
+/// ネット宣言の型による解決規則（`wire`/`tri`/`uwire` は `Wire`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetResolve {
+    Wire,
+    Wand,
+    Wor,
+    Tri0,
+    Tri1,
+    Supply0,
+    Supply1,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysFuncKind {
     Clog2,
@@ -53,6 +65,8 @@ pub struct GenerateItems {
     pub alwayses: Vec<AlwaysConstruct>,
     pub instances: Vec<ModuleInstance>,
     pub nested: Vec<GenerateConstruct>,
+    /// generate内で検出した未対応構文のメッセージ。frontendのトップレベルでまとめて `UnsupportedConstruct` にする。
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +160,7 @@ pub struct NetDecl {
     pub name: SmolStr,
     pub width: u32,
     pub kind: NetKind,
+    pub net_type: NetResolve,
     pub width_expr: Expr,
     pub signed: bool,
 }
@@ -169,6 +184,9 @@ pub struct MemDecl {
 pub struct ContinuousAssign {
     pub lval: LValue,
     pub expr: Expr,
+    /// `pullup`/`pulldown` 由来の弱いドライバ。`expr` の定数（1/0）が引く方向を表し、
+    /// elabは連続代入ではなくネットのpull指定として扱う。
+    pub weak: bool,
 }
 
 #[derive(Debug, Clone)]

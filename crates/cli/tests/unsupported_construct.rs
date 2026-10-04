@@ -149,3 +149,47 @@ fn test_inout_non_plain_net_connection_is_unsupported() {
         result.err()
     );
 }
+
+fn assert_unsupported(name: &str, source: &str, needle: &str) {
+    let result = parse_source(name, source);
+    match &result {
+        Err(rverilog_frontend::FrontendError::UnsupportedConstruct(m)) => {
+            assert!(
+                m.contains(needle),
+                "message `{m}` should contain `{needle}`"
+            )
+        }
+        other => panic!("expected UnsupportedConstruct({needle}), got {other:?}"),
+    }
+}
+
+#[test]
+fn test_switch_level_gates_are_unsupported() {
+    assert_unsupported(
+        "tran_gate",
+        "module top; wire a, b; tran (a, b); endmodule",
+        "switch-level gate",
+    );
+    assert_unsupported(
+        "nmos_gate",
+        "module top; wire o, i, c; nmos (o, i, c); endmodule",
+        "switch-level gate",
+    );
+}
+
+#[test]
+fn test_trireg_is_unsupported() {
+    assert_unsupported("trireg_net", "module top; trireg t; endmodule", "trireg");
+}
+
+#[test]
+fn test_unsupported_gate_inside_generate_is_reported() {
+    assert_unsupported(
+        "generate_tran",
+        r#"module top;
+            wire a, b;
+            generate if (1) begin : g tran (a, b); end endgenerate
+        endmodule"#,
+        "switch-level gate",
+    );
+}

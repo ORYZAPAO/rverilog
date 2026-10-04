@@ -45,7 +45,9 @@ pub struct ElaboratedDesign {
     pub sensitivity_table: IndexMap<u32, Vec<u32>>,
     /// net.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub cont_sensitivity: IndexMap<u32, Vec<u32>>,
-    /// net.0 → [cont_id] 複数の連続代入が駆動するWireのドライバ一覧（ドライバが2つ以上のネットのみ）。
+    /// net.0 → 既定のwire以外のネット型（wand/wor/tri0/tri1/supply0/supply1/pullup/pulldown）。
+    pub net_resolve: IndexMap<u32, NetResolve>,
+    /// net.0 → [cont_id] 解決が必要なWireのドライバ一覧（wire/wand/worは2つ以上、pull系は1つ以上）。
     /// simはこれらのネットを各ドライバ値のビット単位解決（Z中立・不一致はX）で更新する。
     pub net_drivers: IndexMap<u32, Vec<u32>>,
     /// mem_id.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
@@ -85,6 +87,23 @@ pub struct NetInfo {
     pub scope: ScopeId,
     pub name: SmolStr,
     pub is_signed: bool,
+}
+
+/// 既定のwire以外のネット型の解決規則（`ElaboratedDesign::net_resolve`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetResolve {
+    /// wand/triand: 0が支配
+    Wand,
+    /// wor/trior: 1が支配
+    Wor,
+    /// tri0 / pulldown: Zを0へ
+    Pull0,
+    /// tri1 / pullup: Zを1へ
+    Pull1,
+    /// supply0: 常に0
+    Supply0,
+    /// supply1: 常に1
+    Supply1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

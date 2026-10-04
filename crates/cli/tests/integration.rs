@@ -356,6 +356,32 @@ fn test_inout_port() {
 }
 
 #[test]
+fn test_net_types() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/net_types/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("net_types");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
+fn test_enable_gates() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/enable_gates/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("enable_gates");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];

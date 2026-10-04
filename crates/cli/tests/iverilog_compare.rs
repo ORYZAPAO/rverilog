@@ -295,6 +295,24 @@ fn compare_inout_port() {
 }
 
 #[test]
+fn compare_net_types() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/net_types/dut.v")],
+    );
+}
+
+#[test]
+fn compare_enable_gates() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/enable_gates/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(
