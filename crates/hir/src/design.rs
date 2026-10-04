@@ -16,6 +16,7 @@ pub enum NetResolve {
     Wor,
     Tri0,
     Tri1,
+    Trireg,
     Supply0,
     Supply1,
 }
@@ -134,6 +135,8 @@ pub struct PortDecl {
     pub width: u32,       // 静的フォールバック値（param依存の場合は1）
     pub width_expr: Expr, // 正式な幅を表す式
     pub signed: bool,
+    /// ANSIヘッダで指定されたnet型（`output wand x` 等）。指定なしは `Wire`。
+    pub net_type: NetResolve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -313,6 +313,33 @@ fn compare_enable_gates() {
 }
 
 #[test]
+fn compare_mos_switches() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/mos_switches/dut.v")],
+    );
+}
+
+#[test]
+fn compare_net_ports_pulls_concat() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/net_ports_pulls_concat/dut.v")],
+    );
+}
+
+#[test]
+fn compare_ternary_x_cond() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/ternary_x_cond/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

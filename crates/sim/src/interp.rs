@@ -73,7 +73,7 @@ pub struct Interpreter {
     /// cont_dirtyへの重複enqueueを防ぐビットセット。
     cont_queued: Vec<bool>,
     /// 多重ドライバネットの各連続代入の現在のドライバ値（cont_id → ネット幅の値、駆動外はZ）。
-    driver_vals: HashMap<u32, LogicVal>,
+    driver_vals: HashMap<(u32, u32), LogicVal>,
 }
 
 impl Interpreter {
@@ -82,13 +82,17 @@ impl Interpreter {
         let mut net_values = HashMap::new();
         for (i, net) in design.nets.iter().enumerate() {
             let init = match (net.kind, design.net_resolve.get(&(i as u32))) {
-                (NetKind::Wire, Some(NetResolve::Supply0 | NetResolve::Pull0)) => {
-                    LogicVal::all_bits(net.width, false)
+                (NetKind::Wire, Some(NetResolve::Supply0)) => LogicVal::all_bits(net.width, false),
+                (NetKind::Wire, Some(NetResolve::Supply1)) => LogicVal::all_bits(net.width, true),
+                (NetKind::Wire, Some(NetResolve::Trireg)) => LogicVal::x_of_width(net.width),
+                (NetKind::Wire, _) => {
+                    // ドライバが無くてもpull指定のビットは0/1の値を持つ
+                    let mut v = LogicVal::z_of_width(net.width);
+                    for &(lo, w, one) in design.net_pulls.get(&(i as u32)).into_iter().flatten() {
+                        v = v.pull_z_range(lo, w, one);
+                    }
+                    v
                 }
-                (NetKind::Wire, Some(NetResolve::Supply1 | NetResolve::Pull1)) => {
-                    LogicVal::all_bits(net.width, true)
-                }
-                (NetKind::Wire, _) => LogicVal::z_of_width(net.width),
                 _ => LogicVal::x_of_width(net.width),
             };
             net_values.insert(NetId(i as u32), init);
@@ -631,7 +635,9 @@ impl Interpreter {
                 } else if cv.is_known() {
                     self.eval_expr(f)
                 } else {
-                    LogicVal::X
+                    // 条件がX/Z: 両枝をビット単位でマージ（一致するビットは保持）
+                    let (tv, fv) = (self.eval_expr(t), self.eval_expr(f));
+                    tv.merge_unknown(&fv)
                 }
             }
             Expr::MemRead(mem_id, idx_id) => {
@@ -976,7 +982,7 @@ impl Interpreter {
         }
     }
 
-    /// lvalue が複数ドライバのネット（`net_drivers`）を指す場合、そのネットIDを返す。
+    /// lvalue（連結を展開した1要素）が解決対象のネット（`net_drivers`）を指す場合、そのネットIDを返す。
     fn multi_driven_target(&self, lval: &LValue) -> Option<NetId> {
         match lval {
             LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _)
@@ -988,11 +994,12 @@ impl Interpreter {
         }
     }
 
-    /// 多重ドライバネットへの連続代入: このドライバの値を更新し、全ドライバを
-    /// ビット単位で解決（Z中立・不一致はX）してネット値を更新する。
+    /// 解決対象ネットへの連続代入: ドライバ `(cont_id, part_idx)` の値を更新し、全ドライバを
+    /// ネット型の規則（wire: Z中立・不一致X、wand/wor: 支配値）で解決する。続けてpull指定でZを
+    /// 0/1へ置き換え、trireg は全ドライバZのビットに直前の値を保持して、ネット値を更新する。
     fn write_multi_driver(
         &mut self,
-        cont_id: u32,
+        driver: (u32, u32),
         net_id: NetId,
         lval: &LValue,
         val: LogicVal,
@@ -1007,11 +1014,11 @@ impl Interpreter {
             _ if signed => val.extend_sign(w),
             _ => val.resize(w),
         };
-        self.driver_vals.insert(cont_id, drv);
+        self.driver_vals.insert(driver, drv);
         let kind = self.design.net_resolve.get(&net_id.0).copied();
         let mut resolved = z;
-        for c in &self.design.net_drivers[&net_id.0] {
-            if let Some(v) = self.driver_vals.get(c) {
+        for d in &self.design.net_drivers[&net_id.0] {
+            if let Some(v) = self.driver_vals.get(d) {
                 resolved = match kind {
                     Some(NetResolve::Wand) => resolved.resolve_wand(v),
                     Some(NetResolve::Wor) => resolved.resolve_wor(v),
@@ -1019,16 +1026,67 @@ impl Interpreter {
                 };
             }
         }
-        match kind {
-            Some(NetResolve::Pull0) => resolved = resolved.pull_z(false),
-            Some(NetResolve::Pull1) => resolved = resolved.pull_z(true),
-            _ => {}
+        for &(lo, pw, one) in self.design.net_pulls.get(&net_id.0).into_iter().flatten() {
+            resolved = resolved.pull_z_range(lo, pw, one);
         }
         let old = self.net_values.get(&net_id).cloned();
+        if kind == Some(NetResolve::Trireg) {
+            if let Some(prev) = &old {
+                resolved = resolved.keep_on_z(prev);
+            }
+        }
         if old.as_ref() != Some(&resolved) {
             self.net_values.insert(net_id, resolved.clone());
             self.vcd_record_net_change(net_id, &resolved);
             self.trigger_sensitivity(&LValue::Net(net_id), old.as_ref(), &resolved);
+        }
+    }
+
+    /// 連続代入の書き込み。lvalueが連結なら要素ごとに分割し、解決対象のネットへの要素は
+    /// ドライバ値として、それ以外は通常の書き込みとして扱う。
+    fn write_cont(&mut self, cont_id: u32, lval: &LValue, val: LogicVal, signed: bool) {
+        let parts = lval.flatten_parts();
+        let any_multi = parts.iter().any(|p| self.multi_driven_target(p).is_some());
+        if !any_multi {
+            let old = self.get_lval_val(lval);
+            self.write_lvalue(lval, val, signed);
+            let new = self.get_lval_val(lval);
+            if let Some(new) = new {
+                if old.as_ref() != Some(&new) {
+                    self.trigger_sensitivity(lval, old.as_ref(), &new);
+                }
+            }
+            return;
+        }
+        if parts.len() == 1 {
+            let net_id = self.multi_driven_target(parts[0]).expect("multi-driven");
+            self.write_multi_driver((cont_id, 0), net_id, parts[0], val, signed);
+            return;
+        }
+        let total: u32 = parts.iter().map(|p| self.lvalue_width(p)).sum();
+        let full = if signed {
+            val.extend_sign(total)
+        } else {
+            val.resize(total)
+        };
+        let mut hi = total;
+        for (j, part) in parts.into_iter().enumerate() {
+            let w = self.lvalue_width(part);
+            let lo = hi - w;
+            let slice = full.part_select(hi - 1, lo).unwrap_or(LogicVal::X);
+            hi = lo;
+            if let Some(net_id) = self.multi_driven_target(part) {
+                self.write_multi_driver((cont_id, j as u32), net_id, part, slice, false);
+            } else {
+                let old = self.get_lval_val(part);
+                self.write_lvalue(part, slice, false);
+                let new = self.get_lval_val(part);
+                if let Some(new) = new {
+                    if old.as_ref() != Some(&new) {
+                        self.trigger_sensitivity(part, old.as_ref(), &new);
+                    }
+                }
+            }
         }
     }
 
@@ -1052,18 +1110,7 @@ impl Interpreter {
             let cont = self.design.conts[cont_id as usize].clone();
             let signed = self.design.expr_signed[cont.expr.0 as usize];
             let val = self.eval_expr(cont.expr);
-            if let Some(net_id) = self.multi_driven_target(&cont.lval) {
-                self.write_multi_driver(cont_id, net_id, &cont.lval, val, signed);
-                continue;
-            }
-            let old = self.get_lval_val(&cont.lval);
-            self.write_lvalue(&cont.lval, val, signed);
-            let new = self.get_lval_val(&cont.lval);
-            if let Some(new) = new {
-                if old.as_ref() != Some(&new) {
-                    self.trigger_sensitivity(&cont.lval, old.as_ref(), &new);
-                }
-            }
+            self.write_cont(cont_id, &cont.lval, val, signed);
         }
     }
 

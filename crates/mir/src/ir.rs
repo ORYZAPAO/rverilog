@@ -45,11 +45,16 @@ pub struct ElaboratedDesign {
     pub sensitivity_table: IndexMap<u32, Vec<u32>>,
     /// net.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub cont_sensitivity: IndexMap<u32, Vec<u32>>,
-    /// net.0 → 既定のwire以外のネット型（wand/wor/tri0/tri1/supply0/supply1/pullup/pulldown）。
+    /// net.0 → 既定のwire以外のネット型（wand/wor/trireg/supply0/supply1）。
     pub net_resolve: IndexMap<u32, NetResolve>,
-    /// net.0 → [cont_id] 解決が必要なWireのドライバ一覧（wire/wand/worは2つ以上、pull系は1つ以上）。
-    /// simはこれらのネットを各ドライバ値のビット単位解決（Z中立・不一致はX）で更新する。
-    pub net_drivers: IndexMap<u32, Vec<u32>>,
+    /// net.0 → [(lo, width, one)] pull指定のビット範囲（tri0/tri1/pullup/pulldown）。
+    /// Zのビットを `one` の値（pullup=1 / pulldown=0）へ置き換える。
+    pub net_pulls: IndexMap<u32, Vec<(u32, u32, bool)>>,
+    /// net.0 → [(cont_id, part_idx)] 解決が必要なネットのドライバ一覧。`part_idx` は連続代入の
+    /// lvalueを `LValue::flatten_parts` で展開したときの位置（連結でなければ0）。
+    /// wire/wand/worは2つ以上、pull・tregは1つ以上のドライバを持つネットのみ。
+    /// simは各ドライバ値のビット単位解決（Z中立・不一致はX）でネット値を更新する。
+    pub net_drivers: IndexMap<u32, Vec<(u32, u32)>>,
     /// mem_id.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub mem_sensitivity: IndexMap<u32, Vec<u32>>,
     /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）
@@ -60,6 +65,16 @@ pub struct ElaboratedDesign {
     /// この幅へresize/extend_signしてから既存のshl/shr/ashl/ashrへ渡す。Noneの場合は従来通り
     /// 左辺の自己決定幅（self.width()）で計算する（安全側フォールバック、A21）。
     pub expr_shift_width: Vec<Option<u32>>,
+}
+
+impl LValue {
+    /// 連結を再帰的に展開した要素（先頭がMSB）。連結でなければ自身のみ。
+    pub fn flatten_parts(&self) -> Vec<&LValue> {
+        match self {
+            LValue::Concat(parts) => parts.iter().flat_map(|p| p.flatten_parts()).collect(),
+            other => vec![other],
+        }
+    }
 }
 
 impl ElaboratedDesign {
@@ -90,16 +105,15 @@ pub struct NetInfo {
 }
 
 /// 既定のwire以外のネット型の解決規則（`ElaboratedDesign::net_resolve`）。
+/// pull（tri0/tri1/pullup/pulldown）はビット範囲指定のため `net_pulls` で別に持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetResolve {
     /// wand/triand: 0が支配
     Wand,
     /// wor/trior: 1が支配
     Wor,
-    /// tri0 / pulldown: Zを0へ
-    Pull0,
-    /// tri1 / pullup: Zを1へ
-    Pull1,
+    /// trireg: 全ドライバがZのとき直前の値を保持（charge storage、strength大小は無視）
+    Trireg,
     /// supply0: 常に0
     Supply0,
     /// supply1: 常に1
