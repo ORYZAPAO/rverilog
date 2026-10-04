@@ -1266,6 +1266,43 @@ fn lower_stmt(ctx: &mut ElabCtx, scope: ScopeId, s: &HirStmt) -> Result<StmtId, 
             let while_stmt = ctx.alloc_stmt(Stmt::While(cond_id, while_body));
             Stmt::Block(vec![init_id, while_stmt])
         }
+        HirStmt::While(cond, body) => {
+            let cond_id = lower_expr(ctx, scope, cond)?;
+            let body_id = lower_stmt(ctx, scope, body)?;
+            Stmt::While(cond_id, body_id)
+        }
+        HirStmt::Forever(body) => {
+            // 常に真の条件のwhileとして表現する
+            let cond_id = ctx.alloc_expr(Expr::Const(LogicVal::new(1, 1, 0)));
+            let body_id = lower_stmt(ctx, scope, body)?;
+            Stmt::While(cond_id, body_id)
+        }
+        HirStmt::Repeat(count, body) => {
+            // `{ cnt = count; while (cnt > 0) { body; cnt = cnt - 1; } }` に脱糖する。
+            // 回数式は一度だけ評価し、符号付き比較により負数・X/Zは0回として扱う（IEEE 1364）。
+            let name = SmolStr::from(format!("__repeat_{}", ctx.nets.len()));
+            let cnt = ctx.alloc_net(NetInfo {
+                width: 32,
+                kind: NetKind::Integer,
+                scope,
+                name: name.clone(),
+                is_signed: true,
+            });
+            ctx.register_net(scope, name, cnt);
+            let count_id = lower_expr(ctx, scope, count)?;
+            let init_id = ctx.alloc_stmt(Stmt::BlockingAssign(LValue::Net(cnt), count_id));
+            let cnt_ref = ctx.alloc_expr(Expr::Net(cnt));
+            let zero = ctx.alloc_expr_signed(Expr::Const(LogicVal::new(32, 0, 0)), true);
+            let cond_id = ctx.alloc_expr(Expr::Bin(BinOp::Gt, cnt_ref, zero));
+            let body_id = lower_stmt(ctx, scope, body)?;
+            let cnt_ref2 = ctx.alloc_expr(Expr::Net(cnt));
+            let one = ctx.alloc_expr_signed(Expr::Const(LogicVal::new(32, 1, 0)), true);
+            let dec = ctx.alloc_expr(Expr::Bin(BinOp::Sub, cnt_ref2, one));
+            let dec_id = ctx.alloc_stmt(Stmt::BlockingAssign(LValue::Net(cnt), dec));
+            let while_body = ctx.alloc_stmt(Stmt::Block(vec![body_id, dec_id]));
+            let while_stmt = ctx.alloc_stmt(Stmt::While(cond_id, while_body));
+            Stmt::Block(vec![init_id, while_stmt])
+        }
         HirStmt::TaskCall(name, args) => {
             let info = ctx
                 .resolve_task(scope, name.as_str())

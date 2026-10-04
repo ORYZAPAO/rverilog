@@ -902,6 +902,17 @@ fn lower_decl(
 
 // ── function / task declarations ──────────────────────────────────────────────
 
+/// function/task の戻り値・引数の型情報（幅・幅式・signed）を取り出す。
+/// `integer` 型キーワードは `[31:0]` 付きの signed として扱う（`packed_width_expr` は
+/// packed dimension しか見ないため、そのままだと 1bit unsigned になってしまう）。
+fn tf_type_info(tree: &SyntaxTree, node: RefNode) -> (u32, Expr, bool) {
+    if has_integer_type(tree, node.clone()) {
+        return (32, Expr::Const(lv(32, 32)), true);
+    }
+    let (width, width_expr) = packed_width_expr(tree, node.clone());
+    (width, width_expr, has_signed(node))
+}
+
 fn lower_tf_port_item(
     tree: &SyntaxTree,
     item: &sv_parser::TfPortItem,
@@ -913,8 +924,7 @@ fn lower_tf_port_item(
         Some(TD::ConstRef(_)) => PortDirection::Input,
         None => default_dir,
     };
-    let (_, width_expr) = packed_width_expr(tree, RefNode::TfPortItem(item));
-    let signed = has_signed(RefNode::TfPortItem(item));
+    let (_, width_expr, signed) = tf_type_info(tree, RefNode::TfPortItem(item));
     let (name, _, _) = item.nodes.4.as_ref()?;
     let name = get_id(tree, RefNode::PortIdentifier(name))?;
     Some(TfArg {
@@ -941,8 +951,7 @@ fn lower_tf_item_decls(
                     TD::PortDirection(pd) => lower_port_direction(pd),
                     TD::ConstRef(_) => PortDirection::Input,
                 };
-                let (_, width_expr) = packed_width_expr(tree, RefNode::TfPortDeclaration(d));
-                let signed = has_signed(RefNode::TfPortDeclaration(d));
+                let (_, width_expr, signed) = tf_type_info(tree, RefNode::TfPortDeclaration(d));
                 for (name_node, _, _) in d.nodes.4.nodes.0.contents() {
                     if let Some(name) = get_id(tree, RefNode::PortIdentifier(name_node)) {
                         args.push(TfArg {
@@ -975,9 +984,8 @@ fn lower_function_decl(
         FB::WithPort(p) => {
             let name = get_id(tree, RefNode::FunctionIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("function name missing".into()))?;
-            let (width, width_expr) =
-                packed_width_expr(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
-            let signed = has_signed(RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
+            let (width, width_expr, signed) =
+                tf_type_info(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
             let mut args = Vec::new();
             if let Some(list) = &p.nodes.3.nodes.1 {
                 for item in list.nodes.0.contents() {
@@ -1012,9 +1020,8 @@ fn lower_function_decl(
         FB::WithoutPort(p) => {
             let name = get_id(tree, RefNode::FunctionIdentifier(&p.nodes.2))
                 .ok_or_else(|| FrontendError::ParseError("function name missing".into()))?;
-            let (width, width_expr) =
-                packed_width_expr(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
-            let signed = has_signed(RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
+            let (width, width_expr, signed) =
+                tf_type_info(tree, RefNode::FunctionDataTypeOrImplicit(&p.nodes.0));
             let (args, locals) = lower_tf_item_decls(tree, &p.nodes.4);
             let mut stmts = Vec::new();
             for fs in &p.nodes.5 {
@@ -1619,6 +1626,20 @@ fn lower_loop_stmt(
                 step: Box::new(step_stmt),
                 body: Box::new(body),
             })
+        }
+        LS::While(w) => {
+            let cond = lower_expression(tree, &w.nodes.1.nodes.1)?;
+            let body = lower_stmt_or_null(tree, &w.nodes.2)?;
+            Ok(Stmt::While(cond, Box::new(body)))
+        }
+        LS::Repeat(r) => {
+            let count = lower_expression(tree, &r.nodes.1.nodes.1)?;
+            let body = lower_stmt_or_null(tree, &r.nodes.2)?;
+            Ok(Stmt::Repeat(count, Box::new(body)))
+        }
+        LS::Forever(f) => {
+            let body = lower_stmt_or_null(tree, &f.nodes.1)?;
+            Ok(Stmt::Forever(Box::new(body)))
         }
         _ => Err(unsupported("loop statement variant")),
     }

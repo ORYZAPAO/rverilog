@@ -241,6 +241,15 @@ fn compare_casez_casex() {
 }
 
 #[test]
+fn compare_loop_stmts() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/loop_stmts/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(
