@@ -7,7 +7,7 @@ pub use crate::design::{
     CaseKind, LValue, LocalParamDecl, MemDecl, ParamDecl, Range, SensitivityItem, Stmt,
     SysFuncKind, SysTask,
 };
-pub use crate::design::{Design, NetKind};
+pub use crate::design::{Design, NetKind, NetResolve};
 pub use crate::design::{FunctionDecl, TaskDecl, TfArg};
 pub use crate::design::{GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems};
 

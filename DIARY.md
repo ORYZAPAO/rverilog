@@ -3258,3 +3258,26 @@ fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32スモー�
 ### Next
 
 - PR作成→CI通過後マージ。次候補: `**`演算子、A8の残（wand/wor/tri0/tri1、bufif/notif）
+
+### Task（続き）A8の残り: net型・enable gate・pull
+
+ブランチ`feat/net-types-enable-gates`。
+
+### What was done
+
+- HIR: `NetResolve`（`NetDecl.net_type`）、`ContinuousAssign.weak`（pullup/pulldown）。frontendで`NetType`を判定
+  （tri/uwire=wire、triand=wand、trior=wor、trireg=明示エラー）
+- MIR: `NetResolve`と`ElaboratedDesign.net_resolve`。`net_drivers`はpull系なら1ドライバでも登録
+- `LogicVal`: `resolve_wand`/`resolve_wor`（Z中立・支配値）、`pull_z`、`all_bits`。simは種別に応じて畳み込み＋pull、supply/pullの初期値
+- `bufif0/1`・`notif0/1`を条件式の連続代入に。入力Z/XはX（`~~in`）
+- `lower_gate_inst`をResult化。tran/nmos/pmos/cmos等は`UnsupportedConstruct`（従来は無言スキップ）。
+  generate内は`GenerateItems.errors`に集めてトップレベルで報告
+- `net_types`・`enable_gates`（iverilogとbit-exact）、`resolve_wand/wor/pull_z`単体テスト、明示エラーテスト3件を追加
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32含む）、samples exit 0
+
+### Next
+
+- PR作成→マージ。次候補: `**`演算子、A8の残（strength・スイッチレベルゲート・trireg）

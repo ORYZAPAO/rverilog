@@ -3,13 +3,13 @@ use indexmap::IndexMap;
 use rverilog_hir::{
     BinOp as HirBinOp, CaseKind as HirCaseKind, Design, EdgeType as HirEdgeType, Expr as HirExpr,
     GenerateConstruct, GenerateItems, HirModule, LValue as HirLValue, NetKind as HirNetKind,
-    PortDirection, Sensitivity as HirSensitivity, Stmt as HirStmt, SysFuncKind,
-    SysTask as HirSysTask, UnOp as HirUnOp,
+    NetResolve as HirNetResolve, PortDirection, Sensitivity as HirSensitivity, Stmt as HirStmt,
+    SysFuncKind, SysTask as HirSysTask, UnOp as HirUnOp,
 };
 use rverilog_mir::{
     BinOp, CaseKind, ContAssign, EdgeType, ElaboratedDesign, Expr, ExprId, LValue, LogicVal, MemId,
-    MemInfo, NetId, NetInfo, NetKind, Process, ProcessId, ProcessKind, Scope, ScopeId, Sensitivity,
-    SensitivityEdge, Stmt, StmtId, SysTask, UnOp,
+    MemInfo, NetId, NetInfo, NetKind, NetResolve, Process, ProcessId, ProcessKind, Scope, ScopeId,
+    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, UnOp,
 };
 use smol_str::SmolStr;
 
@@ -48,6 +48,8 @@ struct ElabCtx<'a> {
     /// 次に `elab_module` で elaborate する子モジュールの inout ポート名 → 親ネット。
     /// 親子でネットを共有して双方向結線する（`elab_module` 冒頭で take する）。
     pending_port_aliases: IndexMap<SmolStr, NetId>,
+    /// 既定のwire以外のネット型（`ElaboratedDesign::net_resolve`）
+    net_resolve: IndexMap<u32, NetResolve>,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -71,6 +73,7 @@ impl<'a> ElabCtx<'a> {
             scope_blocks: IndexMap::new(),
             next_block_id: 0,
             pending_port_aliases: IndexMap::new(),
+            net_resolve: IndexMap::new(),
         }
     }
 
@@ -170,6 +173,20 @@ impl<'a> ElabCtx<'a> {
             }
             Expr::Cond(_, t, f) => self.expr_signed[t.0 as usize] && self.expr_signed[f.0 as usize],
         }
+    }
+
+    /// 宣言型に応じた解決規則を登録する（wire/tri/uwire は既定のため登録しない）。
+    fn set_net_type(&mut self, id: NetId, ty: HirNetResolve) {
+        let r = match ty {
+            HirNetResolve::Wire => return,
+            HirNetResolve::Wand => NetResolve::Wand,
+            HirNetResolve::Wor => NetResolve::Wor,
+            HirNetResolve::Tri0 => NetResolve::Pull0,
+            HirNetResolve::Tri1 => NetResolve::Pull1,
+            HirNetResolve::Supply0 => NetResolve::Supply0,
+            HirNetResolve::Supply1 => NetResolve::Supply1,
+        };
+        self.net_resolve.insert(id.0, r);
     }
 
     fn register_net(&mut self, scope: ScopeId, name: SmolStr, net_id: NetId) {
@@ -344,7 +361,12 @@ pub fn elaborate(
             }
         }
     }
-    net_drivers.retain(|_, v| v.len() >= 2);
+    // pull系はZを0/1へ変えるため1ドライバでも解決経路が必要。supplyは定数ネットなので対象外。
+    net_drivers.retain(|net, v| match ctx.net_resolve.get(net) {
+        Some(NetResolve::Pull0 | NetResolve::Pull1) => true,
+        Some(NetResolve::Supply0 | NetResolve::Supply1) => false,
+        _ => v.len() >= 2,
+    });
 
     let mut expr_shift_width = vec![None; ctx.exprs.len()];
     for stmt in &ctx.stmts {
@@ -371,10 +393,41 @@ pub fn elaborate(
         sensitivity_table: ctx.sensitivity_table,
         cont_sensitivity,
         net_drivers,
+        net_resolve: ctx.net_resolve,
         mem_sensitivity,
         expr_signed: ctx.expr_signed,
         expr_shift_width,
     })
+}
+
+/// 連続代入を登録する。`pullup`/`pulldown` 由来の弱いドライバは連続代入にせず、
+/// ネットのpull指定（`net_resolve`）として記録する。
+fn elab_assign(
+    ctx: &mut ElabCtx,
+    scope: ScopeId,
+    assign: &rverilog_hir::ContinuousAssign,
+) -> Result<(), ElabError> {
+    let lval = lower_lvalue(ctx, scope, &assign.lval)?;
+    if assign.weak {
+        let (LValue::Net(id), HirExpr::Const(v)) = (&lval, &assign.expr) else {
+            return Err(ElabError::UnsupportedConstruct(
+                "pullup/pulldown requires a plain net".into(),
+            ));
+        };
+        let up = v.pad_to_width(1) != 0;
+        ctx.net_resolve.entry(id.0).or_insert(if up {
+            NetResolve::Pull1
+        } else {
+            NetResolve::Pull0
+        });
+        return Ok(());
+    }
+    let expr_id = lower_expr(ctx, scope, &assign.expr)?;
+    ctx.conts.push(ContAssign {
+        lval,
+        expr: expr_id,
+    });
+    Ok(())
 }
 
 fn elab_module(
@@ -467,6 +520,7 @@ fn elab_module(
             is_signed: net.signed,
         });
         ctx.register_net(scope, net.name.clone(), net_id);
+        ctx.set_net_type(net_id, net.net_type);
     }
 
     // Register reg declarations
@@ -610,12 +664,7 @@ fn elab_module(
 
     // Continuous assigns
     for assign in &hir.assigns {
-        let lval = lower_lvalue(ctx, scope, &assign.lval)?;
-        let expr_id = lower_expr(ctx, scope, &assign.expr)?;
-        ctx.conts.push(ContAssign {
-            lval,
-            expr: expr_id,
-        });
+        elab_assign(ctx, scope, assign)?;
     }
 
     // Initial constructs
@@ -796,6 +845,7 @@ fn elab_generate_items(
             is_signed: net.signed,
         });
         ctx.register_net(scope, net.name.clone(), net_id);
+        ctx.set_net_type(net_id, net.net_type);
     }
 
     for reg in &items.regs {
@@ -826,12 +876,7 @@ fn elab_generate_items(
     }
 
     for assign in &items.assigns {
-        let lval = lower_lvalue(ctx, scope, &assign.lval)?;
-        let expr_id = lower_expr(ctx, scope, &assign.expr)?;
-        ctx.conts.push(ContAssign {
-            lval,
-            expr: expr_id,
-        });
+        elab_assign(ctx, scope, assign)?;
     }
 
     for init in &items.initials {

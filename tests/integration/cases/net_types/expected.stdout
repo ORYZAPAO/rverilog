@@ -1,0 +1,26 @@
+1 ea=0 eb=0
+  wand=zzzzzzzz triand=zzzzzzzz wor=zzzzzzzz trior=zzzzzzzz
+  tri0=00000000 tri1=11111111 t0s=0 pu=1 pd=0
+  gnd=0 vdd=1
+  wide_and=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz wide_or=zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+2 ea=1 eb=0
+  wand=11001010 triand=11001010 wor=11001010 trior=11001010
+  tri0=11001010 tri1=11001010 t0s=0 pu=0 pd=0
+  gnd=0 vdd=1
+  wide_and=f0f0f0f00000ffff123456789abcdef0 wide_or=f0f0f0f00000ffff123456789abcdef0
+3 ea=1 eb=1
+  wand=10000010 triand=10000010 wor=11101110 trior=11101110
+  tri0=11001010 tri1=1xx0xx10 t0s=0 pu=0 pd=0
+  gnd=0 vdd=1
+  wide_and=00f0f000000000001234567800000000 wide_or=fff0f0ffffffffffffffffff9abcdef0
+4 ea=0 eb=1
+  wand=10100110 triand=10100110 wor=10100110 trior=10100110
+  tri0=00000000 tri1=10100110 t0s=0 pu=1 pd=0
+  gnd=0 vdd=1
+  wide_and=0ff0f00fffff0000ffffffff00000000 wide_or=0ff0f00fffff0000ffffffff00000000
+5 ea=1 eb=1
+  wand=x0000100 triand=x0000100 wor=1011x111 trior=1011x111
+  tri0=x001x001 tri1=x0xxx1xx t0s=1 pu=1 pd=0
+  gnd=0 vdd=1
+  wide_and=00f0f000000000001234567800000000 wide_or=fff0f0ffffffffffffffffff9abcdef0
+$finish at time 5

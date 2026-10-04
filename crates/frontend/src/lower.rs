@@ -3,9 +3,9 @@ use indexmap::IndexMap;
 use rverilog_hir::{
     AlwaysConstruct, BinOp, CaseKind, ContinuousAssign, Design, EdgeType, Expr, FunctionDecl,
     GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems, HirModule,
-    InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind, ParamDecl,
-    ParamOverride, PortConnection, PortDecl, PortDirection, Range, RegDecl, Sensitivity,
-    SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, UnOp,
+    InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind,
+    NetResolve, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, Range, RegDecl,
+    Sensitivity, SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, UnOp,
 };
 use rverilog_mir::LogicVal;
 use smol_str::SmolStr;
@@ -394,6 +394,7 @@ fn lower_nonport_items(
             _ => {}
         }
     }
+    check_generate_errors(&generates)?;
     Ok((
         nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks,
         generates,
@@ -447,6 +448,7 @@ fn lower_module_items(
             }
         }
     }
+    check_generate_errors(&generates)?;
     Ok((
         nets, regs, mems, locals, assigns, initials, alwayses, instances, functions, tasks,
         generates,
@@ -463,6 +465,7 @@ fn merge_generate_items(dst: &mut GenerateItems, src: GenerateItems) {
     dst.alwayses.extend(src.alwayses);
     dst.instances.extend(src.instances);
     dst.nested.extend(src.nested);
+    dst.errors.extend(src.errors);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -487,7 +490,7 @@ fn process_mogi(
             instances.push(lower_module_inst(tree, &m.nodes.1)?);
         }
         MOGI::Gate(g) => {
-            assigns.extend(lower_gate_inst(tree, &g.nodes.1));
+            assigns.extend(lower_gate_inst(tree, &g.nodes.1)?);
         }
         MOGI::ModuleItem(mi) => {
             use sv_parser::ModuleCommonItem as MCI;
@@ -519,6 +522,34 @@ fn process_mogi(
 
 // ── generate / genvar ─────────────────────────────────────────────────────────
 
+/// generate内（入れ子を含む）で検出した未対応構文を `UnsupportedConstruct` として返す。
+fn check_generate_errors(g: &GenerateItems) -> Result<(), FrontendError> {
+    if let Some(msg) = g.errors.first() {
+        return Err(FrontendError::UnsupportedConstruct(
+            msg.trim_start_matches("Unsupported construct: ")
+                .to_string(),
+        ));
+    }
+    for n in &g.nested {
+        match n {
+            GenerateConstruct::If(i) => {
+                check_generate_errors(&i.then_items)?;
+                check_generate_errors(&i.else_items)?;
+            }
+            GenerateConstruct::Case(c) => {
+                for (_, items) in &c.arms {
+                    check_generate_errors(items)?;
+                }
+                if let Some(d) = &c.default {
+                    check_generate_errors(d)?;
+                }
+            }
+            GenerateConstruct::For(f) => check_generate_errors(&f.body)?,
+        }
+    }
+    Ok(())
+}
+
 fn lower_generate_items(tree: &SyntaxTree, items: &[sv_parser::GenerateItem]) -> GenerateItems {
     let mut g = GenerateItems::default();
     for item in items {
@@ -545,9 +576,10 @@ fn process_generate_mogi(
                 g.instances.push(inst);
             }
         }
-        MOGI::Gate(gt) => {
-            g.assigns.extend(lower_gate_inst(tree, &gt.nodes.1));
-        }
+        MOGI::Gate(gt) => match lower_gate_inst(tree, &gt.nodes.1) {
+            Ok(v) => g.assigns.extend(v),
+            Err(e) => g.errors.push(e.to_string()),
+        },
         MOGI::ModuleItem(mi) => {
             use sv_parser::ModuleCommonItem as MCI;
             match &mi.nodes.1 {
@@ -593,12 +625,13 @@ fn lower_generate_decl(
     if let D::PackageOrGenerateItemDeclaration(p) = d {
         use sv_parser::PackageOrGenerateItemDeclaration as PD;
         match p.as_ref() {
-            PD::NetDeclaration(nd) => {
-                if let Ok((nets, assigns)) = lower_net_decl(tree, nd) {
+            PD::NetDeclaration(nd) => match lower_net_decl(tree, nd) {
+                Ok((nets, assigns)) => {
                     g.nets.extend(nets);
                     g.assigns.extend(assigns);
                 }
-            }
+                Err(e) => g.errors.push(e.to_string()),
+            },
             PD::DataDeclaration(dd) => {
                 if let Ok((regs, mems)) = lower_data_decl(tree, dd) {
                     g.regs.extend(regs);
@@ -1104,12 +1137,24 @@ fn lower_net_decl(
     if let sv_parser::NetDeclaration::NetType(nt) = nd {
         let (width, width_expr) = packed_width_expr(tree, RefNode::NetDeclarationNetType(nt));
         let signed = has_signed(RefNode::NetDeclarationNetType(nt));
+        use sv_parser::NetType as NT;
+        let net_type = match &nt.nodes.0 {
+            NT::Wire(_) | NT::Tri(_) | NT::Uwire(_) => NetResolve::Wire,
+            NT::Wand(_) | NT::Triand(_) => NetResolve::Wand,
+            NT::Wor(_) | NT::Trior(_) => NetResolve::Wor,
+            NT::Tri0(_) => NetResolve::Tri0,
+            NT::Tri1(_) => NetResolve::Tri1,
+            NT::Supply0(_) => NetResolve::Supply0,
+            NT::Supply1(_) => NetResolve::Supply1,
+            NT::Trireg(_) => return Err(unsupported("trireg net (charge storage)")),
+        };
         for assignment in nt.nodes.5.nodes.0.contents() {
             if let Some(name) = get_id(tree, RefNode::NetIdentifier(&assignment.nodes.0)) {
                 nets.push(NetDecl {
                     name: name.clone(),
                     width,
                     kind: NetKind::Wire,
+                    net_type,
                     width_expr: width_expr.clone(),
                     signed,
                 });
@@ -1118,6 +1163,7 @@ fn lower_net_decl(
                     assigns.push(ContinuousAssign {
                         lval: LValue::Net(name),
                         expr: lower_expression(tree, expr)?,
+                        weak: false,
                     });
                 }
             }
@@ -1338,7 +1384,11 @@ fn lower_continuous_assign(
             if let RefNode::NetAssignment(na) = na_node {
                 let lval = lower_net_lvalue(tree, RefNode::NetLvalue(&na.nodes.0))?;
                 let expr = lower_expression(tree, &na.nodes.2)?;
-                out.push(ContinuousAssign { lval, expr });
+                out.push(ContinuousAssign {
+                    lval,
+                    expr,
+                    weak: false,
+                });
             }
         }
     }
@@ -1352,7 +1402,10 @@ fn gate_keyword_text<'a>(tree: &'a SyntaxTree, kw: &sv_parser::Keyword) -> &'a s
     tree.get_str(kw).unwrap_or("").trim()
 }
 
-fn lower_gate_inst(tree: &SyntaxTree, gi: &sv_parser::GateInstantiation) -> Vec<ContinuousAssign> {
+fn lower_gate_inst(
+    tree: &SyntaxTree,
+    gi: &sv_parser::GateInstantiation,
+) -> Result<Vec<ContinuousAssign>, FrontendError> {
     use sv_parser::GateInstantiation as GI;
     let mut out = Vec::new();
     match gi {
@@ -1364,7 +1417,7 @@ fn lower_gate_inst(tree: &SyntaxTree, gi: &sv_parser::GateInstantiation) -> Vec<
                 "nor" => (BinOp::BitOr, true),
                 "xor" => (BinOp::BitXor, false),
                 "xnor" => (BinOp::BitXor, true),
-                _ => return out,
+                _ => return Ok(out),
             };
             for inst in n.nodes.3.contents() {
                 let (out_term, _, in_terms) = &inst.nodes.1.nodes.1;
@@ -1387,14 +1440,18 @@ fn lower_gate_inst(tree: &SyntaxTree, gi: &sv_parser::GateInstantiation) -> Vec<
                 if negate {
                     expr = Expr::Un(UnOp::BitNot, Box::new(expr));
                 }
-                out.push(ContinuousAssign { lval, expr });
+                out.push(ContinuousAssign {
+                    lval,
+                    expr,
+                    weak: false,
+                });
             }
         }
         GI::NOutput(n) => {
             let negate = match gate_keyword_text(tree, &n.nodes.0.nodes.0) {
                 "buf" => false,
                 "not" => true,
-                _ => return out,
+                _ => return Ok(out),
             };
             for inst in n.nodes.3.contents() {
                 let (out_terms, _, in_term) = &inst.nodes.1.nodes.1;
@@ -1412,14 +1469,65 @@ fn lower_gate_inst(tree: &SyntaxTree, gi: &sv_parser::GateInstantiation) -> Vec<
                         out.push(ContinuousAssign {
                             lval,
                             expr: in_expr.clone(),
+                            weak: false,
                         });
                     }
                 }
             }
         }
-        _ => {} // switch/cmos/pass/pullup/pulldown gates: unsupported subset
+        GI::Enable(e) => {
+            // bufif0/bufif1/notif0/notif1: `out = en ? data : 1'bz`（0系は枝を入れ替え）。
+            // 入力のZ/Xは出力Xになる（bufifは `~~in` でZをXへ落とす）。strength/delayは無視。
+            let kind = gate_keyword_text(tree, &e.nodes.0.nodes.0);
+            let (invert, active_low) = match kind {
+                "bufif0" => (false, true),
+                "bufif1" => (false, false),
+                "notif0" => (true, true),
+                "notif1" => (true, false),
+                other => return Err(unsupported(&format!("enable gate: {other}"))),
+            };
+            for inst in e.nodes.3.contents() {
+                let (out_term, _, in_term, _, en_term) = &inst.nodes.1.nodes.1;
+                let lval = lower_net_lvalue(tree, RefNode::NetLvalue(&out_term.nodes.0))?;
+                let data = lower_expression(tree, &in_term.nodes.0)?;
+                let en = lower_expression(tree, &en_term.nodes.0)?;
+                let not = |x: Expr| Expr::Un(UnOp::BitNot, Box::new(x));
+                let data = if invert { not(data) } else { not(not(data)) };
+                let z = Expr::Const(LogicVal::Z);
+                let (t, f) = if active_low { (z, data) } else { (data, z) };
+                out.push(ContinuousAssign {
+                    lval,
+                    expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
+                    weak: false,
+                });
+            }
+        }
+        GI::Pullup(_) | GI::Pulldown(_) => {
+            let (up, terms) = match gi {
+                GI::Pullup(p) => (true, &p.nodes.2),
+                GI::Pulldown(p) => (false, &p.nodes.2),
+                _ => unreachable!(),
+            };
+            for inst in terms.contents() {
+                let lval =
+                    lower_net_lvalue(tree, RefNode::NetLvalue(&inst.nodes.1.nodes.1.nodes.0))?;
+                if !matches!(lval, LValue::Net(_)) {
+                    return Err(unsupported("pullup/pulldown on a bit/part-select"));
+                }
+                out.push(ContinuousAssign {
+                    lval,
+                    expr: Expr::Const(lv(up as u64, 1)),
+                    weak: true,
+                });
+            }
+        }
+        GI::Cmos(_) | GI::Mos(_) | GI::PassEn(_) | GI::Pass(_) => {
+            return Err(unsupported(
+                "switch-level gate (cmos/nmos/pmos/tran/tranif/rtran)",
+            ));
+        }
     }
-    out
+    Ok(out)
 }
 
 fn unwrap_all_net_assignments(node: RefNode) -> Vec<RefNode> {

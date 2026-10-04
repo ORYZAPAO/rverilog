@@ -81,8 +81,14 @@ impl Interpreter {
         let cont_len = design.conts.len();
         let mut net_values = HashMap::new();
         for (i, net) in design.nets.iter().enumerate() {
-            let init = match net.kind {
-                NetKind::Wire => LogicVal::z_of_width(net.width),
+            let init = match (net.kind, design.net_resolve.get(&(i as u32))) {
+                (NetKind::Wire, Some(NetResolve::Supply0 | NetResolve::Pull0)) => {
+                    LogicVal::all_bits(net.width, false)
+                }
+                (NetKind::Wire, Some(NetResolve::Supply1 | NetResolve::Pull1)) => {
+                    LogicVal::all_bits(net.width, true)
+                }
+                (NetKind::Wire, _) => LogicVal::z_of_width(net.width),
                 _ => LogicVal::x_of_width(net.width),
             };
             net_values.insert(NetId(i as u32), init);
@@ -1002,11 +1008,21 @@ impl Interpreter {
             _ => val.resize(w),
         };
         self.driver_vals.insert(cont_id, drv);
+        let kind = self.design.net_resolve.get(&net_id.0).copied();
         let mut resolved = z;
         for c in &self.design.net_drivers[&net_id.0] {
             if let Some(v) = self.driver_vals.get(c) {
-                resolved = resolved.resolve(v);
+                resolved = match kind {
+                    Some(NetResolve::Wand) => resolved.resolve_wand(v),
+                    Some(NetResolve::Wor) => resolved.resolve_wor(v),
+                    _ => resolved.resolve(v),
+                };
             }
+        }
+        match kind {
+            Some(NetResolve::Pull0) => resolved = resolved.pull_z(false),
+            Some(NetResolve::Pull1) => resolved = resolved.pull_z(true),
+            _ => {}
         }
         let old = self.net_values.get(&net_id).cloned();
         if old.as_ref() != Some(&resolved) {

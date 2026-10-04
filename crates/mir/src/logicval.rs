@@ -513,6 +513,63 @@ impl LogicVal {
         Self::from_chunks(w, &a, &b)
     }
 
+    /// wand/triand 用の解決: Zは中立、0が支配（0 > X > 1）。
+    pub fn resolve_wand(&self, other: &LogicVal) -> LogicVal {
+        self.resolve_dominant(other, false)
+    }
+
+    /// wor/trior 用の解決: Zは中立、1が支配（1 > X > 0）。
+    pub fn resolve_wor(&self, other: &LogicVal) -> LogicVal {
+        self.resolve_dominant(other, true)
+    }
+
+    fn resolve_dominant(&self, other: &LogicVal, one_dominates: bool) -> LogicVal {
+        let w = self.width().max(other.width());
+        let n = num_chunks(w);
+        let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let (a1, b1) = (self.get_chunk(i), self.get_chunk_b(i));
+            let (a2, b2) = (other.get_chunk(i), other.get_chunk_b(i));
+            let (z1, z2) = (!a1 & b1, !a2 & b2);
+            let known = !z1 & !z2;
+            let (x1, x2) = (a1 & b1, a2 & b2);
+            let (zero1, zero2) = (!a1 & !b1, !a2 & !b2);
+            let (one1, one2) = (a1 & !b1, a2 & !b2);
+            let (dom, xx) = if one_dominates {
+                let d = one1 | one2;
+                (d, (x1 | x2) & !d)
+            } else {
+                let d = zero1 | zero2;
+                (d, (x1 | x2) & !d)
+            };
+            // 支配値が1(wor)なら a=1、0(wand)なら a=0。支配値が無くXも無ければ非支配値(wor:0, wand:1)。
+            let ka = if one_dominates { dom | xx } else { !dom };
+            a.push((z1 & a2) | (!z1 & z2 & a1) | (known & ka));
+            b.push((z1 & b2) | (!z1 & z2 & b1) | (known & xx));
+        }
+        Self::from_chunks(w, &a, &b)
+    }
+
+    /// Zのビットを `one` の値（pullup=1 / pulldown=0）へ置き換える。
+    pub fn pull_z(&self, one: bool) -> LogicVal {
+        let n = num_chunks(self.width());
+        let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let (ai, bi) = (self.get_chunk(i), self.get_chunk_b(i));
+            let z = !ai & bi;
+            a.push(if one { ai | z } else { ai });
+            b.push(bi & !z);
+        }
+        Self::from_chunks(self.width(), &a, &b)
+    }
+
+    /// 全ビットが `one` の値（任意幅）。
+    pub fn all_bits(width: u32, one: bool) -> LogicVal {
+        let n = num_chunks(width);
+        let fill = if one { u64::MAX } else { 0 };
+        Self::from_chunks(width, &vec![fill; n], &vec![0u64; n])
+    }
+
     /// 全ビットZの値（任意幅）。
     pub fn z_of_width(width: u32) -> LogicVal {
         let n = num_chunks(width);
@@ -1630,5 +1687,42 @@ mod tests {
         assert_eq!(r.bit_ab(102), (0, 0)); // 0 vs 0 -> 0
         assert_eq!(r.bit_ab(103), (1, 0)); // 1 vs 1 -> 1
         assert_eq!(r.bit_ab(0), (0, 1)); // Z のまま
+    }
+
+    #[test]
+    fn test_resolve_wand_wor_pull() {
+        let (z, x, o, l) = (LogicVal::Z, LogicVal::X, LogicVal::ONE, LogicVal::ZERO);
+        // wand: Z中立、0が支配、X > 1
+        assert_eq!(z.resolve_wand(&o), o);
+        assert_eq!(l.resolve_wand(&z), l);
+        assert_eq!(z.resolve_wand(&z), z);
+        assert_eq!(o.resolve_wand(&l), l);
+        assert!(o.resolve_wand(&x).is_x());
+        assert_eq!(l.resolve_wand(&x), l);
+        assert_eq!(o.resolve_wand(&o), o);
+        // wor: Z中立、1が支配、X > 0
+        assert_eq!(z.resolve_wor(&l), l);
+        assert_eq!(o.resolve_wor(&z), o);
+        assert_eq!(z.resolve_wor(&z), z);
+        assert_eq!(o.resolve_wor(&l), o);
+        assert!(l.resolve_wor(&x).is_x());
+        assert_eq!(o.resolve_wor(&x), o);
+        assert_eq!(l.resolve_wor(&l), l);
+        // pull_z: Zだけ置換
+        assert_eq!(z.pull_z(true), o);
+        assert_eq!(z.pull_z(false), l);
+        assert_eq!(x.pull_z(true), x);
+        assert_eq!(l.pull_z(true), l);
+        // 64bit超
+        let a = LogicVal::z_of_width(100).insert_bits(90, 2, &LogicVal::new(2, 0b10, 0));
+        let b = LogicVal::z_of_width(100).insert_bits(90, 2, &LogicVal::new(2, 0b11, 0));
+        let r = a.resolve_wand(&b);
+        assert_eq!(r.bit_ab(90), (0, 0));
+        assert_eq!(r.bit_ab(91), (1, 0));
+        assert_eq!(r.bit_ab(0), (0, 1));
+        let p = r.pull_z(true);
+        assert_eq!(p.bit_ab(0), (1, 0));
+        assert_eq!(p.bit_ab(90), (0, 0));
+        assert_eq!(LogicVal::all_bits(100, true).bit_ab(99), (1, 0));
     }
 }
