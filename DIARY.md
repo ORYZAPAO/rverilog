@@ -3332,3 +3332,23 @@ fmt/clippy警告なし、`cargo test --workspace`全通過
 ### Next
 
 - PR1を作成・マージ後、A24（式幅）→ strength → 双方向スイッチの順で進める
+
+## 2026-10-05（続き2）A24: 式のcontext-determined幅
+
+ブランチ`fix/expr-context-width`。非ANSIポート対応（PR #51）中に見つけた`x = a + b`の桁上げ落ちを修正。
+
+### What was done
+
+- elab: `compute_expr_ctx_widths`（IEEE 1364-2001 5.4）。代入RHSはLHS幅を、それ以外の根は自己決定を起点に文脈幅を下向き伝播。
+  算術・ビット演算・単項`+ - ~`・シフトのBin/Unに評価幅を記録。比較は両オペランドを互いの最大幅、連結/添字/シフト量/条件/論理/リダクションは自己決定
+- MIR: `expr_shift_width`（A21）を`expr_ctx_width`へ一般化
+- sim: 記録された幅へオペランドを拡張（式がsignedなら符号拡張、でなければゼロ拡張）してから演算
+- `expr_context_width`（約50ケース、iverilogとbit-exact）を追加。既存テスト（picorv32スモーク含む）は無修正で全通過
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- PRマージ後、A8最終残りのPR2（strength）→PR3（双方向スイッチ）

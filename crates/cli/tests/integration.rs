@@ -462,6 +462,19 @@ fn test_ref_port() {
 }
 
 #[test]
+fn test_expr_context_width() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/expr_context_width/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("expr_context_width");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];
