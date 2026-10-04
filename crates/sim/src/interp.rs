@@ -607,25 +607,43 @@ impl Interpreter {
             }
             Expr::Bin(op, l, r) => {
                 let mut lv = self.eval_expr(l);
-                let rv = self.eval_expr(r);
+                let mut rv = self.eval_expr(r);
                 let l_signed = self.design.expr_signed[l.0 as usize];
                 let r_signed = self.design.expr_signed[r.0 as usize];
-                // シフト演算子の左辺はself-determinedではなくcontext-determined
-                // （IEEE 1364-2001 5.4.1 Table 5-5）。既存のLogicVal::shl/shr/ashl/ashrは
-                // self.width()を結果幅として使うため、elabが算出した幅へ事前に拡張する（A21）。
-                if matches!(op, BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr) {
-                    if let Some(Some(width)) = self.design.expr_shift_width.get(id.0 as usize) {
-                        lv = if l_signed {
-                            lv.extend_sign(*width)
+                // 文脈決定の演算子は、オペランドを文脈幅へ拡張してから演算する（IEEE 1364-2001 5.4）。
+                // 式がsignedのときだけ符号拡張し、それ以外はゼロ拡張する。シフト量は自己決定。
+                if let Some(Some(width)) = self.design.expr_ctx_width.get(id.0 as usize) {
+                    let expr_signed = self.design.expr_signed[id.0 as usize];
+                    let extend = |v: &LogicVal, w: u32| {
+                        if expr_signed {
+                            v.extend_sign(w)
                         } else {
-                            lv.resize(*width)
-                        };
+                            v.resize(w)
+                        }
+                    };
+                    let w = (*width).max(lv.width());
+                    if matches!(op, BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr) {
+                        lv = extend(&lv, w);
+                    } else {
+                        let w = w.max(rv.width());
+                        lv = extend(&lv, w);
+                        rv = extend(&rv, w);
                     }
                 }
                 apply_binop(op, &lv, &rv, l_signed, r_signed)
             }
             Expr::Un(op, e) => {
-                let v = self.eval_expr(e);
+                let mut v = self.eval_expr(e);
+                if let (UnOp::Pos | UnOp::Neg | UnOp::BitNot, Some(Some(width))) =
+                    (op, self.design.expr_ctx_width.get(id.0 as usize))
+                {
+                    let w = (*width).max(v.width());
+                    v = if self.design.expr_signed[id.0 as usize] {
+                        v.extend_sign(w)
+                    } else {
+                        v.resize(w)
+                    };
+                }
                 apply_unop(op, &v, self.now)
             }
             Expr::Cond(c, t, f) => {

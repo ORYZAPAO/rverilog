@@ -349,6 +349,15 @@ fn compare_nonansi_ports() {
 }
 
 #[test]
+fn compare_expr_context_width() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/expr_context_width/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

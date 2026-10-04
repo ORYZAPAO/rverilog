@@ -59,12 +59,11 @@ pub struct ElaboratedDesign {
     pub mem_sensitivity: IndexMap<u32, Vec<u32>>,
     /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）
     pub expr_signed: Vec<bool>,
-    /// exprs[i] がシフト演算子（`<<`/`>>`/`<<<`/`>>>`）のBin左辺として評価される場合の
-    /// 文脈幅（IEEE 1364-2001 5.4.1 Table 5-5: シフト演算子の左辺はcontext-determined、
-    /// 右辺（シフト量）のみself-determined）。Someのときはeval_expr側でシフト前に左辺値を
-    /// この幅へresize/extend_signしてから既存のshl/shr/ashl/ashrへ渡す。Noneの場合は従来通り
-    /// 左辺の自己決定幅（self.width()）で計算する（安全側フォールバック、A21）。
-    pub expr_shift_width: Vec<Option<u32>>,
+    /// exprs[i] の文脈決定の評価幅（IEEE 1364-2001 5.4: 代入のLHS幅と式内の最大の自己決定幅の最大値）。
+    /// 算術・ビット演算・単項`+ - ~`・シフトのBin/Unに対して記録される。simはオペランドを
+    /// この幅へ（式がsignedなら符号拡張、でなければゼロ拡張で）拡張してから演算する。
+    /// シフトの右辺（シフト量）は自己決定のため対象外。Noneは自己決定幅のまま評価する。
+    pub expr_ctx_width: Vec<Option<u32>>,
 }
 
 impl LValue {

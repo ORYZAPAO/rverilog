@@ -382,17 +382,7 @@ pub fn elaborate(
         _ => ctx.net_pulls.contains_key(net) || v.len() >= 2,
     });
 
-    let mut expr_shift_width = vec![None; ctx.exprs.len()];
-    for stmt in &ctx.stmts {
-        if let Stmt::BlockingAssign(lval, expr) | Stmt::NbaAssign(lval, expr) = stmt {
-            let width = lvalue_width(&ctx, lval);
-            propagate_shift_context(&ctx, *expr, width, &mut expr_shift_width);
-        }
-    }
-    for cont in &ctx.conts {
-        let width = lvalue_width(&ctx, &cont.lval);
-        propagate_shift_context(&ctx, cont.expr, width, &mut expr_shift_width);
-    }
+    let expr_ctx_width = compute_expr_ctx_widths(&ctx);
 
     let top_scope = ScopeId(0);
     Ok(ElaboratedDesign {
@@ -411,7 +401,7 @@ pub fn elaborate(
         net_pulls: ctx.net_pulls,
         mem_sensitivity,
         expr_signed: ctx.expr_signed,
-        expr_shift_width,
+        expr_ctx_width,
     })
 }
 
@@ -1674,11 +1664,104 @@ fn lvalue_width(ctx: &ElabCtx, lval: &LValue) -> u32 {
     }
 }
 
-/// 代入文のLHS幅を起点に、IEEE 1364-2001 5.4.1 Table 5-5 のcontext-determined演算子を
-/// たどって文脈幅をRHS式木へ下向きに伝播し、シフト演算子のBinノードに到達するたびその時点の
-/// 文脈幅を記録する。self-determinedな境界では伝播を打ち切る。
-fn propagate_shift_context(ctx: &ElabCtx, expr_id: ExprId, width: u32, out: &mut [Option<u32>]) {
-    match &ctx.exprs[expr_id.0 as usize] {
+/// 式の自己決定幅（IEEE 1364-2001 5.4.1 Table 5-22）。
+fn self_width(ctx: &ElabCtx, id: ExprId) -> u32 {
+    match &ctx.exprs[id.0 as usize] {
+        Expr::Const(v) => v.width(),
+        Expr::StringLit(s) => (s.len() as u32 * 8).max(8),
+        Expr::Net(n) => ctx.nets[n.0 as usize].width,
+        Expr::BitSel(_, _) => 1,
+        Expr::PartSel(_, hi, lo) => hi - lo + 1,
+        Expr::DynPartSel(_, _, w, _) => *w,
+        Expr::Concat(parts) => parts.iter().map(|p| self_width(ctx, *p)).sum(),
+        Expr::Repeat(count, inner) => count * self_width(ctx, *inner),
+        Expr::Bin(op, l, r) => match op {
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Mod
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::BitNand
+            | BinOp::BitNor
+            | BinOp::BitXnor => self_width(ctx, *l).max(self_width(ctx, *r)),
+            BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr => self_width(ctx, *l),
+            _ => 1,
+        },
+        Expr::Un(op, e) => match op {
+            UnOp::Pos | UnOp::Neg | UnOp::BitNot => self_width(ctx, *e),
+            _ => 1,
+        },
+        Expr::Cond(_, t, f) => self_width(ctx, *t).max(self_width(ctx, *f)),
+        Expr::MemRead(m, _) => ctx.memories[m.0 as usize].elem_width,
+        Expr::CallResult(_, n) => ctx.nets[n.0 as usize].width,
+        Expr::Random(_) => 32,
+    }
+}
+
+/// 式木の直接の子（式）。
+fn expr_children(e: &Expr) -> Vec<ExprId> {
+    match e {
+        Expr::Concat(parts) => parts.clone(),
+        Expr::Repeat(_, inner) => vec![*inner],
+        Expr::BitSel(_, i) | Expr::MemRead(_, i) => vec![*i],
+        Expr::DynPartSel(_, base, _, _) => vec![*base],
+        Expr::Bin(_, l, r) => vec![*l, *r],
+        Expr::Un(_, x) => vec![*x],
+        Expr::Cond(c, t, f) => vec![*c, *t, *f],
+        Expr::Random(Some(seed)) => vec![*seed],
+        _ => vec![],
+    }
+}
+
+/// IEEE 1364-2001 5.4 の式幅決定: 文脈幅（代入のLHS幅と式内の最大の自己決定幅）を式木へ下向きに伝播し、
+/// 文脈決定の演算子（算術・ビット演算・単項`+ - ~`・`?:`・シフトの左辺）ごとに評価幅を記録する。
+/// 比較/等価の両オペランドは互いの最大幅で評価し（結果は1bit）、連結・添字・シフト量・条件・論理演算・
+/// リダクションのオペランドは自己決定として文脈幅0から始める。simは記録された幅へオペランドを
+/// （式がsignedなら符号拡張、でなければゼロ拡張で）拡張してから演算する。
+fn compute_expr_ctx_widths(ctx: &ElabCtx) -> Vec<Option<u32>> {
+    let n = ctx.exprs.len();
+    let mut out: Vec<Option<u32>> = vec![None; n];
+
+    // 代入のRHSは、LHS幅を文脈幅として起点にする
+    let mut assign_roots: Vec<(ExprId, u32)> = Vec::new();
+    for stmt in &ctx.stmts {
+        if let Stmt::BlockingAssign(lval, expr) | Stmt::NbaAssign(lval, expr) = stmt {
+            assign_roots.push((*expr, lvalue_width(ctx, lval)));
+        }
+    }
+    for cont in &ctx.conts {
+        assign_roots.push((cont.expr, lvalue_width(ctx, &cont.lval)));
+    }
+    let mut is_child = vec![false; n];
+    for e in &ctx.exprs {
+        for c in expr_children(e) {
+            is_child[c.0 as usize] = true;
+        }
+    }
+    let mut visited_root = vec![false; n];
+    for (expr, w) in assign_roots {
+        visited_root[expr.0 as usize] = true;
+        walk_ctx_width(ctx, expr, w, &mut out);
+    }
+    // それ以外の根（条件式・システムタスク引数など）は自己決定
+    for i in 0..n {
+        if !is_child[i] && !visited_root[i] {
+            walk_ctx_width(ctx, ExprId(i as u32), 0, &mut out);
+        }
+    }
+    out
+}
+
+fn walk_ctx_width(ctx: &ElabCtx, id: ExprId, ctx_w: u32, out: &mut [Option<u32>]) {
+    let eff = ctx_w.max(self_width(ctx, id));
+    let record = |out: &mut [Option<u32>]| {
+        let slot = &mut out[id.0 as usize];
+        *slot = Some(slot.map_or(eff, |old| old.max(eff)));
+    };
+    match &ctx.exprs[id.0 as usize] {
         Expr::Bin(op, l, r) => match op {
             BinOp::Add
             | BinOp::Sub
@@ -1691,52 +1774,50 @@ fn propagate_shift_context(ctx: &ElabCtx, expr_id: ExprId, width: u32, out: &mut
             | BinOp::BitNand
             | BinOp::BitNor
             | BinOp::BitXnor => {
-                propagate_shift_context(ctx, *l, width, out);
-                propagate_shift_context(ctx, *r, width, out);
+                record(out);
+                walk_ctx_width(ctx, *l, eff, out);
+                walk_ctx_width(ctx, *r, eff, out);
             }
             BinOp::Shl | BinOp::Shr | BinOp::Ashl | BinOp::Ashr => {
-                out[expr_id.0 as usize] = Some(width);
-                propagate_shift_context(ctx, *l, width, out);
+                record(out);
+                walk_ctx_width(ctx, *l, eff, out);
+                walk_ctx_width(ctx, *r, 0, out);
             }
-            BinOp::LogAnd
-            | BinOp::LogOr
-            | BinOp::Eq
+            BinOp::Eq
             | BinOp::Ne
             | BinOp::CaseEq
             | BinOp::CaseNe
             | BinOp::Lt
             | BinOp::Gt
             | BinOp::Le
-            | BinOp::Ge => {}
+            | BinOp::Ge => {
+                let m = self_width(ctx, *l).max(self_width(ctx, *r));
+                walk_ctx_width(ctx, *l, m, out);
+                walk_ctx_width(ctx, *r, m, out);
+            }
+            BinOp::LogAnd | BinOp::LogOr => {
+                walk_ctx_width(ctx, *l, 0, out);
+                walk_ctx_width(ctx, *r, 0, out);
+            }
         },
-        Expr::Un(UnOp::Pos | UnOp::Neg | UnOp::BitNot, expr) => {
-            propagate_shift_context(ctx, *expr, width, out);
+        Expr::Un(op, e) => match op {
+            UnOp::Pos | UnOp::Neg | UnOp::BitNot => {
+                record(out);
+                walk_ctx_width(ctx, *e, eff, out);
+            }
+            _ => walk_ctx_width(ctx, *e, 0, out),
+        },
+        Expr::Cond(c, t, f) => {
+            walk_ctx_width(ctx, *c, 0, out);
+            walk_ctx_width(ctx, *t, eff, out);
+            walk_ctx_width(ctx, *f, eff, out);
         }
-        Expr::Un(
-            UnOp::LogNot
-            | UnOp::RedAnd
-            | UnOp::RedNand
-            | UnOp::RedOr
-            | UnOp::RedNor
-            | UnOp::RedXor
-            | UnOp::RedXnor,
-            _,
-        ) => {}
-        Expr::Cond(_, then_expr, else_expr) => {
-            propagate_shift_context(ctx, *then_expr, width, out);
-            propagate_shift_context(ctx, *else_expr, width, out);
+        other => {
+            // 連結・繰返し・添字・乱数シードなどのオペランドは自己決定
+            for c in expr_children(other) {
+                walk_ctx_width(ctx, c, 0, out);
+            }
         }
-        Expr::Const(_)
-        | Expr::StringLit(_)
-        | Expr::Net(_)
-        | Expr::BitSel(_, _)
-        | Expr::PartSel(_, _, _)
-        | Expr::DynPartSel(_, _, _, _)
-        | Expr::Concat(_)
-        | Expr::Repeat(_, _)
-        | Expr::MemRead(_, _)
-        | Expr::Random(_)
-        | Expr::CallResult(_, _) => {}
     }
 }
 
