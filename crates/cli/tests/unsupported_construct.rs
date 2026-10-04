@@ -188,3 +188,29 @@ fn test_unsupported_gate_inside_generate_is_reported() {
         "bidirectional switch",
     );
 }
+
+#[test]
+fn test_nonansi_port_without_direction_is_reported() {
+    let result = parse_source(
+        "nonansi_no_dir",
+        "module m(a, b); input a; endmodule module top; endmodule",
+    );
+    match &result {
+        Err(rverilog_frontend::FrontendError::ParseError(m)) => {
+            assert!(m.contains("`b`"), "unexpected message: {m}")
+        }
+        other => panic!("expected ParseError for port without direction, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_nonansi_declaration_not_in_port_list_is_reported() {
+    let result = parse_source(
+        "nonansi_extra",
+        "module m(a); input a; output y; endmodule module top; endmodule",
+    );
+    assert!(
+        matches!(&result, Err(rverilog_frontend::FrontendError::ParseError(m)) if m.contains("`y`")),
+        "expected ParseError naming `y`, got {result:?}"
+    );
+}

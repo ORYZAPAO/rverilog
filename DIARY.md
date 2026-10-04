@@ -3305,3 +3305,30 @@ fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32含む）�
 ### Next
 
 - PR作成→マージ。次候補: `**`演算子、A8の最終残（strength・tran系・refポート）
+
+## 2026-10-05（続き）A8最終残り PR1: 非ANSIポート宣言
+
+ブランチ`feat/nonansi-ports`。計画は3PR構成（非ANSIポート → strength → 双方向スイッチ）。
+
+### What was done
+
+- 調査: 非ANSIモジュールは`ports: vec![]`で、本体の`input/output`宣言がHIRに落ちていなかった。子の名前が親スコープの
+  同名ネットへ偶然解決されて動いていた（`output wand`の型指定も無視。iverilog`1000`に対しこちら`1xx0`）
+- `lower_nonansi_ports`: ヘッダ順のポート名＋本体宣言（Input/Output/Inout/Ref、Net/Variable形式）から`PortDecl`を構築。
+  宣言欠落・ヘッダに無い宣言は`ParseError`。非ANSIヘッダの`#(parameter ...)`も取り込み
+- `ref`ポートは親の変数を共有（inoutと同じalias）で動作することを`ref_port`テストで固定
+- テスト: `nonansi_ports`（位置/名前結線、`output reg`、親と同名のネット、`output wand`、inout。iverilog比較）、
+  `ref_port`、明示エラー2件
+
+### 発見した別の既存バグ（未修正、PLAN.md A24に記録）
+
+式のcontext-determined幅が算術/比較で未実装: `reg [4:0] x; x = a + b;`（a,bは4bit）で桁上げが落ちる（x=6、正しくは22）。
+非ANSIポート対応とは別課題のためPRを分ける。
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過
+
+### Next
+
+- PR1を作成・マージ後、A24（式幅）→ strength → 双方向スイッチの順で進める

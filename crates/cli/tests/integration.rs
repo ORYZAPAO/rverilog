@@ -435,6 +435,33 @@ fn test_ternary_x_cond() {
 }
 
 #[test]
+fn test_nonansi_ports() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/nonansi_ports/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("nonansi_ports");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+// `ref` ポートは親の変数を共有する（inoutと同じくネットのaliasで実現）。SystemVerilog構文のためiverilog比較なし。
+#[test]
+fn test_ref_port() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/ref_port/dut.sv")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("ref_port");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];

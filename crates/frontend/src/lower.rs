@@ -130,6 +130,8 @@ fn lower_module_nonansi(
     let name = get_id(tree, RefNode::ModuleIdentifier(&header.nodes.3))
         .ok_or_else(|| FrontendError::ParseError("missing module name".into()))?;
 
+    let ports = lower_nonansi_ports(tree, &header.nodes.6, &x.nodes.2)?;
+    let params = lower_param_port_list(tree, &header.nodes.5)?;
     let (
         nets,
         regs,
@@ -146,8 +148,8 @@ fn lower_module_nonansi(
 
     Ok(HirModule {
         name,
-        ports: vec![],
-        params: vec![],
+        ports,
+        params,
         locals,
         nets,
         regs,
@@ -160,6 +162,167 @@ fn lower_module_nonansi(
         tasks,
         generates,
     })
+}
+
+// ── non-ANSI ports ────────────────────────────────────────────────────────────
+
+/// 非ANSIモジュールのポートを構築する。ヘッダ `module m(a, b, y);` の宣言順でポート名を決め、
+/// 本体の `input`/`output`/`inout`/`ref` 宣言から方向・幅・signed・net型を集める。
+fn lower_nonansi_ports(
+    tree: &SyntaxTree,
+    header_ports: &sv_parser::ListOfPorts,
+    items: &[sv_parser::ModuleItem],
+) -> Result<Vec<PortDecl>, FrontendError> {
+    use sv_parser::Port as P;
+    use sv_parser::PortExpression as PE;
+    // ヘッダのポート名（宣言順）
+    let mut order: Vec<SmolStr> = Vec::new();
+    {
+        let list = &header_ports.nodes.0.nodes.1;
+        for port in list.contents() {
+            let ident = match port {
+                P::NonNamed(n) => match &n.nodes.0 {
+                    None => continue, // 空ポート `module m(a, , b)`
+                    Some(PE::PortReference(r)) => &r.nodes.0,
+                    Some(PE::Brace(_)) => {
+                        return Err(unsupported("concatenated port expression in module header"))
+                    }
+                },
+                P::Named(n) => match &n.nodes.2.nodes.1 {
+                    None => &n.nodes.1,
+                    Some(PE::PortReference(r))
+                        if get_id(tree, RefNode::PortIdentifier(&r.nodes.0))
+                            == get_id(tree, RefNode::PortIdentifier(&n.nodes.1)) =>
+                    {
+                        &n.nodes.1
+                    }
+                    Some(_) => return Err(unsupported("named port with a different expression")),
+                },
+            };
+            let name = get_id(tree, RefNode::PortIdentifier(ident))
+                .ok_or_else(|| FrontendError::ParseError("port name missing".into()))?;
+            order.push(name);
+        }
+    }
+
+    // 本体の方向宣言
+    let mut decls: IndexMap<SmolStr, PortDecl> = IndexMap::new();
+    for item in items {
+        let sv_parser::ModuleItem::PortDeclaration(pd) = item else {
+            continue;
+        };
+        let mut add =
+            |names: Vec<SmolStr>, direction: PortDirection, node: RefNode, net_type: NetResolve| {
+                let (width, width_expr) = packed_width_expr(tree, node.clone());
+                let signed = has_signed(node);
+                for name in names {
+                    decls.insert(
+                        name.clone(),
+                        PortDecl {
+                            name,
+                            direction,
+                            width,
+                            width_expr: width_expr.clone(),
+                            signed,
+                            net_type,
+                        },
+                    );
+                }
+            };
+        let port_names = |l: &sv_parser::ListOfPortIdentifiers| -> Vec<SmolStr> {
+            l.nodes
+                .0
+                .contents()
+                .into_iter()
+                .filter_map(|(id, _)| get_id(tree, RefNode::PortIdentifier(id)))
+                .collect()
+        };
+        let var_names = |l: &sv_parser::ListOfVariableIdentifiers| -> Vec<SmolStr> {
+            l.nodes
+                .0
+                .contents()
+                .into_iter()
+                .filter_map(|(id, _)| get_id(tree, RefNode::VariableIdentifier(id)))
+                .collect()
+        };
+        let var_port_names = |l: &sv_parser::ListOfVariablePortIdentifiers| -> Vec<SmolStr> {
+            l.nodes
+                .0
+                .contents()
+                .into_iter()
+                .filter_map(|(id, _, _)| get_id(tree, RefNode::PortIdentifier(id)))
+                .collect()
+        };
+        let net_ty = |t: &sv_parser::NetPortType| -> Result<NetResolve, FrontendError> {
+            match t {
+                sv_parser::NetPortType::DataType(d) => match d.nodes.0.as_ref() {
+                    Some(nt) => net_type_to_resolve(nt),
+                    None => Ok(NetResolve::Wire),
+                },
+                _ => Ok(NetResolve::Wire),
+            }
+        };
+        use sv_parser::PortDeclaration as PD;
+        match &pd.0 {
+            PD::Input(i) => match &i.nodes.1 {
+                sv_parser::InputDeclaration::Net(n) => add(
+                    port_names(&n.nodes.2),
+                    PortDirection::Input,
+                    RefNode::InputDeclarationNet(n),
+                    net_ty(&n.nodes.1)?,
+                ),
+                sv_parser::InputDeclaration::Variable(v) => add(
+                    var_names(&v.nodes.2),
+                    PortDirection::Input,
+                    RefNode::InputDeclarationVariable(v),
+                    NetResolve::Wire,
+                ),
+            },
+            PD::Output(o) => match &o.nodes.1 {
+                sv_parser::OutputDeclaration::Net(n) => add(
+                    port_names(&n.nodes.2),
+                    PortDirection::Output,
+                    RefNode::OutputDeclarationNet(n),
+                    net_ty(&n.nodes.1)?,
+                ),
+                sv_parser::OutputDeclaration::Variable(v) => add(
+                    var_port_names(&v.nodes.2),
+                    PortDirection::Output,
+                    RefNode::OutputDeclarationVariable(v),
+                    NetResolve::Wire,
+                ),
+            },
+            PD::Inout(i) => add(
+                port_names(&i.nodes.1.nodes.2),
+                PortDirection::Inout,
+                RefNode::InoutDeclaration(&i.nodes.1),
+                net_ty(&i.nodes.1.nodes.1)?,
+            ),
+            // ref ポートは親の変数を共有する。inout と同じく親子でネットを共有（alias）して扱う。
+            PD::Ref(r) => add(
+                var_names(&r.nodes.1.nodes.2),
+                PortDirection::Inout,
+                RefNode::RefDeclaration(&r.nodes.1),
+                NetResolve::Wire,
+            ),
+            PD::Interface(_) => return Err(unsupported("interface port")),
+        }
+    }
+
+    // ヘッダ順に並べる。宣言の無いポート・ヘッダに無い宣言は黙って捨てずエラーにする。
+    let mut ports = Vec::new();
+    for name in &order {
+        let decl = decls.swap_remove(name).ok_or_else(|| {
+            FrontendError::ParseError(format!("port `{name}` has no direction declaration"))
+        })?;
+        ports.push(decl);
+    }
+    if let Some((extra, _)) = decls.first() {
+        return Err(FrontendError::ParseError(format!(
+            "`{extra}` is declared as a port but is not in the module port list"
+        )));
+    }
+    Ok(ports)
 }
 
 // ── ports ─────────────────────────────────────────────────────────────────────

@@ -1,0 +1,9 @@
+s0=0110 c0=1 s1=0110 c1=1 wy=1000
+s0=0001 c0=1 s1=0001 c1=1 wy=1000
+q1=10 q2=11
+q1=7f q2=80
+line=zzzz pq=zzzz
+line=0101 pq=0101
+line=xx01 pq=xx01
+line=1001 pq=1001
+$finish at time 9
