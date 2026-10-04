@@ -250,6 +250,15 @@ fn compare_loop_stmts() {
 }
 
 #[test]
+fn compare_wide_muldiv() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/wide_muldiv/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

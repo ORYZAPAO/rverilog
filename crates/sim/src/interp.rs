@@ -1539,11 +1539,11 @@ fn apply_unop(op: UnOp, v: &LogicVal, _now: u64) -> LogicVal {
     match op {
         UnOp::Pos => v.clone(),
         UnOp::Neg => {
+            // 0 - v（multi-word対応のsubで64bit超も扱う）
             if v.is_known() {
-                let a = v.pad_to_width(v.width());
-                LogicVal::new(v.width() as u16, (-(a as i64)) as u64, 0)
+                LogicVal::new(v.width() as u16, 0, 0).sub(v)
             } else {
-                LogicVal::X
+                LogicVal::x_of_width(v.width())
             }
         }
         UnOp::LogNot => v.log_not(),
