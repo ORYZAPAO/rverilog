@@ -340,6 +340,15 @@ fn compare_ternary_x_cond() {
 }
 
 #[test]
+fn compare_nonansi_ports() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/nonansi_ports/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(
