@@ -1240,15 +1240,15 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
             let width = val.width();
             match spec {
                 'd' | 'D' | 'h' | 'H' | 'b' | 'B' | 'o' | 'O' => {
-                    // 64bit超（Large値）は既存の生表示のまま対象外。
                     if width > 64 {
-                        let n = val.pad_to_width(width);
-                        result.push_str(&match spec {
-                            'd' | 'D' => n.to_string(),
-                            'h' | 'H' => format!("{:x}", n),
-                            'b' | 'B' => format!("{:b}", n),
-                            _ => format!("{:o}", n),
-                        });
+                        let natural = natural_repr_wide(spec, &val, arg_signed);
+                        result.push_str(&apply_width_modifier(
+                            spec,
+                            width,
+                            &width_digits,
+                            &natural,
+                            arg_signed,
+                        ));
                     } else {
                         let a = val.pad_to_width(width);
                         let b = val.pad_to_width_b(width);
@@ -1391,6 +1391,57 @@ fn natural_repr(spec: char, a: u64, b: u64, width: u32, signed: bool) -> String 
     }
 }
 
+/// 64bit超の値の自然表示。`natural_repr` と同じ規則（桁ごとのX/Z判定、`%d` の符号付き表示）を
+/// 任意幅へ拡張したもの。
+fn natural_repr_wide(spec: char, val: &LogicVal, signed: bool) -> String {
+    let width = val.width();
+    let bits_per_digit = match spec {
+        'b' | 'B' => 1,
+        'h' | 'H' => 4,
+        'o' | 'O' => 3,
+        _ => 0,
+    };
+    if bits_per_digit == 0 {
+        // 'd' | 'D'
+        if let Some(s) = val.to_decimal_string(signed) {
+            return s;
+        }
+        let (mut has_x, mut has_z, mut all_unknown) = (false, false, true);
+        for i in 0..width {
+            let (a, b) = val.bit_ab(i);
+            has_x |= a & b != 0;
+            has_z |= b & !a != 0;
+            all_unknown &= b != 0;
+        }
+        return match (all_unknown, has_x, has_z) {
+            (true, true, false) => 'x',
+            (true, false, true) => 'z',
+            (false, true, false) => 'X',
+            (false, false, true) => 'Z',
+            _ => 'X',
+        }
+        .to_string();
+    }
+    let digits = width.div_ceil(bits_per_digit);
+    (0..digits)
+        .rev()
+        .map(|i| {
+            let s = i * bits_per_digit;
+            let n = bits_per_digit.min(width - s);
+            let (mut a_grp, mut b_grp) = (0u64, 0u64);
+            for k in 0..n {
+                let (a, b) = val.bit_ab(s + k);
+                a_grp |= a << k;
+                b_grp |= b << k;
+            }
+            let mask = (1u64 << n) - 1;
+            group_char(a_grp, b_grp, mask, |v| {
+                std::char::from_digit(v as u32, 1 << bits_per_digit).unwrap()
+            })
+        })
+        .collect()
+}
+
 /// 数字幅修飾子（空文字列=なし、"0"=最小桁数、それ以外=明示幅N）を自然表示文字列に適用する。
 /// `%d`のみ、幅修飾子なしの場合にビット幅由来の桁数を空白パディングで補う
 /// （`%h`/`%o`/`%b`は`natural_repr`が既にビット幅由来の桁数を生成済みのため不要）。
@@ -1406,19 +1457,9 @@ fn apply_width_modifier(
     if width_digits.is_empty() {
         if spec == 'd' || spec == 'D' {
             let digits = if signed && width > 0 {
-                let max_pos = if width > 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << (width - 1)) - 1
-                };
-                max_pos.to_string().len() + 1
+                pow2_decimal_digits(width - 1) + 1
             } else {
-                let max = if width >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << width) - 1
-                };
-                max.to_string().len()
+                pow2_decimal_digits(width)
             };
             return format!("{:>width$}", natural, width = digits);
         }
@@ -1440,6 +1481,20 @@ fn apply_width_modifier(
         format!("{:0>width$}", natural, width = n)
     } else {
         format!("{:>width$}", natural, width = n)
+    }
+}
+
+/// `2^bits - 1` の10進桁数（`%d` の既定フィールド幅の算出用。bits=0 は 1桁）。
+fn pow2_decimal_digits(bits: u32) -> usize {
+    if bits <= 64 {
+        let max = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        max.to_string().len()
+    } else {
+        (bits as f64 * std::f64::consts::LOG10_2).floor() as usize + 1
     }
 }
 

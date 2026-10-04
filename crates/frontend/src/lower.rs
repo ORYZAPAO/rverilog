@@ -2431,8 +2431,17 @@ fn parse_based_digits(digits: &str, radix: u32, width: u32) -> LogicVal {
         if digits.eq_ignore_ascii_case("z") || digits == "?" {
             return LogicVal::from_chunks(width, &vec![0u64; n_chunks], &vec![u64::MAX; n_chunks]);
         }
-        let val = u64::from_str_radix(digits, radix).unwrap_or(0);
-        return LogicVal::from_chunks(width, &[val], &vec![0u64; n_chunks]);
+        // 10進桁を multi-word に累積する（`acc = acc * 10 + digit`、幅を超える上位は捨てる）
+        let mut acc = vec![0u64; n_chunks.max(1)];
+        for d in digits.chars().filter_map(|c| c.to_digit(10)) {
+            let mut carry = d as u128;
+            for c in acc.iter_mut() {
+                let cur = (*c as u128) * 10 + carry;
+                *c = cur as u64;
+                carry = cur >> 64;
+            }
+        }
+        return LogicVal::from_chunks(width, &acc, &vec![0u64; n_chunks]);
     }
     let bits_per_digit = match radix {
         2 => 1,
@@ -2469,6 +2478,20 @@ fn parse_based_digits(digits: &str, radix: u32, width: u32) -> LogicVal {
                 b[chunk] |= 1u64 << off;
             }
             bitpos += 1;
+        }
+    }
+    // 最上位桁がx/zなら、残りの上位ビットもx/zで埋める（IEEE 1364-2001 3.5.1）
+    if let Some(first) = digits.chars().find(|c| *c != '_') {
+        let fill = match first {
+            'x' | 'X' => Some((1u64, 1u64)),
+            'z' | 'Z' | '?' => Some((0u64, 1u64)),
+            _ => None,
+        };
+        if let Some((av, bv)) = fill {
+            for pos in bitpos..width as usize {
+                a[pos / 64] |= av << (pos % 64);
+                b[pos / 64] |= bv << (pos % 64);
+            }
         }
     }
     LogicVal::from_chunks(width, &a, &b)

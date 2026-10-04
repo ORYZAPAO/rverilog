@@ -3185,3 +3185,24 @@ fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32スモー�
 ### Next
 
 - PR作成→CI通過後マージ。次候補: A22（64bit超表示）・A23（64bit超10進リテラル）、A5、`**`演算子
+
+## 2026-10-04（続き2）
+
+### Task
+
+A22（64bit超の表示）・A23（64bit超の10進リテラル）をブランチ`feat/wide-display-literal`で実装。
+
+### What was done
+
+- `logicval.rs`: `bit_ab`・`to_decimal_string`（任意幅の10進化）を追加
+- `interp.rs`: `natural_repr_wide`で64bit超の`%h/%b/%o/%d`を実装、`%d`の既定幅は`pow2_decimal_digits`で算出
+- `lower.rs`: 10進リテラルをmulti-word累積に変更。副次的に、最上位桁x/zのリテラルのx/z埋めを修正
+- `wide_display`（`test_wide_display`・`compare_wide_display`、iverilogとbit-exact）と単体テスト1件を追加
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- PR作成→CI通過後マージ。次候補: A5（64bit超部分書き込み）、`**`演算子

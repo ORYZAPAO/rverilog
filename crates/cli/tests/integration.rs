@@ -304,6 +304,19 @@ fn test_wide_muldiv() {
 }
 
 #[test]
+fn test_wide_display() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/wide_display/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("wide_display");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];
