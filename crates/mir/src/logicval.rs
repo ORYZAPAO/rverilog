@@ -345,6 +345,38 @@ impl LogicVal {
         LogicVal::ONE
     }
 
+    /// casez比較。両辺のZビットをdon't careとして除外し、残りを厳密比較する。
+    pub fn casez_eq(&self, rhs: &LogicVal) -> LogicVal {
+        self.case_wild_eq(rhs, false)
+    }
+
+    /// casex比較。両辺のXまたはZビットをdon't careとして除外し、残りを厳密比較する。
+    pub fn casex_eq(&self, rhs: &LogicVal) -> LogicVal {
+        self.case_wild_eq(rhs, true)
+    }
+
+    /// ワイルドカード位置を除いたa/b両平面を比較する。
+    /// `x_is_wildcard`がfalseならZのみ、trueならX/Zをワイルドカードにする。
+    fn case_wild_eq(&self, rhs: &LogicVal, x_is_wildcard: bool) -> LogicVal {
+        let w = self.width().max(rhs.width());
+        let n = num_chunks(w);
+        for i in 0..n {
+            let m = chunk_mask(w, i);
+            let la = self.get_chunk(i) & m;
+            let lb = self.get_chunk_b(i) & m;
+            let ra = rhs.get_chunk(i) & m;
+            let rb = rhs.get_chunk_b(i) & m;
+            // casexではb=1のX/Zを、casezではa=0かつb=1のZを除外する。
+            let ld = if x_is_wildcard { lb } else { lb & !la };
+            let rd = if x_is_wildcard { rb } else { rb & !ra };
+            let compared = m & !(ld | rd);
+            if ((la ^ ra) | (lb ^ rb)) & compared != 0 {
+                return LogicVal::ZERO;
+            }
+        }
+        LogicVal::ONE
+    }
+
     pub fn case_ne(&self, rhs: &LogicVal) -> LogicVal {
         match self.case_eq(rhs) {
             LogicVal::ONE => LogicVal::ZERO,
@@ -1217,6 +1249,47 @@ mod tests {
         let c = LogicVal::from_chunks(128, &[0xDEAD, 0xCAFE], &[0, 0]);
         assert_eq!(a.eq(&b), LogicVal::ONE);
         assert_eq!(a.eq(&c), LogicVal::ZERO);
+    }
+
+    #[test]
+    fn test_casez_eq_wildcards_and_width() {
+        // casezではセレクタ側・case項側いずれのZもワイルドカードになる。
+        let selector_z = LogicVal::new(4, 0b1010, 0b0100);
+        let pattern = LogicVal::new(4, 0b1110, 0);
+        assert_eq!(selector_z.casez_eq(&pattern), LogicVal::ONE);
+
+        let selector = LogicVal::new(4, 0b1010, 0);
+        let pattern_z = LogicVal::new(4, 0b1000, 0b0010);
+        assert_eq!(selector.casez_eq(&pattern_z), LogicVal::ONE);
+
+        // Xはcasezのワイルドカードではない。
+        let selector_x = LogicVal::new(4, 0b1010, 0b0010);
+        assert_eq!(selector_x.casez_eq(&selector), LogicVal::ZERO);
+
+        // 幅は既存のcase_eqと同様に狭い方をゼロ拡張して比較する。
+        assert_eq!(
+            LogicVal::new(2, 0b01, 0).casez_eq(&LogicVal::new(4, 0b0001, 0)),
+            LogicVal::ONE
+        );
+        assert_eq!(
+            LogicVal::new(2, 0b01, 0).casez_eq(&LogicVal::new(4, 0b0101, 0)),
+            LogicVal::ZERO
+        );
+    }
+
+    #[test]
+    fn test_casex_eq_wildcards_and_large_values() {
+        // casexではX/Zのどちらも両辺でワイルドカードになる。
+        let selector_x = LogicVal::new(4, 0b1010, 0b0010);
+        let pattern_z = LogicVal::new(4, 0b1000, 0b0100);
+        assert_eq!(selector_x.casex_eq(&pattern_z), LogicVal::ONE);
+        assert_eq!(selector_x.casez_eq(&pattern_z), LogicVal::ZERO);
+
+        // Largeでも上位チャンクのワイルドカードを除外して比較する。
+        let large_x = LogicVal::from_chunks(128, &[0, 1], &[0, 1]);
+        let large_one = LogicVal::from_chunks(128, &[0, 1], &[0, 0]);
+        assert_eq!(large_x.casex_eq(&large_one), LogicVal::ONE);
+        assert_eq!(large_x.casez_eq(&large_one), LogicVal::ZERO);
     }
 
     #[test]

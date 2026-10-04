@@ -232,6 +232,15 @@ fn compare_case_width_mismatch() {
 }
 
 #[test]
+fn compare_casez_casex() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/casez_casex/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

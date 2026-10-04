@@ -413,7 +413,7 @@ iverilog 出力比較 CI 導入済み）。
 ### F. 軽微
 
 - `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
-- `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
+- ~~`casez`/`casex` のワイルドカードマッチが `case` と同一実装~~ **対応済み（2026-10-04）**。`LogicVal::casez_eq`/`casex_eq`を追加し、スケジューラ側・同期実行側の両`Stmt::Case`に配線。回帰テスト`tests/integration/cases/casez_casex/`でiverilogとbit-exact一致
 - `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
 - ~~連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）~~
   **対応済み（2026-07-16）**。$signed 対応作業（2026-07-12 節参照）の Task 2d として修正

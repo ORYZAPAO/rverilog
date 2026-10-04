@@ -265,6 +265,19 @@ fn test_case_width_mismatch() {
 }
 
 #[test]
+fn test_casez_casex() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/casez_casex/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("casez_casex");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];
