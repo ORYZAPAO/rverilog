@@ -473,6 +473,32 @@ impl LogicVal {
         Self::from_chunks(w, &a, &b)
     }
 
+    /// `lo` から `sel_w` ビットを `val` で置き換えた値を返す（任意幅）。`val` は `sel_w` へゼロ拡張/切り詰め、
+    /// 範囲がネット幅を超える部分は無視する。
+    pub fn insert_bits(&self, lo: u32, sel_w: u32, val: &LogicVal) -> LogicVal {
+        let w = self.width();
+        let n = num_chunks(w);
+        let mut a: Vec<u64> = (0..n).map(|i| self.get_chunk(i)).collect();
+        let mut b: Vec<u64> = (0..n).map(|i| self.get_chunk_b(i)).collect();
+        for k in 0..sel_w {
+            let pos = lo + k;
+            if pos >= w {
+                break;
+            }
+            let (va, vb) = val.bit_ab(k);
+            let (c, o) = ((pos / 64) as usize, pos % 64);
+            a[c] = (a[c] & !(1u64 << o)) | (va << o);
+            b[c] = (b[c] & !(1u64 << o)) | (vb << o);
+        }
+        Self::from_chunks(w, &a, &b)
+    }
+
+    /// 全ビットZの値（任意幅）。
+    pub fn z_of_width(width: u32) -> LogicVal {
+        let n = num_chunks(width);
+        Self::from_chunks(width, &vec![0u64; n], &vec![u64::MAX; n])
+    }
+
     /// ビット位置 `idx` の (a, b) プレーン値（各0/1）。範囲外は (0, 0)。
     pub fn bit_ab(&self, idx: u32) -> (u64, u64) {
         if idx >= self.width() {

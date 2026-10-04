@@ -3206,3 +3206,25 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ### Next
 
 - PR作成→CI通過後マージ。次候補: A5（64bit超部分書き込み）、`**`演算子
+
+## 2026-10-04（続き3）
+
+### Task
+
+A5（64bit超ネットへの部分書き込み）をブランチ`feat/wide-partial-write`で実装。なお`feat/m1-milestone`はPR #42で
+masterへマージ後にリモート削除されたため、以降のPRのベースは`master`。
+
+### What was done
+
+- `logicval.rs`: `insert_bits`（任意幅のビット範囲置換）・`z_of_width`を追加
+- `interp.rs`: `write_lvalue`のBitSelect/DynBitSelect/PartSelect/DynPartSelectを`write_bits`に統一
+- 初期値・未初期化読み出しを`x_of_width`/`z_of_width`化（64bit超の上位チャンクがX/Zでなく0だった）
+- `wide_partial_write`（`test_wide_partial_write`・`compare_wide_partial_write`、iverilogとbit-exact）を追加
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- PR作成→CI通過後マージ。次候補: `**`演算子、A8（inout）
