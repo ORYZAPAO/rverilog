@@ -3139,3 +3139,27 @@ PLAN.md・DIARY.mdを読み、A21完了後の次課題として、F節の既知�
 
 - ブランチをコミット・PRするかユーザーに確認
 - 次候補: `while`/`repeat`/`forever`対応、A5（64bit超部分書き込み）、A7（64bit超乗除算）
+
+### Task（続き）
+
+`while`/`repeat`/`forever`対応（ブランチ`feat/loop-stmts`）。casez/casexブランチは既にPR #41でマージ済みだった。
+
+### What was done
+
+- HIR `Stmt`に`While`/`Forever`/`Repeat`を追加、`lower_loop_stmt`で受理、elabでMIR `Stmt::While`へ脱糖
+  （forever=常に真のwhile、repeat=隠しinteger net `__repeat_N`＋`cnt>0`のsigned比較。回数式は一度だけ評価、
+  負数・X/Zは0回）。MIR・simは変更なし
+- 副次的に既存バグを発見・修正: `function integer f` の戻り値と `input integer` 引数が1bit unsigned扱いだった
+  （`packed_width_expr`がpacked dimensionしか見ない）。`tf_type_info`で`integer`を32bit signedとして扱うよう修正
+- `tests/integration/cases/loop_stmts/`（`test_loop_stmts`・`compare_loop_stmts`、iverilogとbit-exact一致）を追加。
+  `unsupported_construct.rs`のwhile/repeat/forever明示エラーテスト3件を削除。PLAN.md更新
+
+### 検証
+
+`cargo fmt --check`・`clippy -D warnings`警告なし、`cargo test --workspace`全通過、
+`samples/counter4`・`samples/fifo_sync` exit 0
+
+### Next
+
+- PR作成（`feat/m1-milestone`向け）
+- 次候補: A5（64bit超部分書き込み）、A7（64bit超乗除算）、`**`演算子

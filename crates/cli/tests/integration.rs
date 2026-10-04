@@ -278,6 +278,19 @@ fn test_casez_casex() {
 }
 
 #[test]
+fn test_loop_stmts() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/loop_stmts/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("loop_stmts");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];

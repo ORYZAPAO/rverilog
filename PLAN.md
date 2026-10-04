@@ -361,7 +361,7 @@ iverilog 出力比較 CI 導入済み）。
   エラーも既存で無視される別問題）、トップレベルの`primitive`宣言自体の無言スキップ（UDP
   インスタンス化のエラー化で実質カバー）、ゲートプリミティブの`switch`/`cmos`/`pass`/
   `pullup`/`pulldown`（既知の別課題、コード内コメントで明記済み）
-- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子
+- **明示エラーになるもの**: `**` 演算子（`while`/`repeat`/`forever`は2026-10-04に対応済み）
 - `real`/`realtime` が型検査なしで 1bit reg として解釈される
 - `disable` は同一プロセス内のみ対応、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
 
@@ -406,8 +406,8 @@ iverilog 出力比較 CI 導入済み）。
   `cargo fmt --check`、`clippy` ジョブで `cargo clippy --workspace --all-targets -- -D warnings`
   を実行するよう追加。既存コードベース全体に `cargo fmt` を適用し、clippy 指摘を解消
 - 統合テストは 8 ケース（counter4/fifo_sync/disable_fork/format_xz/func_task/gates/generate/
-  readmem_random）。`unsupported_construct.rs` でdefparam/specify/UDPに加え、while/repeat/
-  forever・`**` 演算子の明示エラーを回帰テスト化。式中の関数呼び出しは実装どおり受理される
+  readmem_random）。`unsupported_construct.rs` でdefparam/specify/UDPに加え、`**` 演算子の
+  明示エラーを回帰テスト化（while/repeat/foreverは対応済みで削除）。式中の関数呼び出しは実装どおり受理される
   ことも確認した
 
 ### F. 軽微
@@ -504,8 +504,6 @@ frontend lowering 段でサブセット外として弾かれる・無言スキ�
 `disable`/`fork`-`join`（いずれも M1/M2 で実装済み、上記マイルストーン節参照）。
 
 Verilog-2001 の範囲でも未対応:
-- `while`/`repeat`/`forever`（`for` のみ。`lower_loop_stmt` で `LS::For` 以外は
-  `unsupported("loop statement variant")` として明示エラー）
 - `**`（べき乗）演算子、式中の関数呼び出し
 - `defparam`/`specify`/UDP が `lower.rs` 内の複数箇所の `_ => {}` catch-all で
   診断なく無言スキップされる（実装課題 B 節と同一問題。最優先で診断化すべき）

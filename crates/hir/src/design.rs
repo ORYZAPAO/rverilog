@@ -243,6 +243,12 @@ pub enum Stmt {
         step: Box<Stmt>,
         body: Box<Stmt>,
     },
+    /// `while (cond) body`
+    While(Expr, Box<Stmt>),
+    /// `forever body`
+    Forever(Box<Stmt>),
+    /// `repeat (count) body`。回数式はループ開始時に一度だけ評価される。
+    Repeat(Expr, Box<Stmt>),
     /// `begin : label ... end`。`disable label;` の対象になり得る名前付きブロック。
     NamedBlock(SmolStr, Vec<Stmt>),
     /// `disable label;`。同一プロセス内の名前付きブロックを中断して抜ける（M2サブセット：他プロセスのタスク/ブロックの中断は未対応）。
