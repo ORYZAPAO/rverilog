@@ -3101,3 +3101,87 @@ Codex実装完了後、こちらで独立に検証:
 - picorv32.vスモークテストのPASSにより推奨着手順11番は完了。次の優先課題は
   PLAN.md実装課題節に残る他項目（A5: 64bit超ネットへの部分書き込み、A7: 64bit超
   乗除算、A8: inout、`casez`/`casex`のワイルドカードマッチ疑い等）から選定する
+## 2026-10-04
+
+### Task
+
+PLAN.md・DIARY.mdを読み、A21完了後の次課題として、F節の既知課題
+「`casez`/`casex`のワイルドカードマッチが`case`と同一実装」を確認・修正した。
+
+### 確認
+
+`crates/sim/src/interp.rs`の`Stmt::Case`が`CaseZ | CaseX`でも`case_eq`を呼んでおり、
+ワイルドカード（`?`/`z`/`x`）が一切効かないことをコードで確認（同期実行パス
+`exec_sync_stmt`側は`kind`自体を無視していた）。
+
+### What was done（Codexに委任、ブランチ`fix/casez-casex-wildcard-v2`）
+
+- `mir/src/logicval.rs`に`casez_eq`/`casex_eq`（共通実装`case_wild_eq`）を追加。
+  casezは両辺のZ、casexは両辺のX/Zをdon't careとして除外し、残りをa/b両平面で
+  厳密比較。幅は`case_eq`と同じく狭い方をゼロ拡張。Small/Large両対応
+- `interp.rs`のスケジューラ側`Stmt::Case`と関数/タスク用同期実行側`Stmt::Case`の
+  両方をkind別に配線
+- 単体テスト2件、回帰テスト`tests/integration/cases/casez_casex/`
+  （task内casez・function内casex、iverilogとbit-exact一致）を追加
+
+### 独立検証
+
+- `git diff`が依頼範囲に収まっていることを確認
+- `cargo fmt --check`・`cargo clippy --workspace --all-targets -- -D warnings`警告なし
+- `cargo test --workspace`全通過（`test_casez_casex`・`compare_casez_casex`含む）
+- `samples/counter4`（tb_counter4）・`samples/fifo_sync`（tb_fifo_sync）exit 0
+
+### Result
+
+✅ `casez`/`casex`のワイルドカードマッチを実装（PLAN.md F節に対応済みとして記録）
+
+### Next
+
+- ブランチをコミット・PRするかユーザーに確認
+- 次候補: `while`/`repeat`/`forever`対応、A5（64bit超部分書き込み）、A7（64bit超乗除算）
+
+### Task（続き）
+
+`while`/`repeat`/`forever`対応（ブランチ`feat/loop-stmts`）。casez/casexブランチは既にPR #41でマージ済みだった。
+
+### What was done
+
+- HIR `Stmt`に`While`/`Forever`/`Repeat`を追加、`lower_loop_stmt`で受理、elabでMIR `Stmt::While`へ脱糖
+  （forever=常に真のwhile、repeat=隠しinteger net `__repeat_N`＋`cnt>0`のsigned比較。回数式は一度だけ評価、
+  負数・X/Zは0回）。MIR・simは変更なし
+- 副次的に既存バグを発見・修正: `function integer f` の戻り値と `input integer` 引数が1bit unsigned扱いだった
+  （`packed_width_expr`がpacked dimensionしか見ない）。`tf_type_info`で`integer`を32bit signedとして扱うよう修正
+- `tests/integration/cases/loop_stmts/`（`test_loop_stmts`・`compare_loop_stmts`、iverilogとbit-exact一致）を追加。
+  `unsupported_construct.rs`のwhile/repeat/forever明示エラーテスト3件を削除。PLAN.md更新
+
+### 検証
+
+`cargo fmt --check`・`clippy -D warnings`警告なし、`cargo test --workspace`全通過、
+`samples/counter4`・`samples/fifo_sync` exit 0
+
+### Next
+
+- PR作成（`feat/m1-milestone`向け）
+- 次候補: A5（64bit超部分書き込み）、A7（64bit超乗除算）、`**`演算子
+
+## 2026-10-04（続き）
+
+### Task
+
+A7（64bit超の乗除算・剰余）をブランチ`feat/wide-muldiv`で実装。直前にPR #43（while/repeat/forever）をCI通過後マージ済み。
+
+### What was done
+
+- `logicval.rs`: `mul`/`div`/`mod_`/`div_signed`/`mod_signed`のw>64をmulti-word化（`mul_chunks`・`divmod_chunks`・
+  `wide_divmod[_signed]`）。除数0/X入力は演算幅の全X（従来は1bit X）
+- 発見・修正: `interp.rs`の単項マイナスが64bit固定（`-(a as i64)`）だった。`0 - v`のmulti-word `sub`に変更
+- 単体テスト3件、`wide_muldiv`（`test_wide_muldiv`・`compare_wide_muldiv`、iverilogとbit-exact）を追加
+- 未対応のまま残したもの（PLAN.md A22/A23に記録）: 64bit超の`%h`等の表示、64bit超の10進リテラル
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32スモーク含む）、samples exit 0
+
+### Next
+
+- PR作成→CI通過後マージ。次候補: A22（64bit超表示）・A23（64bit超10進リテラル）、A5、`**`演算子

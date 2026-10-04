@@ -345,6 +345,38 @@ impl LogicVal {
         LogicVal::ONE
     }
 
+    /// casez比較。両辺のZビットをdon't careとして除外し、残りを厳密比較する。
+    pub fn casez_eq(&self, rhs: &LogicVal) -> LogicVal {
+        self.case_wild_eq(rhs, false)
+    }
+
+    /// casex比較。両辺のXまたはZビットをdon't careとして除外し、残りを厳密比較する。
+    pub fn casex_eq(&self, rhs: &LogicVal) -> LogicVal {
+        self.case_wild_eq(rhs, true)
+    }
+
+    /// ワイルドカード位置を除いたa/b両平面を比較する。
+    /// `x_is_wildcard`がfalseならZのみ、trueならX/Zをワイルドカードにする。
+    fn case_wild_eq(&self, rhs: &LogicVal, x_is_wildcard: bool) -> LogicVal {
+        let w = self.width().max(rhs.width());
+        let n = num_chunks(w);
+        for i in 0..n {
+            let m = chunk_mask(w, i);
+            let la = self.get_chunk(i) & m;
+            let lb = self.get_chunk_b(i) & m;
+            let ra = rhs.get_chunk(i) & m;
+            let rb = rhs.get_chunk_b(i) & m;
+            // casexではb=1のX/Zを、casezではa=0かつb=1のZを除外する。
+            let ld = if x_is_wildcard { lb } else { lb & !la };
+            let rd = if x_is_wildcard { rb } else { rb & !ra };
+            let compared = m & !(ld | rd);
+            if ((la ^ ra) | (lb ^ rb)) & compared != 0 {
+                return LogicVal::ZERO;
+            }
+        }
+        LogicVal::ONE
+    }
+
     pub fn case_ne(&self, rhs: &LogicVal) -> LogicVal {
         match self.case_eq(rhs) {
             LogicVal::ONE => LogicVal::ZERO,
@@ -441,13 +473,116 @@ impl LogicVal {
         Self::from_chunks(w, &a, &b)
     }
 
+    /// 幅 `w` の値を符号なしチャンク列として取り出す（未使用上位ビットは0）。
+    fn to_chunks(&self, w: u32) -> Vec<u64> {
+        (0..num_chunks(w))
+            .map(|i| self.get_chunk(i) & chunk_mask(w, i))
+            .collect()
+    }
+
+    /// チャンク列の2の補数（幅 `w` で切り詰め）。
+    fn neg_chunks(a: &[u64], w: u32) -> Vec<u64> {
+        let mut carry = 1u64;
+        (0..a.len())
+            .map(|i| {
+                let (s, c) = (!a[i]).overflowing_add(carry);
+                carry = c as u64;
+                s & chunk_mask(w, i)
+            })
+            .collect()
+    }
+
+    /// 符号なし multi-word 乗算（幅 `w` へ切り詰め）。
+    fn mul_chunks(a: &[u64], b: &[u64], w: u32) -> Vec<u64> {
+        let n = num_chunks(w);
+        let mut r = vec![0u64; n];
+        for i in 0..n {
+            let mut carry = 0u128;
+            for j in 0..(n - i) {
+                let cur = r[i + j] as u128 + (a[i] as u128) * (b[j] as u128) + carry;
+                r[i + j] = cur as u64;
+                carry = cur >> 64;
+            }
+        }
+        for (i, c) in r.iter_mut().enumerate() {
+            *c &= chunk_mask(w, i);
+        }
+        r
+    }
+
+    /// 符号なし multi-word 除算（shift-subtract 長除算）。除数は非0であること。
+    fn divmod_chunks(a: &[u64], b: &[u64], w: u32) -> (Vec<u64>, Vec<u64>) {
+        let n = num_chunks(w);
+        let mut q = vec![0u64; n];
+        let mut r = vec![0u64; n];
+        for bit in (0..w as usize).rev() {
+            // r = (r << 1) | a[bit]
+            let mut carry = (a[bit / 64] >> (bit % 64)) & 1;
+            for c in r.iter_mut() {
+                let next = *c >> 63;
+                *c = (*c << 1) | carry;
+                carry = next;
+            }
+            // r >= b なら r -= b、商のビットを立てる
+            let ge = (0..n)
+                .rev()
+                .map(|i| r[i].cmp(&b[i]))
+                .find(|o| !o.is_eq())
+                .is_none_or(|o| o.is_gt());
+            if ge {
+                let mut borrow = 0u64;
+                for i in 0..n {
+                    let (d1, b1) = r[i].overflowing_sub(b[i]);
+                    let (d2, b2) = d1.overflowing_sub(borrow);
+                    r[i] = d2;
+                    borrow = (b1 | b2) as u64;
+                }
+                q[bit / 64] |= 1u64 << (bit % 64);
+            }
+        }
+        (q, r)
+    }
+
+    /// 64bit超の符号なし除算・剰余の共通処理。`want_rem` で剰余/商を選ぶ。
+    fn wide_divmod(&self, rhs: &LogicVal, w: u32, want_rem: bool) -> LogicVal {
+        let (a, b) = (self.to_chunks(w), rhs.to_chunks(w));
+        if b.iter().all(|c| *c == 0) {
+            return LogicVal::x_of_width(w);
+        }
+        let (q, r) = Self::divmod_chunks(&a, &b, w);
+        Self::from_chunks(w, if want_rem { &r } else { &q }, &vec![0u64; q.len()])
+    }
+
+    /// 64bit超の符号付き除算・剰余（0への切り捨て、剰余の符号は被除数側）。
+    fn wide_divmod_signed(&self, rhs: &LogicVal, w: u32, want_rem: bool) -> LogicVal {
+        let (l, r) = (self.extend_sign(w), rhs.extend_sign(w));
+        let (ln, rn) = (l.sign_bit() == 1, r.sign_bit() == 1);
+        let abs = |v: &LogicVal, neg: bool| {
+            let c = v.to_chunks(w);
+            if neg {
+                Self::neg_chunks(&c, w)
+            } else {
+                c
+            }
+        };
+        let (a, b) = (abs(&l, ln), abs(&r, rn));
+        if b.iter().all(|c| *c == 0) {
+            return LogicVal::x_of_width(w);
+        }
+        let (q, rem) = Self::divmod_chunks(&a, &b, w);
+        let (res, neg) = if want_rem { (rem, ln) } else { (q, ln != rn) };
+        let res = if neg { Self::neg_chunks(&res, w) } else { res };
+        Self::from_chunks(w, &res, &vec![0u64; res.len()])
+    }
+
     pub fn mul(&self, rhs: &LogicVal) -> LogicVal {
         let w = self.width().max(rhs.width());
-        if w > 64 {
-            return LogicVal::X;
-        }
         if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
+        }
+        if w > 64 {
+            let r = Self::mul_chunks(&self.to_chunks(w), &rhs.to_chunks(w), w);
+            return Self::from_chunks(w, &r, &vec![0u64; r.len()]);
         }
         let la = self.pad_to_width(w);
         let ra = rhs.pad_to_width(w);
@@ -456,30 +591,30 @@ impl LogicVal {
 
     pub fn div(&self, rhs: &LogicVal) -> LogicVal {
         let w = self.width().max(rhs.width());
-        if w > 64 {
-            return LogicVal::X;
-        }
         if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
+        }
+        if w > 64 {
+            return self.wide_divmod(rhs, w, false);
         }
         let ra = rhs.pad_to_width(w);
         if ra == 0 {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
         }
         Self::from_chunks(w, &[self.pad_to_width(w) / ra], &[0])
     }
 
     pub fn mod_(&self, rhs: &LogicVal) -> LogicVal {
         let w = self.width().max(rhs.width());
-        if w > 64 {
-            return LogicVal::X;
-        }
         if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
+        }
+        if w > 64 {
+            return self.wide_divmod(rhs, w, true);
         }
         let ra = rhs.pad_to_width(w);
         if ra == 0 {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
         }
         Self::from_chunks(w, &[self.pad_to_width(w) % ra], &[0])
     }
@@ -682,18 +817,18 @@ impl LogicVal {
         rhs.le_signed(self)
     }
 
-    /// signed 除算（0への切り捨て）。64bit超は unsigned 版と同じく X（既知の割り切り）。
+    /// signed 除算（0への切り捨て）。
     pub fn div_signed(&self, rhs: &LogicVal) -> LogicVal {
         let w = self.width().max(rhs.width());
-        if w > 64 {
-            return LogicVal::X;
-        }
         if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
+        }
+        if w > 64 {
+            return self.wide_divmod_signed(rhs, w, false);
         }
         let rv = rhs.as_i64();
         if rv == 0 {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
         }
         let result = self.as_i64().wrapping_div(rv);
         Self::from_chunks(w, &[result as u64], &[0])
@@ -702,15 +837,15 @@ impl LogicVal {
     /// signed 剰余（結果の符号は被除数側、Rust の `%` と同じ切り捨て規則）。
     pub fn mod_signed(&self, rhs: &LogicVal) -> LogicVal {
         let w = self.width().max(rhs.width());
-        if w > 64 {
-            return LogicVal::X;
-        }
         if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
+        }
+        if w > 64 {
+            return self.wide_divmod_signed(rhs, w, true);
         }
         let rv = rhs.as_i64();
         if rv == 0 {
-            return LogicVal::X;
+            return LogicVal::x_of_width(w);
         }
         let result = self.as_i64().wrapping_rem(rv);
         Self::from_chunks(w, &[result as u64], &[0])
@@ -1220,6 +1355,47 @@ mod tests {
     }
 
     #[test]
+    fn test_casez_eq_wildcards_and_width() {
+        // casezではセレクタ側・case項側いずれのZもワイルドカードになる。
+        let selector_z = LogicVal::new(4, 0b1010, 0b0100);
+        let pattern = LogicVal::new(4, 0b1110, 0);
+        assert_eq!(selector_z.casez_eq(&pattern), LogicVal::ONE);
+
+        let selector = LogicVal::new(4, 0b1010, 0);
+        let pattern_z = LogicVal::new(4, 0b1000, 0b0010);
+        assert_eq!(selector.casez_eq(&pattern_z), LogicVal::ONE);
+
+        // Xはcasezのワイルドカードではない。
+        let selector_x = LogicVal::new(4, 0b1010, 0b0010);
+        assert_eq!(selector_x.casez_eq(&selector), LogicVal::ZERO);
+
+        // 幅は既存のcase_eqと同様に狭い方をゼロ拡張して比較する。
+        assert_eq!(
+            LogicVal::new(2, 0b01, 0).casez_eq(&LogicVal::new(4, 0b0001, 0)),
+            LogicVal::ONE
+        );
+        assert_eq!(
+            LogicVal::new(2, 0b01, 0).casez_eq(&LogicVal::new(4, 0b0101, 0)),
+            LogicVal::ZERO
+        );
+    }
+
+    #[test]
+    fn test_casex_eq_wildcards_and_large_values() {
+        // casexではX/Zのどちらも両辺でワイルドカードになる。
+        let selector_x = LogicVal::new(4, 0b1010, 0b0010);
+        let pattern_z = LogicVal::new(4, 0b1000, 0b0100);
+        assert_eq!(selector_x.casex_eq(&pattern_z), LogicVal::ONE);
+        assert_eq!(selector_x.casez_eq(&pattern_z), LogicVal::ZERO);
+
+        // Largeでも上位チャンクのワイルドカードを除外して比較する。
+        let large_x = LogicVal::from_chunks(128, &[0, 1], &[0, 1]);
+        let large_one = LogicVal::from_chunks(128, &[0, 1], &[0, 0]);
+        assert_eq!(large_x.casex_eq(&large_one), LogicVal::ONE);
+        assert_eq!(large_x.casez_eq(&large_one), LogicVal::ZERO);
+    }
+
+    #[test]
     fn test_part_select() {
         // 0b10110100: bit7=1,bit6=0,bit5=1,bit4=1,bit3=0,bit2=1,bit1=0,bit0=0
         // [6:4] = {bit6=0, bit5=1, bit4=1} → result = 0b011 = 3
@@ -1249,5 +1425,78 @@ mod tests {
         let shifted = v.shl(&LogicVal::new(8, 64, 0));
         assert_eq!(shifted.get_chunk(0), 0);
         assert_eq!(shifted.get_chunk(1), 1);
+    }
+
+    fn lv128(v: u128) -> LogicVal {
+        LogicVal::from_chunks(128, &[v as u64, (v >> 64) as u64], &[0, 0])
+    }
+
+    fn to_u128(v: &LogicVal) -> u128 {
+        assert!(v.is_known());
+        v.get_chunk(0) as u128 | ((v.get_chunk(1) as u128) << 64)
+    }
+
+    #[test]
+    fn test_wide_mul_div_mod_unsigned() {
+        let vals: [u128; 6] = [
+            0,
+            1,
+            7,
+            u64::MAX as u128,
+            (1u128 << 64) + 12345,
+            0xdead_beef_cafe_f00d_0123_4567_89ab_cdef,
+        ];
+        for &a in &vals {
+            for &b in &vals {
+                assert_eq!(to_u128(&lv128(a).mul(&lv128(b))), a.wrapping_mul(b));
+                if b == 0 {
+                    assert!(lv128(a).div(&lv128(b)).is_x());
+                    assert!(lv128(a).mod_(&lv128(b)).is_x());
+                } else {
+                    assert_eq!(to_u128(&lv128(a).div(&lv128(b))), a / b);
+                    assert_eq!(to_u128(&lv128(a).mod_(&lv128(b))), a % b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_wide_div_mod_signed() {
+        let vals: [i128; 7] = [
+            1,
+            7,
+            -1,
+            -7,
+            i64::MIN as i128 - 5,
+            (1i128 << 90) + 3,
+            -(1i128 << 100),
+        ];
+        for &a in &vals {
+            for &b in &vals {
+                let (la, lb) = (lv128(a as u128), lv128(b as u128));
+                assert_eq!(
+                    to_u128(&la.div_signed(&lb)),
+                    a.wrapping_div(b) as u128,
+                    "{a} / {b}"
+                );
+                assert_eq!(
+                    to_u128(&la.mod_signed(&lb)),
+                    a.wrapping_rem(b) as u128,
+                    "{a} % {b}"
+                );
+            }
+        }
+        assert!(lv128(5).div_signed(&lv128(0)).is_x());
+    }
+
+    #[test]
+    fn test_wide_arith_x_and_identity() {
+        assert!(lv128(5).mul(&LogicVal::x_of_width(128)).is_x());
+        // 200bit: q*d + r == n
+        let n = LogicVal::from_chunks(200, &[u64::MAX, 0x1234, 0x5678, 0xab], &[0; 4]);
+        let d = LogicVal::from_chunks(200, &[0xffff_0001, 0x77, 0, 0], &[0; 4]);
+        let (q, r) = (n.div(&d), n.mod_(&d));
+        assert_eq!(q.mul(&d).add(&r), n);
+        assert!(r.lt(&d).is_one());
     }
 }

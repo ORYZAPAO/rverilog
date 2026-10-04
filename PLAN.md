@@ -331,7 +331,7 @@ iverilog 出力比較 CI 導入済み）。
 | A4 | `#0` のリージョン順序が逆 | `sim/src/interp.rs` `run` | **対応済み（2026-07-14）**。`run()`のメインループにinactiveリージョンを新設し、同時刻(`#0`)で待っているプロセスをNBA適用より前に再開するよう修正（IEEE 1364のactive→inactive→NBA順に準拠）。iverilogとのbit-exact比較テスト`tests/integration/cases/delay0/`で検証済み |
 | A5 | 64bit 超ネットへの部分書き込みが壊れている | `sim/src/interp.rs` `write_lvalue`・初期化 | ビット/部分選択パスが u64 前提。LogicVal 側は Large 対応済みなのに書き込み側が未対応 |
 | A6 | 算術/比較の X 伝搬が粗い | `mir/src/logicval.rs` | 任意 1bit でも X/Z なら結果全体が X（M1 の割り切りだが IEEE より粗い。`===`/`!==` は正しくビット比較） |
-| A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs` | multi-word の mul/div/mod が未実装 |
+| A7 | 64bit 超の乗除算・剰余が常に X | `mir/src/logicval.rs`、`sim/src/interp.rs`（`UnOp::Neg`） | **対応済み（2026-10-04）**。`mul`/`div`/`mod_`/`div_signed`/`mod_signed`をmulti-word化（schoolbook乗算、shift-subtract長除算、符号付きは絶対値化して商/剰余の符号を補正）。除数0・X入力は演算幅の全Xを返す。併せて単項マイナスが64bit固定だった問題（128bit値の`-x`が上位を失う）を`0 - v`のmulti-word `sub`で修正。`tests/integration/cases/wide_muldiv/`でiverilogとbit-exact比較済み |
 | A8 | inout が実質 input | `elab/src/elaborate.rs` | 親→子の単方向結線のみ。双方向・tri-state・多重ドライバ解決・strength モデリングなし（Z は表現できるがネット上で解決されない） |
 | A9 | 連続代入の `#delay` が無視される | `frontend/src/lower.rs` `lower_continuous_assign` | 遅延指定が黙って捨てられる。手続き文の `#delay` のみ有効 |
 | A10 | 二項演算子の結合順序が壊れている（重大） | `frontend/src/lower.rs` `lower_expression`、根本原因は `sv-parser` クレート側 | **対応済み（2026-07-29）**。`sv_parser::Expression::Binary` が返す右結合の木を `lower_expression` 側で修正。`flatten_binary_chain` で木を in-order にフラットなオペランド列・演算子列へ展開し、`build_binop_tree` で IEEE 1364-2001 Table 5-4 の優先順位表（`binop_precedence`）に基づく演算子優先順位法（shunting-yard、全演算子左結合）で正しい二分木を再構築するよう変更。回帰テスト `tests/integration/cases/binop_precedence/` を追加し、iverilog実出力とbit-exact一致を確認 |
@@ -346,6 +346,8 @@ iverilog 出力比較 CI 導入済み）。
 | A19 | `if`/`else if`/`else if`.../`else` 多段チェーンで中間の `else if` 節が全て無言で消える（最重要・IEEE 1364-2001 9.4節違反） | `frontend/src/lower.rs`（`lower_conditional`） | **2026-09-03 原因特定（未修正）**。A14〜A18を全て統合した状態で`picorv32_smoke`を再実行しても依然タイムアウト（`--max-time`到達で停止、PASS未到達）。VCD波形と`interp.rs`への一時的なデバッグ計装（調査後revert済み）で`cpu_state`が起動直後の`cpu_state_fetch`から一度も遷移しないことを確認し、`decoder_trigger`が正しく`1`になっているにもかかわらずFSM本体の`if (decoder_trigger) begin ... cpu_state <= cpu_state_ld_rs1; end`（picorv32.v 1557行目、`else if (ENABLE_IRQ && ...) ... else if (ENABLE_IRQ && ...) ... else if (decoder_trigger) ...`という3段の`else if`チェーンの最終節）が一度も評価されていないことをif文評価ログで確認。最小再現（`if(a) out=1; else if(b) out=2; else if(c) out=3;`、a=0,b=0,c=1）で`out`がXのまま（`else if(c)`が実行されない）を確認し再現成功。原因は`frontend/src/lower.rs`の`lower_conditional`関数: `sv_parser::ConditionalStatement.nodes`は`(Option<UniquePriority>, "if", Paren<CondPredicate>, StatementOrNull, Vec<(else_kw, if_kw, Paren<CondPredicate>, StatementOrNull)>, Option<(else_kw, StatementOrNull)>)`で、`nodes.4`が中間の全`else if`節（`Vec`）を保持しているにもかかわらず、現在の実装は`nodes.2`（先頭if条件）・`nodes.3`（先頭then）・`nodes.5`（末尾else、あれば）しか参照しておらず、`nodes.4`を完全に無視している。結果: 末尾`else`がない場合は`else if`が1個以上あっても`if`が偽なら何もしない（中間分岐が消滅）、末尾`else`がある場合は`else if`の条件を一切評価せず先頭`if`が偽なら即座に末尾`else`へ飛ぶ（`case4`実験で確認: a=0,b=0,c=1でも`else`節の値になった）。`case`文中心の設計のため`if/else if`が2段以上かつ実際に中間分岐が踏まれるテストケースがこれまで存在せず見逃されていたと推定。**未修正**（実装はCodexへ委任予定）。修正方針: `cs.nodes.4`の各`(else_kw, if_kw, paren_cond, stmt)`を末尾から`Stmt::If`として畳み込み、`cs.nodes.5`（末尾else、あれば）を初期値としてfoldし、先頭の`if`はその結果を`else`節として包む（`A10`/`A18`の二項演算子チェーン畳み込みと同型のfold処理だが対象は文レベルの`if`チェーン）。回帰テストは`tests/integration/cases/`に新規ケース追加（2段以上の`else if`が実際に中間分岐へ到達するパターン、iverilog比較込み）を推奨 |
 | A20 | メモリ配列（`reg [W:0] arr[...]`）への書き込みがsensitivityを一切起動しない（最重要） | `sim/src/interp.rs`（`trigger_sensitivity`）、`elab/src/elaborate.rs`（`collect_sensitivity_expr`/`_stmt`/`_lvalue`、`mem_sensitivity`構築）、`mir/src/ir.rs`（`ElaboratedDesign::mem_sensitivity`） | **対応済み（2026-09-13）**。picorv32.vのレジスタファイル`cpuregs`はMIR上`MemId`/`MemInfo`で表現され、読み出しは`Expr::MemRead`、書き込みは`LValue::MemWrite`となる。2つの独立した欠陥が組み合わさっていた: (1) `trigger_sensitivity`が`LValue::MemWrite(_, _) => return`で、`any_change`判定・`event_waiters`起床（`Sensitivity::All => any_change`含む）・`cont_sensitivity`のdirty化に到達する前に即returnしており、メモリ書き込みが一切のプロセス再起動・連続代入再評価をトリガーしなかった。(2) `collect_sensitivity_expr`の`Expr::MemRead`アームがindex式の依存ネットだけを収集してその結果（多くは`true`）をそのまま返しており、「メモリ読み出しは解決済み」扱いになっていた（A12で確立済みの「収集不能時は`Sensitivity::All`へフォールバック」の仕組みが発動しない）。具体的発現: `cpuregs[latched_rd] <= cpuregs_wrdata;`（LUI命令の書き戻し、NBA）が着地しても、`cpuregs_rs1 = decoded_rs1 ? cpuregs[decoded_rs1] : 0;`という別の`always @*`ブロックが再評価されず、`reg_op1`が古い値をロードし続ける。修正: `Expr::MemRead`アームをindexのネットは収集しつつ`false`（未解決）を返すよう分離、`collect_sensitivity_expr`/`_stmt`/`_lvalue`に`mems: &mut HashSet<MemId>`引数を追加して`elaborate()`内で`cont_sensitivity`と対になる`mem_sensitivity`（mem_id.0 → cont_id一覧）を構築、`trigger_sensitivity`で`LValue::MemWrite`を`any_change`判定・`mem_sensitivity`経由のcont dirty化・`Sensitivity::All`waiter起床の対象に含めるよう変更（`Sensitivity::Items`はnet_idベースなのでメモリ書き込みでは対象外）。回帰テスト`tests/integration/cases/mem_write_sensitivity/`（固定indexでメモリを読む`always @*`が、別プロセスのNBA書き込み後に正しく再評価されることを確認、iverilogとのbit-exact一致確認済み）を追加。`cargo test --workspace`（29テスト）・fmt・clippy全通過、`samples/counter4`・`samples/fifo_sync`回帰なし確認。**picorv32スモークテストは本修正だけではPASSに至らず**: 調査の結果、`lui x4, 0x10000`命令自体の書き戻し値が0になる（A20が対象とした「別プロセスが古い値を読む」問題より手前の段階で、そもそも書き込まれる値が誤り）という独立した新規バグを発見。詳細はA21参照 |
 | A21 | シフト演算子の左辺がself-determined幅で評価される（IEEE 1364-2001 5.4.1節 Table 5-5違反） | `mir/src/ir.rs`（`ElaboratedDesign::expr_shift_width`）、`elab/src/elaborate.rs`（文脈幅後置伝播）、`sim/src/interp.rs`（シフト前左辺拡張） | **対応済み（2026-09-13）**。`LogicVal::shl`/`shr`が左オペランド自身の幅を結果幅としてマスクする一方、シフトの左辺は代入文脈幅で評価すべきだった。picorv32.vの`decoded_imm <= mem_rdata_q[31:12] << 12;`では20bitのpart-selectを20bitのままシフトするため上位ビットが消え、`lui x4, 0x10000`が本来の`0x10000000`ではなく0を書き込んでいた。`ElaboratedDesign`にexprごとの`expr_shift_width`を追加し、elaboration完了後にblocking/NBA/連続代入のLHS幅を起点として、context-determinedな算術・ビット演算・単項演算・三項演算子を下向きにたどり、4種のシフト演算子の左辺文脈幅だけを記録する後置パスを実装。実行時は記録幅へ左辺を符号拡張/ゼロ拡張して既存の`LogicVal::shl`/`shr`/`ashl`/`ashr`へ渡すため、logicval側の変更は不要。回帰テスト`tests/integration/cases/shift_context_width/`でblocking/NBA/連続代入の全経路についてiverilogとbit-exact一致（全て`10000000`）を確認。`eval_const_hir_with`は生の`u64`シフトを行い自己決定幅のマスクを行わないため、本バグの影響なしと確認済みで変更していない。picorv32スモークはrverilog実行・iverilog比較の両方で`RESULT=42`と`PASS: picorv32 executed addi/add/lui/sw correctly`を確認したため、両テストの`#[ignore]`を解除した。 |
+| A22 | 64bit 超の値に対する`%h`/`%d`/`%b`/`%o`表示が下位64bitのみ・桁パディングなし | `sim/src/interp.rs`（`format_string`のwidth>64分岐） | 未対応。A7検証中に再確認（コード上「対象外」と明記済み）。テストは64bit以下に分割表示で回避している |
+| A23 | 64bit 超の10進リテラル（`128'sd1000000000000000000000000000`等）が0になる | `frontend/src/lower.rs`（リテラル解釈） | 未対応。A7検証中に発見。16進/2進リテラルは正常 |
 
 ### B. 未対応の言語機能
 
@@ -361,7 +363,7 @@ iverilog 出力比較 CI 導入済み）。
   エラーも既存で無視される別問題）、トップレベルの`primitive`宣言自体の無言スキップ（UDP
   インスタンス化のエラー化で実質カバー）、ゲートプリミティブの`switch`/`cmos`/`pass`/
   `pullup`/`pulldown`（既知の別課題、コード内コメントで明記済み）
-- **明示エラーになるもの**: `while`/`repeat`/`forever`（`for` のみ対応）、`**` 演算子
+- **明示エラーになるもの**: `**` 演算子（`while`/`repeat`/`forever`は2026-10-04に対応済み）
 - `real`/`realtime` が型検査なしで 1bit reg として解釈される
 - `disable` は同一プロセス内のみ対応、関数内 `fork`/`disable` は無視（コード内コメントで明記済み）
 
@@ -406,14 +408,14 @@ iverilog 出力比較 CI 導入済み）。
   `cargo fmt --check`、`clippy` ジョブで `cargo clippy --workspace --all-targets -- -D warnings`
   を実行するよう追加。既存コードベース全体に `cargo fmt` を適用し、clippy 指摘を解消
 - 統合テストは 8 ケース（counter4/fifo_sync/disable_fork/format_xz/func_task/gates/generate/
-  readmem_random）。`unsupported_construct.rs` でdefparam/specify/UDPに加え、while/repeat/
-  forever・`**` 演算子の明示エラーを回帰テスト化。式中の関数呼び出しは実装どおり受理される
+  readmem_random）。`unsupported_construct.rs` でdefparam/specify/UDPに加え、`**` 演算子の
+  明示エラーを回帰テスト化（while/repeat/foreverは対応済みで削除）。式中の関数呼び出しは実装どおり受理される
   ことも確認した
 
 ### F. 軽微
 
 - `$dumpvars` の深さ・スコープ引数未対応（常に全ダンプ）
-- `casez`/`casex` のワイルドカードマッチが `case` と同一実装の可能性（要確認）
+- ~~`casez`/`casex` のワイルドカードマッチが `case` と同一実装~~ **対応済み（2026-10-04）**。`LogicVal::casez_eq`/`casex_eq`を追加し、スケジューラ側・同期実行側の両`Stmt::Case`に配線。回帰テスト`tests/integration/cases/casez_casex/`でiverilogとbit-exact一致
 - `$display("%s", "文字列")` が動作しない（StringLit の eval が ZERO を返す）
 - ~~連結 lvalue `{a,b} = ...` は先頭要素のみ代入され残りは無言で捨てられる（`frontend/src/lower.rs`）~~
   **対応済み（2026-07-16）**。$signed 対応作業（2026-07-12 節参照）の Task 2d として修正
@@ -504,8 +506,6 @@ frontend lowering 段でサブセット外として弾かれる・無言スキ�
 `disable`/`fork`-`join`（いずれも M1/M2 で実装済み、上記マイルストーン節参照）。
 
 Verilog-2001 の範囲でも未対応:
-- `while`/`repeat`/`forever`（`for` のみ。`lower_loop_stmt` で `LS::For` 以外は
-  `unsupported("loop statement variant")` として明示エラー）
 - `**`（べき乗）演算子、式中の関数呼び出し
 - `defparam`/`specify`/UDP が `lower.rs` 内の複数箇所の `_ => {}` catch-all で
   診断なく無言スキップされる（実装課題 B 節と同一問題。最優先で診断化すべき）

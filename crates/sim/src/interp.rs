@@ -350,7 +350,8 @@ impl Interpreter {
                         let pv = self.eval_expr(pid);
                         let eq = match kind {
                             CaseKind::Case => sel_val.case_eq(&pv),
-                            CaseKind::CaseZ | CaseKind::CaseX => sel_val.case_eq(&pv),
+                            CaseKind::CaseZ => sel_val.casez_eq(&pv),
+                            CaseKind::CaseX => sel_val.casex_eq(&pv),
                         };
                         if eq == LogicVal::ONE {
                             state.frames.push((vec![*body], 0, None));
@@ -686,14 +687,22 @@ impl Interpreter {
                 }
             }
             Stmt::Case {
-                sel, arms, default, ..
+                sel,
+                arms,
+                default,
+                kind,
             } => {
                 let sel_val = self.eval_expr(sel);
                 let mut matched = false;
                 'outer: for (pats, body) in &arms {
                     for &pid in pats {
                         let pv = self.eval_expr(pid);
-                        if sel_val.case_eq(&pv) == LogicVal::ONE {
+                        let eq = match kind {
+                            CaseKind::Case => sel_val.case_eq(&pv),
+                            CaseKind::CaseZ => sel_val.casez_eq(&pv),
+                            CaseKind::CaseX => sel_val.casex_eq(&pv),
+                        };
+                        if eq == LogicVal::ONE {
                             self.exec_sync_stmt(*body);
                             matched = true;
                             break 'outer;
@@ -1530,11 +1539,11 @@ fn apply_unop(op: UnOp, v: &LogicVal, _now: u64) -> LogicVal {
     match op {
         UnOp::Pos => v.clone(),
         UnOp::Neg => {
+            // 0 - v（multi-word対応のsubで64bit超も扱う）
             if v.is_known() {
-                let a = v.pad_to_width(v.width());
-                LogicVal::new(v.width() as u16, (-(a as i64)) as u64, 0)
+                LogicVal::new(v.width() as u16, 0, 0).sub(v)
             } else {
-                LogicVal::X
+                LogicVal::x_of_width(v.width())
             }
         }
         UnOp::LogNot => v.log_not(),

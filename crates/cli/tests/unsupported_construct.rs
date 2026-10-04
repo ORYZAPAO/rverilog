@@ -83,60 +83,6 @@ fn test_udp_instantiation_is_unsupported() {
 }
 
 #[test]
-fn test_while_loop_is_unsupported() {
-    let result = parse_source(
-        "while_loop",
-        r#"
-            module top;
-                initial while (1) begin end
-            endmodule
-        "#,
-    );
-
-    assert!(matches!(
-        &result,
-        Err(rverilog_frontend::FrontendError::UnsupportedConstruct(_))
-    ));
-    assert!(format!("{}", result.unwrap_err()).contains("loop statement variant"));
-}
-
-#[test]
-fn test_repeat_loop_is_unsupported() {
-    let result = parse_source(
-        "repeat_loop",
-        r#"
-            module top;
-                initial repeat (2) begin end
-            endmodule
-        "#,
-    );
-
-    assert!(matches!(
-        &result,
-        Err(rverilog_frontend::FrontendError::UnsupportedConstruct(_))
-    ));
-    assert!(format!("{}", result.unwrap_err()).contains("loop statement variant"));
-}
-
-#[test]
-fn test_forever_loop_is_unsupported() {
-    let result = parse_source(
-        "forever_loop",
-        r#"
-            module top;
-                initial forever begin end
-            endmodule
-        "#,
-    );
-
-    assert!(matches!(
-        &result,
-        Err(rverilog_frontend::FrontendError::UnsupportedConstruct(_))
-    ));
-    assert!(format!("{}", result.unwrap_err()).contains("loop statement variant"));
-}
-
-#[test]
 fn test_power_operator_is_unsupported() {
     let result = parse_source(
         "power_operator",

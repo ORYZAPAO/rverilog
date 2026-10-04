@@ -232,6 +232,33 @@ fn compare_case_width_mismatch() {
 }
 
 #[test]
+fn compare_casez_casex() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/casez_casex/dut.v")],
+    );
+}
+
+#[test]
+fn compare_loop_stmts() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/loop_stmts/dut.v")],
+    );
+}
+
+#[test]
+fn compare_wide_muldiv() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/wide_muldiv/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(
