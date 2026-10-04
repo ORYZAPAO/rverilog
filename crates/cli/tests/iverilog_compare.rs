@@ -277,6 +277,24 @@ fn compare_wide_partial_write() {
 }
 
 #[test]
+fn compare_tristate_bus() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/tristate_bus/dut.v")],
+    );
+}
+
+#[test]
+fn compare_inout_port() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/inout_port/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

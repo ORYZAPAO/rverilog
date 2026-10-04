@@ -1,0 +1,7 @@
+1 ext_oe=0 pad_oe=0 line=zzzzzzzz din=zzzzzzzz
+2 ext_oe=1 pad_oe=0 line=00111100 din=00111100
+3 ext_oe=0 pad_oe=1 line=11000011 din=11000011
+4 ext_oe=1 pad_oe=1 line=xxxxxxxx din=xxxxxxxx
+5 ext_oe=1 pad_oe=1 line=00111100 din=00111100
+6 ext_oe=1 pad_oe=0 line=10000001 din=10000001
+$finish at time 6

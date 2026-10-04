@@ -493,6 +493,26 @@ impl LogicVal {
         Self::from_chunks(w, &a, &b)
     }
 
+    /// 2つのドライバ値をビット単位で解決する（wire/tri）。Zは中立、同値ならその値、
+    /// 不一致（0と1、またはいずれかがX）はX。幅は広い方に揃える。
+    pub fn resolve(&self, other: &LogicVal) -> LogicVal {
+        let w = self.width().max(other.width());
+        let n = num_chunks(w);
+        let (mut a, mut b) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let (a1, b1) = (self.get_chunk(i), self.get_chunk_b(i));
+            let (a2, b2) = (other.get_chunk(i), other.get_chunk_b(i));
+            let z1 = !a1 & b1;
+            let z2 = !a2 & b2;
+            let equal = !((a1 ^ a2) | (b1 ^ b2));
+            let conflict = !z1 & !z2 & !equal;
+            // 自身がZなら相手の値、そうでなければ自身の値（相手がZのときも自身の値）
+            a.push((z1 & a2) | (!z1 & a1) | conflict);
+            b.push((z1 & b2) | (!z1 & b1) | conflict);
+        }
+        Self::from_chunks(w, &a, &b)
+    }
+
     /// 全ビットZの値（任意幅）。
     pub fn z_of_width(width: u32) -> LogicVal {
         let n = num_chunks(width);
@@ -1585,5 +1605,30 @@ mod tests {
             lv128(u128::MAX).to_decimal_string(false).unwrap(),
             u128::MAX.to_string()
         );
+    }
+
+    #[test]
+    fn test_resolve_truth_table() {
+        let (z, x) = (LogicVal::Z, LogicVal::X);
+        let (o, l) = (LogicVal::ONE, LogicVal::ZERO);
+        for v in [&z, &x, &o, &l] {
+            assert_eq!(v.resolve(&z), v.clone(), "v,Z");
+            assert_eq!(z.resolve(v), v.clone(), "Z,v");
+        }
+        assert_eq!(o.resolve(&o), o);
+        assert_eq!(l.resolve(&l), l);
+        assert!(o.resolve(&l).is_x());
+        assert!(l.resolve(&o).is_x());
+        assert!(x.resolve(&o).is_x());
+        assert!(x.resolve(&x).is_x());
+        // 64bit超: 上位チャンクも同じ規則
+        let a = LogicVal::z_of_width(128).insert_bits(100, 4, &LogicVal::new(4, 0b1010, 0));
+        let b = LogicVal::z_of_width(128).insert_bits(100, 4, &LogicVal::new(4, 0b1001, 0));
+        let r = a.resolve(&b);
+        assert_eq!(r.bit_ab(100), (1, 1)); // 0 vs 1 -> X
+        assert_eq!(r.bit_ab(101), (1, 1)); // 1 vs 0 -> X
+        assert_eq!(r.bit_ab(102), (0, 0)); // 0 vs 0 -> 0
+        assert_eq!(r.bit_ab(103), (1, 0)); // 1 vs 1 -> 1
+        assert_eq!(r.bit_ab(0), (0, 1)); // Z のまま
     }
 }

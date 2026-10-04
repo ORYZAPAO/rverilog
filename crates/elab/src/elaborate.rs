@@ -45,6 +45,9 @@ struct ElabCtx<'a> {
     scope_tasks: IndexMap<u32, IndexMap<SmolStr, TaskInfo>>,
     scope_blocks: IndexMap<u32, IndexMap<SmolStr, u32>>,
     next_block_id: u32,
+    /// 次に `elab_module` で elaborate する子モジュールの inout ポート名 → 親ネット。
+    /// 親子でネットを共有して双方向結線する（`elab_module` 冒頭で take する）。
+    pending_port_aliases: IndexMap<SmolStr, NetId>,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -67,6 +70,7 @@ impl<'a> ElabCtx<'a> {
             scope_tasks: IndexMap::new(),
             scope_blocks: IndexMap::new(),
             next_block_id: 0,
+            pending_port_aliases: IndexMap::new(),
         }
     }
 
@@ -329,6 +333,19 @@ pub fn elaborate(
         }
     }
 
+    // 複数の連続代入が駆動するWire（ビット/部分選択の分割駆動を含む）はsimでドライバ解決する
+    let mut net_drivers: IndexMap<u32, Vec<u32>> = IndexMap::new();
+    for (i, cont) in ctx.conts.iter().enumerate() {
+        if let LValue::Net(id) | LValue::BitSelect(id, _) | LValue::PartSelect(id, _, _) =
+            &cont.lval
+        {
+            if matches!(ctx.nets[id.0 as usize].kind, NetKind::Wire) {
+                net_drivers.entry(id.0).or_default().push(i as u32);
+            }
+        }
+    }
+    net_drivers.retain(|_, v| v.len() >= 2);
+
     let mut expr_shift_width = vec![None; ctx.exprs.len()];
     for stmt in &ctx.stmts {
         if let Stmt::BlockingAssign(lval, expr) | Stmt::NbaAssign(lval, expr) = stmt {
@@ -353,6 +370,7 @@ pub fn elaborate(
         top: top_scope,
         sensitivity_table: ctx.sensitivity_table,
         cont_sensitivity,
+        net_drivers,
         mem_sensitivity,
         expr_signed: ctx.expr_signed,
         expr_shift_width,
@@ -366,6 +384,8 @@ fn elab_module(
     inst_name: SmolStr,
     param_overrides: &[(SmolStr, u64)],
 ) -> Result<ScopeId, ElabError> {
+    // 入れ子の子インスタンスへ漏らさないよう、ここで取り出す
+    let mut port_aliases = std::mem::take(&mut ctx.pending_port_aliases);
     let scope = ctx.alloc_scope(Scope {
         parent,
         name: inst_name,
@@ -410,6 +430,18 @@ fn elab_module(
             .map(|v| v as u32)
             .unwrap_or(port.width)
             .max(1);
+        if port.direction == PortDirection::Inout {
+            if let Some(parent_net) = port_aliases.swap_remove(&port.name) {
+                if ctx.nets[parent_net.0 as usize].width != width {
+                    return Err(ElabError::UnsupportedConstruct(format!(
+                        "inout port `{}` width differs from the connected net",
+                        port.name
+                    )));
+                }
+                ctx.register_net(scope, port.name.clone(), parent_net);
+                continue;
+            }
+        }
         let net_id = ctx.alloc_net(NetInfo {
             width,
             kind,
@@ -647,6 +679,30 @@ fn elab_module(
             sub_params.push((name, val));
         }
 
+        // inout ポートは親子でネットを共有する（単純なネット名での接続のみ対応）
+        let mut aliased: Vec<SmolStr> = Vec::new();
+        for (port_idx, conn) in inst.ports.iter().enumerate() {
+            let port = match &conn.name {
+                Some(n) => sub.ports.iter().find(|p| &p.name == n),
+                None => sub.ports.get(port_idx),
+            };
+            let Some(port) = port else { continue };
+            if port.direction != PortDirection::Inout {
+                continue;
+            }
+            let HirExpr::Net(parent_name) = &conn.expr else {
+                return Err(ElabError::UnsupportedConstruct(
+                    "inout port requires a plain net connection".into(),
+                ));
+            };
+            let parent_net = ctx
+                .resolve_net(scope, parent_name.as_str())
+                .ok_or_else(|| ElabError::UnresolvedName(parent_name.to_string()))?;
+            ctx.pending_port_aliases
+                .insert(port.name.clone(), parent_net);
+            aliased.push(port.name.clone());
+        }
+
         let child_scope = elab_module(ctx, &sub, Some(scope), inst.name.clone(), &sub_params)?;
 
         // Connect ports: build cont assigns between parent nets and child port nets
@@ -662,6 +718,9 @@ fn elab_module(
                     })?
             };
 
+            if aliased.contains(&port_name) {
+                continue; // inout: ネットを共有済みのため結線の連続代入は不要
+            }
             let port_dir = sub
                 .ports
                 .iter()

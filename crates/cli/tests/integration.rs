@@ -330,6 +330,32 @@ fn test_wide_partial_write() {
 }
 
 #[test]
+fn test_tristate_bus() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/tristate_bus/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("tristate_bus");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
+fn test_inout_port() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/inout_port/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("inout_port");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];
