@@ -475,6 +475,19 @@ fn test_expr_context_width() {
 }
 
 #[test]
+fn test_drive_strength() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/drive_strength/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("drive_strength");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_logical_x_shortcircuit() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/logical_x_shortcircuit/dut.v")];

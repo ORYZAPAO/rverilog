@@ -88,7 +88,8 @@ impl Interpreter {
                 (NetKind::Wire, _) => {
                     // ドライバが無くてもpull指定のビットは0/1の値を持つ
                     let mut v = LogicVal::z_of_width(net.width);
-                    for &(lo, w, one) in design.net_pulls.get(&(i as u32)).into_iter().flatten() {
+                    for &(lo, w, one, _) in design.net_pulls.get(&(i as u32)).into_iter().flatten()
+                    {
                         v = v.pull_z_range(lo, w, one);
                     }
                     v
@@ -1034,18 +1035,46 @@ impl Interpreter {
         };
         self.driver_vals.insert(driver, drv);
         let kind = self.design.net_resolve.get(&net_id.0).copied();
-        let mut resolved = z;
-        for d in &self.design.net_drivers[&net_id.0] {
-            if let Some(v) = self.driver_vals.get(d) {
-                resolved = match kind {
-                    Some(NetResolve::Wand) => resolved.resolve_wand(v),
-                    Some(NetResolve::Wor) => resolved.resolve_wor(v),
-                    _ => resolved.resolve(v),
-                };
+        let strength_aware = self.design.strength_nets.contains(&net_id.0)
+            && !matches!(kind, Some(NetResolve::Wand | NetResolve::Wor));
+        let mut resolved;
+        if strength_aware {
+            // 強度つき解決: pull指定は弱い定数ドライバとして参加させる（IEEE通り、weak駆動はpullに負ける）
+            let pull_vals: Vec<(LogicVal, (u8, u8))> = self
+                .design
+                .net_pulls
+                .get(&net_id.0)
+                .into_iter()
+                .flatten()
+                .map(|&(lo, pw, one, level)| {
+                    (
+                        z.insert_bits(lo, pw, &LogicVal::all_bits(pw, one)),
+                        (level, level),
+                    )
+                })
+                .collect();
+            let mut ds: Vec<(&LogicVal, (u8, u8))> = Vec::new();
+            for d in &self.design.net_drivers[&net_id.0] {
+                if let Some(v) = self.driver_vals.get(d) {
+                    ds.push((v, self.design.conts[d.0 as usize].strength));
+                }
             }
-        }
-        for &(lo, pw, one) in self.design.net_pulls.get(&net_id.0).into_iter().flatten() {
-            resolved = resolved.pull_z_range(lo, pw, one);
+            ds.extend(pull_vals.iter().map(|(v, st)| (v, *st)));
+            resolved = LogicVal::resolve_strength(w, &ds);
+        } else {
+            resolved = z;
+            for d in &self.design.net_drivers[&net_id.0] {
+                if let Some(v) = self.driver_vals.get(d) {
+                    resolved = match kind {
+                        Some(NetResolve::Wand) => resolved.resolve_wand(v),
+                        Some(NetResolve::Wor) => resolved.resolve_wor(v),
+                        _ => resolved.resolve(v),
+                    };
+                }
+            }
+            for &(lo, pw, one, _) in self.design.net_pulls.get(&net_id.0).into_iter().flatten() {
+                resolved = resolved.pull_z_range(lo, pw, one);
+            }
         }
         let old = self.net_values.get(&net_id).cloned();
         if kind == Some(NetResolve::Trireg) {
