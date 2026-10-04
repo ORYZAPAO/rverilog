@@ -259,6 +259,15 @@ fn compare_wide_muldiv() {
 }
 
 #[test]
+fn compare_wide_display() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/wide_display/dut.v")],
+    );
+}
+
+#[test]
 fn compare_logical_x_shortcircuit() {
     let root = workspace_root();
     compare_case(

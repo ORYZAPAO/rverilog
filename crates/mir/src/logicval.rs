@@ -473,6 +473,47 @@ impl LogicVal {
         Self::from_chunks(w, &a, &b)
     }
 
+    /// ビット位置 `idx` の (a, b) プレーン値（各0/1）。範囲外は (0, 0)。
+    pub fn bit_ab(&self, idx: u32) -> (u64, u64) {
+        if idx >= self.width() {
+            return (0, 0);
+        }
+        let (c, o) = ((idx / 64) as usize, idx % 64);
+        ((self.get_chunk(c) >> o) & 1, (self.get_chunk_b(c) >> o) & 1)
+    }
+
+    /// 全ビット既知の値を10進文字列にする（任意幅）。X/Zを含む場合は `None`。
+    /// `signed` かつMSBが1なら二の補数を負数として扱う。
+    pub fn to_decimal_string(&self, signed: bool) -> Option<String> {
+        if !self.is_known() {
+            return None;
+        }
+        let w = self.width();
+        let mut chunks = self.to_chunks(w);
+        let neg = signed && self.sign_bit() == 1;
+        if neg {
+            chunks = Self::neg_chunks(&chunks, w);
+        }
+        let mut digits = Vec::new();
+        while chunks.iter().any(|c| *c != 0) {
+            let mut rem = 0u128;
+            for c in chunks.iter_mut().rev() {
+                let cur = (rem << 64) | *c as u128;
+                *c = (cur / 10) as u64;
+                rem = cur % 10;
+            }
+            digits.push(b'0' + rem as u8);
+        }
+        if digits.is_empty() {
+            digits.push(b'0');
+        }
+        if neg {
+            digits.push(b'-');
+        }
+        digits.reverse();
+        String::from_utf8(digits).ok()
+    }
+
     /// 幅 `w` の値を符号なしチャンク列として取り出す（未使用上位ビットは0）。
     fn to_chunks(&self, w: u32) -> Vec<u64> {
         (0..num_chunks(w))
@@ -1498,5 +1539,25 @@ mod tests {
         let (q, r) = (n.div(&d), n.mod_(&d));
         assert_eq!(q.mul(&d).add(&r), n);
         assert!(r.lt(&d).is_one());
+    }
+
+    #[test]
+    fn test_to_decimal_string_wide() {
+        let n = lv128(1_000_000_000_000_000_000_000_000_000u128);
+        assert_eq!(
+            n.to_decimal_string(false).unwrap(),
+            "1000000000000000000000000000"
+        );
+        assert_eq!(lv128(0).to_decimal_string(false).unwrap(), "0");
+        let m = lv128((-12345678901234567890123i128) as u128);
+        assert_eq!(
+            m.to_decimal_string(true).unwrap(),
+            "-12345678901234567890123"
+        );
+        assert!(LogicVal::x_of_width(100).to_decimal_string(false).is_none());
+        assert_eq!(
+            lv128(u128::MAX).to_decimal_string(false).unwrap(),
+            u128::MAX.to_string()
+        );
     }
 }
