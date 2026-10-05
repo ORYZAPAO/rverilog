@@ -664,3 +664,16 @@ fn test_rtran_switches() {
         expected, got
     );
 }
+
+#[test]
+fn test_strength_display() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/strength_display/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("strength_display");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}

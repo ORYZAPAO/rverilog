@@ -467,3 +467,12 @@ fn compare_rtran_switches() {
         &[root.join("tests/integration/cases/rtran_switches/dut.v")],
     );
 }
+
+#[test]
+fn compare_strength_display() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/strength_display/dut.v")],
+    );
+}

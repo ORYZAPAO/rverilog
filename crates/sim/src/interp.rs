@@ -1331,6 +1331,64 @@ impl Interpreter {
             .collect()
     }
 
+    /// `%v` 用: ネットの各ビットの強度つき表示。ドライバ（解決対象は `driver_vals`、単一ドライバは
+    /// 現在値）とpullから、ビットごとの0/1の最大駆動強度を求める。
+    fn net_strength_string(&self, net_id: NetId) -> String {
+        let info = self.design.get_net(net_id);
+        let w = info.width;
+        let cur = self
+            .net_values
+            .get(&net_id)
+            .cloned()
+            .unwrap_or_else(|| LogicVal::x_of_width(w));
+        let z = LogicVal::z_of_width(w);
+        let mut drivers: Vec<(LogicVal, (u8, u8))> = Vec::new();
+        match self.design.net_resolve.get(&net_id.0) {
+            Some(NetResolve::Supply0) => drivers.push((cur.clone(), (7, 7))),
+            Some(NetResolve::Supply1) => drivers.push((cur.clone(), (7, 7))),
+            _ if !matches!(info.kind, NetKind::Wire)
+                || self.design.tran_nets.contains(&net_id.0) =>
+            {
+                drivers = strong_drivers(&cur);
+            }
+            _ => {
+                if let Some(ds) = self.design.net_drivers.get(&net_id.0) {
+                    for d in ds {
+                        if let Some(v) = self.driver_vals.get(d) {
+                            drivers.push((v.clone(), self.design.conts[d.0 as usize].strength));
+                        }
+                    }
+                } else {
+                    // 単一ドライバ: lvalueが覆うビットの現在値を、そのcontの強度のドライバとみなす
+                    for cont in &self.design.conts {
+                        for part in cont.lval.flatten_parts() {
+                            let (lo, pw) = match part {
+                                LValue::Net(id) if *id == net_id => (0, w),
+                                LValue::BitSelect(id, b) if *id == net_id => (*b, 1),
+                                LValue::PartSelect(id, hi, lo) if *id == net_id => {
+                                    (*lo, hi - lo + 1)
+                                }
+                                _ => continue,
+                            };
+                            let slice = cur.part_select(lo + pw - 1, lo).unwrap_or(LogicVal::X);
+                            drivers.push((z.insert_bits(lo, pw, &slice), cont.strength));
+                        }
+                    }
+                    if drivers.is_empty() && !self.design.net_pulls.contains_key(&net_id.0) {
+                        drivers = strong_drivers(&cur);
+                    }
+                }
+                for &(lo, pw, one, level) in
+                    self.design.net_pulls.get(&net_id.0).into_iter().flatten()
+                {
+                    let v = z.insert_bits(lo, pw, &LogicVal::all_bits(pw, one));
+                    drivers.push((v, (level, level)));
+                }
+            }
+        }
+        strength_string(&drivers, w)
+    }
+
     /// 連続代入の書き込み。lvalueが連結なら要素ごとに分割し、解決対象のネットへの要素は
     /// ドライバ値として、それ以外は通常の書き込みとして扱う。
     fn write_cont(&mut self, cont_id: u32, lval: &LValue, val: LogicVal, signed: bool) {
@@ -1594,6 +1652,19 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
                             arg_signed,
                         ));
                     }
+                }
+                'v' | 'V' => {
+                    // %v: ネットならドライバの強度つきで表示、それ以外は値をstrongとして表示
+                    let net = args.get(arg_idx - 1).and_then(|e| {
+                        match &interp.design.exprs[e.0 as usize] {
+                            Expr::Net(id) => Some(*id),
+                            _ => None,
+                        }
+                    });
+                    result.push_str(&match net {
+                        Some(id) => interp.net_strength_string(id),
+                        None => strength_string(&strong_drivers(&val), val.width()),
+                    });
                 }
                 's' | 'S' => result.push_str(&val.to_string()),
                 't' | 'T' => {
@@ -2201,4 +2272,65 @@ fn strength_bit((l0, l1): (u8, u8)) -> LogicVal {
         std::cmp::Ordering::Equal if l0 == 0 => LogicVal::Z,
         std::cmp::Ordering::Equal => LogicVal::X,
     }
+}
+
+/// 値をstrong(6)で駆動するドライバ1つ（reg等、強度を持たない値の表示用）。Zは駆動なし。
+fn strong_drivers(v: &LogicVal) -> Vec<(LogicVal, (u8, u8))> {
+    vec![(v.clone(), (6, 6))]
+}
+
+/// 強度レベルの `%v` 表記（Su/St/Pu/La/We/Me/Sm）。0はHiZ。
+fn strength_name(level: u8) -> &'static str {
+    match level {
+        7 => "Su",
+        6 => "St",
+        5 => "Pu",
+        4 => "La",
+        3 => "We",
+        2 => "Me",
+        1 => "Sm",
+        _ => "Hi",
+    }
+}
+
+/// `%v` の文字列。各ビット（MSBから`_`区切り）を、Xの駆動を0/1として解いた2ケースの
+/// 強度状態から決める。一致すれば `St1`/`We0`/`StX`/`HiZ`、不一致なら強度レンジ `65X`。
+fn strength_string(drivers: &[(LogicVal, (u8, u8))], width: u32) -> String {
+    let bit_state = |bit: u32, x_as_one: bool| -> (u8, u8) {
+        let mut st = (0u8, 0u8);
+        for (v, (s0, s1)) in drivers {
+            let c = match v.bit_ab(bit) {
+                (0, 0) => (*s0, 0),
+                (1, 0) => (0, *s1),
+                (1, 1) if x_as_one => (0, *s1),
+                (1, 1) => (*s0, 0),
+                _ => (0, 0),
+            };
+            st = (st.0.max(c.0), st.1.max(c.1));
+        }
+        collapse_strength(st)
+    };
+    (0..width)
+        .rev()
+        .map(|bit| {
+            let (c0, c1) = (bit_state(bit, false), bit_state(bit, true));
+            if c0 == c1 {
+                let (l0, l1) = c0;
+                match l0.cmp(&l1) {
+                    std::cmp::Ordering::Greater => format!("{}0", strength_name(l0)),
+                    std::cmp::Ordering::Less => format!("{}1", strength_name(l1)),
+                    std::cmp::Ordering::Equal if l0 == 0 => "HiZ".to_string(),
+                    std::cmp::Ordering::Equal => format!("{}X", strength_name(l0)),
+                }
+            } else {
+                let (lv0, lv1) = (c0.0.max(c0.1), c1.0.max(c1.1));
+                if lv0 == lv1 {
+                    format!("{}X", strength_name(lv0))
+                } else {
+                    format!("{lv0}{lv1}X")
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_")
 }

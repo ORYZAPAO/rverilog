@@ -3418,3 +3418,22 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ### Next
 
 - A8の残: `%v`強度表示、charge強度
+
+## 2026-10-06（続き）A8最終残り PR5: `%v`強度表示
+
+ブランチ`feat/strength-display`。
+
+### What was done
+
+- sim: `format_string`に`%v`。ネット引数は`net_strength_string`でビットごとの(0側,1側)最大強度を求め、Xを0/1扱いした2ケースの
+  一致/不一致で`St1`/`StX`/`HiZ`/`65X`を決める（`collapse_strength`再利用）。ベクタはMSBから`_`区切り、reg/非ネットはstrong
+- ドライバ源: 解決対象は`driver_vals`と各contの強度、単一ドライバは現在値とcontの強度、pull、supply。tran成分内はstrong表示
+- `strength_display`（iverilogとbit-exact）を追加
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- A8の残: charge強度（trireg large/medium/small）のみ
