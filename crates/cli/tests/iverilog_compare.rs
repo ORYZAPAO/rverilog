@@ -458,3 +458,12 @@ fn compare_tran_switches() {
         &[root.join("tests/integration/cases/tran_switches/dut.v")],
     );
 }
+
+#[test]
+fn compare_rtran_switches() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/rtran_switches/dut.v")],
+    );
+}

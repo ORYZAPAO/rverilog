@@ -550,6 +550,7 @@ fn elab_tran(
         b,
         en,
         invert: tran.invert,
+        resistive: tran.resistive,
     });
     Ok(())
 }

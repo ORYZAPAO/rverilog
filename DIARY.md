@@ -3397,3 +3397,24 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ### Next
 
 - A8の残: rtran系、`%v`強度表示、charge強度
+
+## 2026-10-06 A8最終残り PR4: 抵抗性双方向スイッチ
+
+ブランチ`feat/rtran-switches`（PR #54のtran系の続き）。
+
+### What was done
+
+- HIR/MIR: `TranInfo`/`TranSwitch`に`resistive`。frontendは`rtran`/`rtranif0`/`rtranif1`を受理
+- sim: 抵抗性エッジを含む成分は`solve_resistive_group`。ネット×ビットの状態を(0側, 1側)の最大強度で持ち、導通スイッチ越しに
+  （抵抗性なら`reduce_strength`で減衰して）隣接状態を取り込む緩和を固定点まで反復。Xは0/1両ケースで解き不一致をX。
+  導通条件X/Zはtranと同じく「確実導通」と「導通しうる」の解をビット比較。tranのみの成分は従来経路のまま
+- 未対応テスト（`unsupported_construct`）をrtran系から「端子が全体ネットでない」ケースへ差し替え
+- `rtran_switches`（64通り、iverilogとbit-exact: 双方strong駆動で各側保持、直列2段、weak駆動との競合、pull併用、tran混在）を追加
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- A8の残: `%v`強度表示、charge強度

@@ -325,4 +325,6 @@ pub struct TranSwitch {
     pub b: NetId,
     pub en: NetId,
     pub invert: bool,
+    /// rtran系。通過する信号のstrengthが減衰する。
+    pub resistive: bool,
 }
