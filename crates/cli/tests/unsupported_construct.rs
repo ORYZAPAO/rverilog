@@ -167,13 +167,13 @@ fn assert_unsupported(name: &str, source: &str, needle: &str) {
 fn test_bidirectional_switches_are_unsupported() {
     assert_unsupported(
         "tran_gate",
-        "module top; wire a, b; rtran (a, b); endmodule",
-        "resistive bidirectional switch",
+        "module top; wire [1:0] a; wire b; tran (a[0], b); endmodule",
+        "bidirectional switch terminal",
     );
     assert_unsupported(
         "tranif_gate",
-        "module top; wire a, b, c; rtranif1 (a, b, c); endmodule",
-        "resistive bidirectional switch",
+        "module top; wire [1:0] a; wire b, c; tranif1 (a[1], b, c); endmodule",
+        "bidirectional switch terminal",
     );
 }
 
@@ -182,10 +182,10 @@ fn test_unsupported_gate_inside_generate_is_reported() {
     assert_unsupported(
         "generate_tran",
         r#"module top;
-            wire a, b;
-            generate if (1) begin : g rtran (a, b); end endgenerate
+            wire [1:0] a; wire b;
+            generate if (1) begin : g tran (a[0], b); end endgenerate
         endmodule"#,
-        "resistive bidirectional switch",
+        "bidirectional switch terminal",
     );
 }
 

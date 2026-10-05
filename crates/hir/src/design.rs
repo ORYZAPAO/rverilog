@@ -208,6 +208,8 @@ pub struct TranInfo {
     pub other: SmolStr,
     /// tranif0/rtranif0（enが0で導通）
     pub invert: bool,
+    /// rtran系（通過する信号のstrengthが減衰する）
+    pub resistive: bool,
 }
 
 #[derive(Debug, Clone)]

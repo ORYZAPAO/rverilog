@@ -1201,6 +1201,19 @@ impl Interpreter {
     /// 解決した値と、導通しうる接続（導通条件がX/Z）も含めて解決した値がビットで食い違う場合はXにする。
     fn recompute_tran(&mut self, net_id: NetId) {
         let maybe_group = self.tran_component(net_id.0, true);
+        let resistive = self.design.tran_switches.iter().any(|sw| {
+            sw.resistive && maybe_group.contains(&sw.a.0) && maybe_group.contains(&sw.b.0)
+        });
+        if resistive {
+            // 抵抗性スイッチを含む成分: strengthの減衰を伝播させて解く
+            let def_vals = self.solve_resistive_group(&maybe_group, false);
+            let maybe_vals = self.solve_resistive_group(&maybe_group, true);
+            for (i, &n) in maybe_group.iter().enumerate() {
+                let val = def_vals[i].merge_unknown(&maybe_vals[i]);
+                self.commit_net_value(NetId(n), val);
+            }
+            return;
+        }
         let maybe_val = self.resolve_tran_group(&maybe_group);
         let mut done: Vec<u32> = Vec::new();
         for &m in &maybe_group {
@@ -1215,6 +1228,107 @@ impl Interpreter {
                 self.commit_net_value(NetId(n), val.clone());
             }
         }
+    }
+
+    /// 抵抗性スイッチ（rtran系）を含む接続成分の解決。各ネット×ビットの状態を
+    /// `(l0, l1)`（0/1を駆動する最大strength）で持ち、導通するスイッチ越しに隣接ネットの状態を
+    /// （抵抗性なら減衰させて）取り込む緩和を固定点まで繰り返す。`maybe` なら導通条件がX/Zの
+    /// スイッチも導通として扱う。戻り値は `group` と同じ並びのネット値。
+    /// Xの駆動は「0として」「1として」の2通りで解き、結果が食い違うビットをXにする。
+    fn solve_resistive_group(&self, group: &[u32], maybe: bool) -> Vec<LogicVal> {
+        let w = self.design.get_net(NetId(group[0])).width;
+        let edges: Vec<(usize, usize, bool)> = self
+            .design
+            .tran_switches
+            .iter()
+            .filter(|sw| {
+                let (def, may) = self.tran_conduction(sw);
+                if maybe {
+                    may
+                } else {
+                    def
+                }
+            })
+            .filter_map(|sw| {
+                let i = group.iter().position(|&n| n == sw.a.0)?;
+                let j = group.iter().position(|&n| n == sw.b.0)?;
+                Some((i, j, sw.resistive))
+            })
+            .collect();
+        let solve = |x_as_one: bool| -> Vec<Vec<(u8, u8)>> {
+            // 自己寄与（ドライバとpull）
+            let own: Vec<Vec<(u8, u8)>> = group
+                .iter()
+                .map(|n| {
+                    let mut bits = vec![(0u8, 0u8); w as usize];
+                    for d in self.design.net_drivers.get(n).into_iter().flatten() {
+                        let Some(v) = self.driver_vals.get(d) else {
+                            continue;
+                        };
+                        let (s0, s1) = self.design.conts[d.0 as usize].strength;
+                        for (bit, st) in bits.iter_mut().enumerate() {
+                            let (a, b) = v.bit_ab(bit as u32);
+                            let c = match (a, b) {
+                                (0, 0) => (s0, 0),
+                                (1, 0) => (0, s1),
+                                (1, 1) if x_as_one => (0, s1),
+                                (1, 1) => (s0, 0),
+                                _ => (0, 0),
+                            };
+                            *st = (st.0.max(c.0), st.1.max(c.1));
+                        }
+                    }
+                    for &(lo, pw, one, level) in self.design.net_pulls.get(n).into_iter().flatten()
+                    {
+                        for st in &mut bits[lo as usize..(lo + pw) as usize] {
+                            let c = if one { (0, level) } else { (level, 0) };
+                            *st = (st.0.max(c.0), st.1.max(c.1));
+                        }
+                    }
+                    bits.iter().map(|&c| collapse_strength(c)).collect()
+                })
+                .collect();
+            let mut state = own.clone();
+            for _ in 0..group.len() * 8 + 8 {
+                let mut next = own.clone();
+                for &(i, j, resistive) in &edges {
+                    for (from, to) in [(i, j), (j, i)] {
+                        for bit in 0..w as usize {
+                            let (l0, l1) = state[from][bit];
+                            let (l0, l1) = if resistive {
+                                (reduce_strength(l0), reduce_strength(l1))
+                            } else {
+                                (l0, l1)
+                            };
+                            let cur = &mut next[to][bit];
+                            *cur = (cur.0.max(l0), cur.1.max(l1));
+                        }
+                    }
+                }
+                for bits in &mut next {
+                    for c in bits.iter_mut() {
+                        *c = collapse_strength(*c);
+                    }
+                }
+                if next == state {
+                    break;
+                }
+                state = next;
+            }
+            state
+        };
+        let (s0, s1) = (solve(false), solve(true));
+        (0..group.len())
+            .map(|i| {
+                let mut v = LogicVal::z_of_width(w);
+                for bit in 0..w as usize {
+                    let (a, b) = (strength_bit(s0[i][bit]), strength_bit(s1[i][bit]));
+                    let bv = if a == b { a } else { LogicVal::X };
+                    v = v.insert_bits(bit as u32, 1, &bv);
+                }
+                v
+            })
+            .collect()
     }
 
     /// 連続代入の書き込み。lvalueが連結なら要素ごとに分割し、解決対象のネットへの要素は
@@ -2054,5 +2168,37 @@ mod format_tests {
     fn signed_decimal_positive_value_unaffected() {
         let positive: u64 = 0b0101_0000; // MSB=0
         assert_eq!(natural_repr('d', positive, 0, 8, true), "80");
+    }
+}
+
+/// 抵抗性スイッチを通過したときのstrength減衰（IEEE 1364: supply/strong→pull、pull→weak、
+/// large→medium、weak→medium、medium→small、small→small）。レベルは
+/// supply=7, strong=6, pull=5, large=4, weak=3, medium=2, small=1, highz=0。
+fn reduce_strength(level: u8) -> u8 {
+    match level {
+        7 | 6 => 5,
+        5 => 3,
+        4 | 3 => 2,
+        2 | 1 => 1,
+        _ => 0,
+    }
+}
+
+/// `(l0, l1)` を強い側だけに畳む（同強度なら両方残してX）。
+fn collapse_strength((l0, l1): (u8, u8)) -> (u8, u8) {
+    match l0.cmp(&l1) {
+        std::cmp::Ordering::Greater => (l0, 0),
+        std::cmp::Ordering::Less => (0, l1),
+        std::cmp::Ordering::Equal => (l0, l1),
+    }
+}
+
+/// 畳んだ `(l0, l1)` のビット値（0/1/X/Z）。
+fn strength_bit((l0, l1): (u8, u8)) -> LogicVal {
+    match l0.cmp(&l1) {
+        std::cmp::Ordering::Greater => LogicVal::ZERO,
+        std::cmp::Ordering::Less => LogicVal::ONE,
+        std::cmp::Ordering::Equal if l0 == 0 => LogicVal::Z,
+        std::cmp::Ordering::Equal => LogicVal::X,
     }
 }

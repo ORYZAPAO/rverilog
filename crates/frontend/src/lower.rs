@@ -1689,6 +1689,7 @@ fn tran_assign(
     b: &sv_parser::NetLvalue,
     en: Option<Expr>,
     invert: bool,
+    resistive: bool,
 ) -> Result<ContinuousAssign, FrontendError> {
     let lval = lower_net_lvalue(tree, RefNode::NetLvalue(a))?;
     let other = lower_net_lvalue(tree, RefNode::NetLvalue(b))?;
@@ -1704,6 +1705,7 @@ fn tran_assign(
         tran: Some(TranInfo {
             other: other.clone(),
             invert,
+            resistive,
         }),
         strength: STRENGTH_STRONG,
     })
@@ -1875,36 +1877,39 @@ fn lower_gate_inst(
             }
         }
         GI::Pass(p) => {
-            // tran: 常時導通。rtranは抵抗性（相手側の駆動がstrength減衰して届く）で、双方向では
-            // 競合時の結果がtranと異なるため未対応。
-            match gate_keyword_text(tree, &p.nodes.0.nodes.0) {
-                "tran" => {}
-                other => {
-                    return Err(unsupported(&format!(
-                        "resistive bidirectional switch: {other}"
-                    )))
-                }
-            }
+            // tran: 常時導通。rtran: 同じだが通過する信号のstrengthが減衰する
+            let resistive = match gate_keyword_text(tree, &p.nodes.0.nodes.0) {
+                "tran" => false,
+                "rtran" => true,
+                other => return Err(unsupported(&format!("pass switch: {other}"))),
+            };
             for inst in p.nodes.1.contents() {
                 let (a, _, b) = &inst.nodes.1.nodes.1;
-                out.push(tran_assign(tree, &a.nodes.0, &b.nodes.0, None, false)?);
+                out.push(tran_assign(
+                    tree, &a.nodes.0, &b.nodes.0, None, false, resistive,
+                )?);
             }
         }
         GI::PassEn(p) => {
-            // tranif1: enが1で導通、tranif0: enが0で導通。rtranif0/1は抵抗性のため未対応（上記）。
-            let invert = match gate_keyword_text(tree, &p.nodes.0.nodes.0) {
-                "tranif1" => false,
-                "tranif0" => true,
-                other => {
-                    return Err(unsupported(&format!(
-                        "resistive bidirectional switch: {other}"
-                    )))
-                }
+            // tranif1/rtranif1: enが1で導通、tranif0/rtranif0: enが0で導通
+            let (invert, resistive) = match gate_keyword_text(tree, &p.nodes.0.nodes.0) {
+                "tranif1" => (false, false),
+                "tranif0" => (true, false),
+                "rtranif1" => (false, true),
+                "rtranif0" => (true, true),
+                other => return Err(unsupported(&format!("pass enable switch: {other}"))),
             };
             for inst in p.nodes.2.contents() {
                 let (a, _, b, _, en) = &inst.nodes.1.nodes.1;
                 let en = lower_expression(tree, &en.nodes.0)?;
-                out.push(tran_assign(tree, &a.nodes.0, &b.nodes.0, Some(en), invert)?);
+                out.push(tran_assign(
+                    tree,
+                    &a.nodes.0,
+                    &b.nodes.0,
+                    Some(en),
+                    invert,
+                    resistive,
+                )?);
             }
         }
     }

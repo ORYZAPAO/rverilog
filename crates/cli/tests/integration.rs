@@ -651,3 +651,16 @@ fn test_tran_switches() {
         expected, got
     );
 }
+
+#[test]
+fn test_rtran_switches() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/rtran_switches/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("rtran_switches");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
