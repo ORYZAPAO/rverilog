@@ -5,8 +5,8 @@ use rverilog_hir::{
     FunctionDecl, GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems,
     HirModule, InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind,
     NetResolve, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, Range, RegDecl,
-    Sensitivity, SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, UnOp, STRENGTH_PULL,
-    STRENGTH_STRONG,
+    Sensitivity, SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, TranInfo, UnOp,
+    STRENGTH_PULL, STRENGTH_STRONG,
 };
 use rverilog_mir::LogicVal;
 use smol_str::SmolStr;
@@ -1425,6 +1425,7 @@ fn lower_net_decl(
                         lval: LValue::Net(name),
                         expr: lower_expression(tree, expr)?,
                         weak: false,
+                        tran: None,
                         strength: decl_strength,
                     });
                 }
@@ -1651,6 +1652,7 @@ fn lower_continuous_assign(
                     lval,
                     expr,
                     weak: false,
+                    tran: None,
                     strength,
                 });
             }
@@ -1674,8 +1676,37 @@ fn switch_assign(lval: LValue, data: Expr, en: Expr, active_low: bool) -> Contin
         lval,
         expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
         weak: false,
+        tran: None,
         strength: STRENGTH_STRONG,
     }
+}
+
+/// 双方向スイッチ（tran系）を表す連続代入。`lval` が片側のネット、`tran.other` が反対側、
+/// `expr` が導通条件（tranは定数1）。elabが接続グラフとして扱い、通常の連続代入にはしない。
+fn tran_assign(
+    tree: &SyntaxTree,
+    a: &sv_parser::NetLvalue,
+    b: &sv_parser::NetLvalue,
+    en: Option<Expr>,
+    invert: bool,
+) -> Result<ContinuousAssign, FrontendError> {
+    let lval = lower_net_lvalue(tree, RefNode::NetLvalue(a))?;
+    let other = lower_net_lvalue(tree, RefNode::NetLvalue(b))?;
+    let (LValue::Net(_), LValue::Net(other)) = (&lval, &other) else {
+        return Err(unsupported(
+            "bidirectional switch terminal must be a whole net",
+        ));
+    };
+    Ok(ContinuousAssign {
+        lval: lval.clone(),
+        expr: en.unwrap_or(Expr::Const(LogicVal::ONE)),
+        weak: false,
+        tran: Some(TranInfo {
+            other: other.clone(),
+            invert,
+        }),
+        strength: STRENGTH_STRONG,
+    })
 }
 
 fn lower_gate_inst(
@@ -1721,6 +1752,7 @@ fn lower_gate_inst(
                     lval,
                     expr,
                     weak: false,
+                    tran: None,
                     strength,
                 });
             }
@@ -1749,6 +1781,7 @@ fn lower_gate_inst(
                             lval,
                             expr: in_expr.clone(),
                             weak: false,
+                            tran: None,
                             strength,
                         });
                     }
@@ -1780,6 +1813,7 @@ fn lower_gate_inst(
                     lval,
                     expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
                     weak: false,
+                    tran: None,
                     strength,
                 });
             }
@@ -1803,6 +1837,7 @@ fn lower_gate_inst(
                     lval,
                     expr: Expr::Const(lv(up as u64, 1)),
                     weak: true,
+                    tran: None,
                     strength: pull_strength(gi),
                 });
             }
@@ -1839,10 +1874,38 @@ fn lower_gate_inst(
                 out.push(switch_assign(lval, data, p, true));
             }
         }
-        GI::PassEn(_) | GI::Pass(_) => {
-            return Err(unsupported(
-                "bidirectional switch (tran/tranif0/tranif1/rtran/rtranif)",
-            ));
+        GI::Pass(p) => {
+            // tran: 常時導通。rtranは抵抗性（相手側の駆動がstrength減衰して届く）で、双方向では
+            // 競合時の結果がtranと異なるため未対応。
+            match gate_keyword_text(tree, &p.nodes.0.nodes.0) {
+                "tran" => {}
+                other => {
+                    return Err(unsupported(&format!(
+                        "resistive bidirectional switch: {other}"
+                    )))
+                }
+            }
+            for inst in p.nodes.1.contents() {
+                let (a, _, b) = &inst.nodes.1.nodes.1;
+                out.push(tran_assign(tree, &a.nodes.0, &b.nodes.0, None, false)?);
+            }
+        }
+        GI::PassEn(p) => {
+            // tranif1: enが1で導通、tranif0: enが0で導通。rtranif0/1は抵抗性のため未対応（上記）。
+            let invert = match gate_keyword_text(tree, &p.nodes.0.nodes.0) {
+                "tranif1" => false,
+                "tranif0" => true,
+                other => {
+                    return Err(unsupported(&format!(
+                        "resistive bidirectional switch: {other}"
+                    )))
+                }
+            };
+            for inst in p.nodes.2.contents() {
+                let (a, _, b, _, en) = &inst.nodes.1.nodes.1;
+                let en = lower_expression(tree, &en.nodes.0)?;
+                out.push(tran_assign(tree, &a.nodes.0, &b.nodes.0, Some(en), invert)?);
+            }
         }
     }
     Ok(out)

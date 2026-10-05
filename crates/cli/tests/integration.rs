@@ -638,3 +638,16 @@ fn test_fifo_sync() {
         expected, got
     );
 }
+
+#[test]
+fn test_tran_switches() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/tran_switches/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("tran_switches");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}

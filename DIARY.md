@@ -3375,3 +3375,25 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ### Next
 
 - PR3: 双方向スイッチ（tran/tranif0/tranif1/rtran系）
+
+## 2026-10-05（続き4）A8最終残り PR3: 双方向スイッチ
+
+ブランチ`feat/tran-switches`。
+
+### What was done
+
+- HIR: `ContinuousAssign.tran: Option<TranInfo>`（反対側ネット名・invert）。frontendは`tran`/`tranif0`/`tranif1`を`tran_assign`で生成。
+  `rtran`系は相手側のstrength減衰が競合時の結果を変えるため`UnsupportedConstruct`（generate内も報告）
+- elab: `elab_tran`が同幅の全体ネット同士を`TranSwitch{a,b,en,invert}`として登録。導通条件は1bit隠しネットへの連続代入にし、
+  既存の`cont_sensitivity`で変化を検知。`tran_nets`は単一ドライバでも`net_drivers`に残す
+- sim: `recompute_tran`。接続成分（確実導通/導通しうる）ごとに全ネットのドライバ・pullを合成して解決（強度つき解決も再利用）。
+  条件X/Zはビット単位で食い違う箇所をXにする。導通条件の変化時は両端の成分を再解決（分割後の古い値を残さない）
+- `tran_switches`（iverilogとbit-exact）を追加。既存の未対応テストは`rtran`系に変更
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
+
+### Next
+
+- A8の残: rtran系、`%v`強度表示、charge強度
