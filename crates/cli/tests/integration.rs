@@ -421,6 +421,20 @@ fn test_trireg_net() {
     );
 }
 
+// iverilogがcharge strength付きtriregを未対応のため、期待値はIEEE 1364の規則から手で導出。
+#[test]
+fn test_trireg_charge_strength() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/trireg_charge_strength/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("trireg_charge_strength");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
 #[test]
 fn test_ternary_x_cond() {
     let root = workspace_root();

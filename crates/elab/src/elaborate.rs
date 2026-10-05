@@ -9,8 +9,8 @@ use rverilog_hir::{
 use rverilog_mir::{
     BinOp, CaseKind, ContAssign, EdgeType, ElaboratedDesign, Expr, ExprId, LValue, LogicVal, MemId,
     MemInfo, NetId, NetInfo, NetKind, NetResolve, Process, ProcessId, ProcessKind, Scope, ScopeId,
-    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, TranSwitch, UnOp, STRENGTH_PULL,
-    STRENGTH_STRONG,
+    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, TranSwitch, UnOp, STRENGTH_MEDIUM,
+    STRENGTH_PULL, STRENGTH_STRONG,
 };
 use smol_str::SmolStr;
 
@@ -51,6 +51,8 @@ struct ElabCtx<'a> {
     pending_port_aliases: IndexMap<SmolStr, NetId>,
     /// 既定のwire以外のネット型（`ElaboratedDesign::net_resolve`）
     net_resolve: IndexMap<u32, NetResolve>,
+    /// trireg の保持値が持つcharge strength
+    trireg_charge_strength: IndexMap<u32, u8>,
     /// pull指定のビット範囲（`ElaboratedDesign::net_pulls`）
     net_pulls: IndexMap<u32, Vec<(u32, u32, bool, u8)>>,
     /// 双方向スイッチ（tran/tranif）
@@ -79,6 +81,7 @@ impl<'a> ElabCtx<'a> {
             next_block_id: 0,
             pending_port_aliases: IndexMap::new(),
             net_resolve: IndexMap::new(),
+            trireg_charge_strength: IndexMap::new(),
             net_pulls: IndexMap::new(),
             tran_switches: Vec::new(),
         }
@@ -183,12 +186,15 @@ impl<'a> ElabCtx<'a> {
     }
 
     /// 宣言型に応じた解決規則を登録する（wire/tri/uwire は既定のため登録しない）。
-    fn set_net_type(&mut self, id: NetId, ty: HirNetResolve) {
+    fn set_net_type(&mut self, id: NetId, ty: HirNetResolve, charge_strength: u8) {
         let r = match ty {
             HirNetResolve::Wire => return,
             HirNetResolve::Wand => NetResolve::Wand,
             HirNetResolve::Wor => NetResolve::Wor,
-            HirNetResolve::Trireg => NetResolve::Trireg,
+            HirNetResolve::Trireg => {
+                self.trireg_charge_strength.insert(id.0, charge_strength);
+                NetResolve::Trireg
+            }
             HirNetResolve::Supply0 => NetResolve::Supply0,
             HirNetResolve::Supply1 => NetResolve::Supply1,
             HirNetResolve::Tri0 | HirNetResolve::Tri1 => {
@@ -428,6 +434,7 @@ pub fn elaborate(
         tran_switches: ctx.tran_switches,
         tran_nets,
         net_resolve: ctx.net_resolve,
+        trireg_charge_strength: ctx.trireg_charge_strength,
         net_pulls: ctx.net_pulls,
         mem_sensitivity,
         expr_signed: ctx.expr_signed,
@@ -629,7 +636,7 @@ fn elab_module(
             is_signed: port.signed,
         });
         ctx.register_net(scope, port.name.clone(), net_id);
-        ctx.set_net_type(net_id, port.net_type);
+        ctx.set_net_type(net_id, port.net_type, STRENGTH_MEDIUM);
     }
 
     // Register wire nets
@@ -647,7 +654,7 @@ fn elab_module(
             is_signed: net.signed,
         });
         ctx.register_net(scope, net.name.clone(), net_id);
-        ctx.set_net_type(net_id, net.net_type);
+        ctx.set_net_type(net_id, net.net_type, net.charge_strength);
     }
 
     // Register reg declarations
@@ -974,7 +981,7 @@ fn elab_generate_items(
             is_signed: net.signed,
         });
         ctx.register_net(scope, net.name.clone(), net_id);
-        ctx.set_net_type(net_id, net.net_type);
+        ctx.set_net_type(net_id, net.net_type, net.charge_strength);
     }
 
     for reg in &items.regs {

@@ -3437,3 +3437,19 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、samples exit 0
 ### Next
 
 - A8の残: charge強度（trireg large/medium/small）のみ
+
+## 2026-10-06 A8最終残り PR6: trireg charge strength
+
+### What was done
+
+- frontend/HIR/MIR: `trireg (large|medium|small)`を解釈し、charge strengthをlarge=4、medium=2、small=1として保持（省略時medium）。
+- sim: triregの前回値をcharge strengthのドライバとして`resolve_strength`へ加え、外部ドライバ・pullとの解決と`%v`表示に参加させた。
+- テスト: `trireg_charge_strength`を追加。`Me1`/`La0`/`Sm1`の表示、weak pullとの競合、保持を確認。iverilog 13.0はtrireg未対応のため、IEEE 1364規則から導出した期待値を使用。
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過。
+
+### Next
+
+- A8の残なし

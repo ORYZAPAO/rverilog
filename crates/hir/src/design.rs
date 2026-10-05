@@ -8,12 +8,14 @@ pub enum NetKind {
     Integer,
 }
 
-/// ドライバ強度（0側, 1側）。supply=7, strong=6, pull=5, weak=3, highz=0。
+/// ドライバ強度（0側, 1側）。supply=7, strong=6, pull=5, large=4, weak=3, medium=2, small=1, highz=0。
 pub type DriveStrength = (u8, u8);
 /// 既定のドライバ強度（strong0, strong1）。
 pub const STRENGTH_STRONG: DriveStrength = (6, 6);
 /// pullup/pulldown/tri0/tri1 の既定強度（pull）。
 pub const STRENGTH_PULL: DriveStrength = (5, 5);
+/// trireg の既定の charge strength（medium）。
+pub const STRENGTH_MEDIUM: u8 = 2;
 
 /// ネット宣言の型による解決規則（`wire`/`tri`/`uwire` は `Wire`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +173,8 @@ pub struct NetDecl {
     pub width: u32,
     pub kind: NetKind,
     pub net_type: NetResolve,
+    /// trireg の charge strength。trireg 以外では未使用。
+    pub charge_strength: u8,
     pub width_expr: Expr,
     pub signed: bool,
 }

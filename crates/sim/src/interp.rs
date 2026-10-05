@@ -1039,7 +1039,8 @@ impl Interpreter {
             return;
         }
         let kind = self.design.net_resolve.get(&net_id.0).copied();
-        let strength_aware = self.design.strength_nets.contains(&net_id.0)
+        let strength_aware = (self.design.strength_nets.contains(&net_id.0)
+            || self.design.trireg_charge_strength.contains_key(&net_id.0))
             && !matches!(kind, Some(NetResolve::Wand | NetResolve::Wor));
         let mut resolved;
         if strength_aware {
@@ -1057,13 +1058,22 @@ impl Interpreter {
                     )
                 })
                 .collect();
-            let mut ds: Vec<(&LogicVal, (u8, u8))> = Vec::new();
+            let mut owned: Vec<(LogicVal, (u8, u8))> = Vec::new();
             for d in &self.design.net_drivers[&net_id.0] {
                 if let Some(v) = self.driver_vals.get(d) {
-                    ds.push((v, self.design.conts[d.0 as usize].strength));
+                    owned.push((v.clone(), self.design.conts[d.0 as usize].strength));
                 }
             }
-            ds.extend(pull_vals.iter().map(|(v, st)| (v, *st)));
+            owned.extend(pull_vals);
+            if let Some(&level) = self.design.trireg_charge_strength.get(&net_id.0) {
+                let held = self
+                    .net_values
+                    .get(&net_id)
+                    .cloned()
+                    .unwrap_or_else(|| LogicVal::x_of_width(w));
+                owned.push((held, (level, level)));
+            }
+            let ds: Vec<(&LogicVal, (u8, u8))> = owned.iter().map(|(v, st)| (v, *st)).collect();
             resolved = LogicVal::resolve_strength(w, &ds);
         } else {
             resolved = z;
@@ -1083,15 +1093,9 @@ impl Interpreter {
         self.commit_net_value(net_id, resolved);
     }
 
-    /// 解決済みの値をネットへ反映する。trireg は全ドライバZのビットに直前の値を保持し、
-    /// 値が変化したときのみVCD記録とsensitivity通知を行う。
-    fn commit_net_value(&mut self, net_id: NetId, mut resolved: LogicVal) {
+    /// 解決済みの値をネットへ反映する。値が変化したときのみVCD記録とsensitivity通知を行う。
+    fn commit_net_value(&mut self, net_id: NetId, resolved: LogicVal) {
         let old = self.net_values.get(&net_id).cloned();
-        if self.design.net_resolve.get(&net_id.0).copied() == Some(NetResolve::Trireg) {
-            if let Some(prev) = &old {
-                resolved = resolved.keep_on_z(prev);
-            }
-        }
         if old.as_ref() != Some(&resolved) {
             self.net_values.insert(net_id, resolved.clone());
             self.vcd_record_net_change(net_id, &resolved);
@@ -1383,6 +1387,9 @@ impl Interpreter {
                 {
                     let v = z.insert_bits(lo, pw, &LogicVal::all_bits(pw, one));
                     drivers.push((v, (level, level)));
+                }
+                if let Some(&level) = self.design.trireg_charge_strength.get(&net_id.0) {
+                    drivers.push((cur.clone(), (level, level)));
                 }
             }
         }

@@ -47,6 +47,8 @@ pub struct ElaboratedDesign {
     pub cont_sensitivity: IndexMap<u32, Vec<u32>>,
     /// net.0 → 既定のwire以外のネット型（wand/wor/trireg/supply0/supply1）。
     pub net_resolve: IndexMap<u32, NetResolve>,
+    /// net.0 → trireg の保持値が持つ charge strength（large=4, medium=2, small=1）。
+    pub trireg_charge_strength: IndexMap<u32, u8>,
     /// net.0 → [(lo, width, one, level)] pull指定のビット範囲（tri0/tri1/pullup/pulldown）。
     /// Zのビットを `one` の値（pullup=1 / pulldown=0）へ置き換える。強度レベル `level` は
     /// 強度付きドライバと解決する場合（`strength_nets`）に弱いドライバとして参加する強さ。
@@ -119,7 +121,7 @@ pub enum NetResolve {
     Wand,
     /// wor/trior: 1が支配
     Wor,
-    /// trireg: 全ドライバがZのとき直前の値を保持（charge storage、strength大小は無視）
+    /// trireg: 保持値をcharge strengthのドライバとして解決する
     Trireg,
     /// supply0: 常に0
     Supply0,
@@ -168,12 +170,14 @@ pub enum EdgeType {
     Negedge,
 }
 
-/// ドライバ強度（0側, 1側）。supply=7, strong=6, pull=5, weak=3, highz=0。
+/// ドライバ強度（0側, 1側）。supply=7, strong=6, pull=5, large=4, weak=3, medium=2, small=1, highz=0。
 pub type DriveStrength = (u8, u8);
 /// 既定のドライバ強度（strong0, strong1）。
 pub const STRENGTH_STRONG: DriveStrength = (6, 6);
 /// pull系の既定強度。
 pub const STRENGTH_PULL: DriveStrength = (5, 5);
+/// trireg の既定の charge strength（medium）。
+pub const STRENGTH_MEDIUM: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct ContAssign {
