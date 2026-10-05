@@ -9,7 +9,7 @@ pub use crate::design::{
     SysFuncKind, SysTask,
 };
 pub use crate::design::{Design, NetKind, NetResolve};
-pub use crate::design::{DriveStrength, STRENGTH_PULL, STRENGTH_STRONG};
+pub use crate::design::{DriveStrength, STRENGTH_MEDIUM, STRENGTH_PULL, STRENGTH_STRONG};
 pub use crate::design::{FunctionDecl, TaskDecl, TfArg};
 pub use crate::design::{GenerateCase, GenerateConstruct, GenerateFor, GenerateIf, GenerateItems};
 

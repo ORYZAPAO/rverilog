@@ -6,7 +6,7 @@ use rverilog_hir::{
     HirModule, InitialConstruct, LValue, LocalParamDecl, MemDecl, ModuleInstance, NetDecl, NetKind,
     NetResolve, ParamDecl, ParamOverride, PortConnection, PortDecl, PortDirection, Range, RegDecl,
     Sensitivity, SensitivityItem, Stmt, SysFuncKind, SysTask, TaskDecl, TfArg, TranInfo, UnOp,
-    STRENGTH_PULL, STRENGTH_STRONG,
+    STRENGTH_MEDIUM, STRENGTH_PULL, STRENGTH_STRONG,
 };
 use rverilog_mir::LogicVal;
 use smol_str::SmolStr;
@@ -208,6 +208,18 @@ fn drive_strength(ds: &sv_parser::DriveStrength) -> DriveStrength {
 
 fn opt_drive_strength(ds: &Option<sv_parser::DriveStrength>) -> DriveStrength {
     ds.as_ref().map(drive_strength).unwrap_or(STRENGTH_STRONG)
+}
+
+/// `trireg (large)` 等のcharge strengthを内部の強度レベルへ変換する。指定なしはmedium。
+fn charge_strength(s: &Option<sv_parser::Strength>) -> u8 {
+    match s {
+        Some(sv_parser::Strength::Charge(c)) => match c.as_ref() {
+            sv_parser::ChargeStrength::Small(_) => 1,
+            sv_parser::ChargeStrength::Medium(_) => 2,
+            sv_parser::ChargeStrength::Large(_) => 4,
+        },
+        _ => STRENGTH_MEDIUM,
+    }
 }
 
 /// `pullup (pull1)` 等の引く強さ（pullupは1側、pulldownは0側）。指定なしはpull。
@@ -1409,6 +1421,7 @@ fn lower_net_decl(
             Some(sv_parser::Strength::Drive(d)) => drive_strength(d),
             _ => STRENGTH_STRONG,
         };
+        let charge_strength = charge_strength(&nt.nodes.1);
         for assignment in nt.nodes.5.nodes.0.contents() {
             if let Some(name) = get_id(tree, RefNode::NetIdentifier(&assignment.nodes.0)) {
                 nets.push(NetDecl {
@@ -1416,6 +1429,7 @@ fn lower_net_decl(
                     width,
                     kind: NetKind::Wire,
                     net_type,
+                    charge_strength,
                     width_expr: width_expr.clone(),
                     signed,
                 });

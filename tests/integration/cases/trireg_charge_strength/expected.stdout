@@ -1,0 +1,5 @@
+1 drive def=St1 la=St1 me=St1 sm=St1
+2 hold def=Me1 la=La1 me=We1 sm=Sm1
+3 drive def=St0 la=St0 me=St0 sm=St0
+4 resolve def=Me0 la=La0 me=We1 sm=Sm0
+$finish at time 4
