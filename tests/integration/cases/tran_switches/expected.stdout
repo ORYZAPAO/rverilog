@@ -1,0 +1,91 @@
+ea=0 da=0 eb=0 db=0 a=z b=z
+ea=0 da=0 eb=0 db=1 a=z b=z
+ea=0 da=0 eb=1 db=0 a=0 b=0
+ea=0 da=0 eb=1 db=1 a=1 b=1
+ea=0 da=1 eb=0 db=0 a=z b=z
+ea=0 da=1 eb=0 db=1 a=z b=z
+ea=0 da=1 eb=1 db=0 a=0 b=0
+ea=0 da=1 eb=1 db=1 a=1 b=1
+ea=1 da=0 eb=0 db=0 a=0 b=0
+ea=1 da=0 eb=0 db=1 a=0 b=0
+ea=1 da=0 eb=1 db=0 a=0 b=0
+ea=1 da=0 eb=1 db=1 a=x b=x
+ea=1 da=1 eb=0 db=0 a=1 b=1
+ea=1 da=1 eb=0 db=1 a=1 b=1
+ea=1 da=1 eb=1 db=0 a=x b=x
+ea=1 da=1 eb=1 db=1 a=1 b=1
+dx=0 dy=0 c=0 if1=0,0 if0=0,0 one=0,z
+dx=0 dy=0 c=1 if1=0,0 if0=0,0 one=0,0
+dx=0 dy=0 c=x if1=0,0 if0=0,0 one=0,x
+dx=0 dy=0 c=z if1=0,0 if0=0,0 one=0,x
+dx=0 dy=1 c=0 if1=0,1 if0=x,x one=0,z
+dx=0 dy=1 c=1 if1=x,x if0=0,1 one=0,0
+dx=0 dy=1 c=x if1=x,x if0=x,x one=0,x
+dx=0 dy=1 c=z if1=x,x if0=x,x one=0,x
+dx=0 dy=x c=0 if1=0,x if0=x,x one=0,z
+dx=0 dy=x c=1 if1=x,x if0=0,x one=0,0
+dx=0 dy=x c=x if1=x,x if0=x,x one=0,x
+dx=0 dy=x c=z if1=x,x if0=x,x one=0,x
+dx=0 dy=z c=0 if1=0,z if0=0,0 one=0,z
+dx=0 dy=z c=1 if1=0,0 if0=0,z one=0,0
+dx=0 dy=z c=x if1=0,x if0=0,x one=0,x
+dx=0 dy=z c=z if1=0,x if0=0,x one=0,x
+dx=1 dy=0 c=0 if1=1,0 if0=x,x one=1,z
+dx=1 dy=0 c=1 if1=x,x if0=1,0 one=1,1
+dx=1 dy=0 c=x if1=x,x if0=x,x one=1,x
+dx=1 dy=0 c=z if1=x,x if0=x,x one=1,x
+dx=1 dy=1 c=0 if1=1,1 if0=1,1 one=1,z
+dx=1 dy=1 c=1 if1=1,1 if0=1,1 one=1,1
+dx=1 dy=1 c=x if1=1,1 if0=1,1 one=1,x
+dx=1 dy=1 c=z if1=1,1 if0=1,1 one=1,x
+dx=1 dy=x c=0 if1=1,x if0=x,x one=1,z
+dx=1 dy=x c=1 if1=x,x if0=1,x one=1,1
+dx=1 dy=x c=x if1=x,x if0=x,x one=1,x
+dx=1 dy=x c=z if1=x,x if0=x,x one=1,x
+dx=1 dy=z c=0 if1=1,z if0=1,1 one=1,z
+dx=1 dy=z c=1 if1=1,1 if0=1,z one=1,1
+dx=1 dy=z c=x if1=1,x if0=1,x one=1,x
+dx=1 dy=z c=z if1=1,x if0=1,x one=1,x
+dx=x dy=0 c=0 if1=x,0 if0=x,x one=x,z
+dx=x dy=0 c=1 if1=x,x if0=x,0 one=x,x
+dx=x dy=0 c=x if1=x,x if0=x,x one=x,x
+dx=x dy=0 c=z if1=x,x if0=x,x one=x,x
+dx=x dy=1 c=0 if1=x,1 if0=x,x one=x,z
+dx=x dy=1 c=1 if1=x,x if0=x,1 one=x,x
+dx=x dy=1 c=x if1=x,x if0=x,x one=x,x
+dx=x dy=1 c=z if1=x,x if0=x,x one=x,x
+dx=x dy=x c=0 if1=x,x if0=x,x one=x,z
+dx=x dy=x c=1 if1=x,x if0=x,x one=x,x
+dx=x dy=x c=x if1=x,x if0=x,x one=x,x
+dx=x dy=x c=z if1=x,x if0=x,x one=x,x
+dx=x dy=z c=0 if1=x,z if0=x,x one=x,z
+dx=x dy=z c=1 if1=x,x if0=x,z one=x,x
+dx=x dy=z c=x if1=x,x if0=x,x one=x,x
+dx=x dy=z c=z if1=x,x if0=x,x one=x,x
+dx=z dy=0 c=0 if1=z,0 if0=0,0 one=z,z
+dx=z dy=0 c=1 if1=0,0 if0=z,0 one=z,z
+dx=z dy=0 c=x if1=x,0 if0=x,0 one=z,z
+dx=z dy=0 c=z if1=x,0 if0=x,0 one=z,z
+dx=z dy=1 c=0 if1=z,1 if0=1,1 one=z,z
+dx=z dy=1 c=1 if1=1,1 if0=z,1 one=z,z
+dx=z dy=1 c=x if1=x,1 if0=x,1 one=z,z
+dx=z dy=1 c=z if1=x,1 if0=x,1 one=z,z
+dx=z dy=x c=0 if1=z,x if0=x,x one=z,z
+dx=z dy=x c=1 if1=x,x if0=z,x one=z,z
+dx=z dy=x c=x if1=x,x if0=x,x one=z,z
+dx=z dy=x c=z if1=x,x if0=x,x one=z,z
+dx=z dy=z c=0 if1=z,z if0=z,z one=z,z
+dx=z dy=z c=1 if1=z,z if0=z,z one=z,z
+dx=z dy=z c=x if1=z,z if0=z,z one=z,z
+dx=z dy=z c=z if1=z,z if0=z,z one=z,z
+ew=0 dw=0 w=z z z
+ew=0 dw=1 w=z z z
+ew=0 dw=0 w=z z z
+ew=0 dw=1 w=z z z
+ew=1 dw=0 w=0 0 0
+ew=1 dw=1 w=1 1 1
+ew=1 dw=0 w=0 0 0
+ew=1 dw=1 w=1 1 1
+ep=0 p1=1 p2=1
+ep=1 p1=0 p2=0
+$finish at time 90

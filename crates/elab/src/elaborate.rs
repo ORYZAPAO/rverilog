@@ -9,7 +9,8 @@ use rverilog_hir::{
 use rverilog_mir::{
     BinOp, CaseKind, ContAssign, EdgeType, ElaboratedDesign, Expr, ExprId, LValue, LogicVal, MemId,
     MemInfo, NetId, NetInfo, NetKind, NetResolve, Process, ProcessId, ProcessKind, Scope, ScopeId,
-    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, UnOp, STRENGTH_PULL, STRENGTH_STRONG,
+    Sensitivity, SensitivityEdge, Stmt, StmtId, SysTask, TranSwitch, UnOp, STRENGTH_PULL,
+    STRENGTH_STRONG,
 };
 use smol_str::SmolStr;
 
@@ -52,6 +53,8 @@ struct ElabCtx<'a> {
     net_resolve: IndexMap<u32, NetResolve>,
     /// pull指定のビット範囲（`ElaboratedDesign::net_pulls`）
     net_pulls: IndexMap<u32, Vec<(u32, u32, bool, u8)>>,
+    /// 双方向スイッチ（tran/tranif）
+    tran_switches: Vec<TranSwitch>,
 }
 
 impl<'a> ElabCtx<'a> {
@@ -77,6 +80,7 @@ impl<'a> ElabCtx<'a> {
             pending_port_aliases: IndexMap::new(),
             net_resolve: IndexMap::new(),
             net_pulls: IndexMap::new(),
+            tran_switches: Vec::new(),
         }
     }
 
@@ -379,10 +383,15 @@ pub fn elaborate(
         }
     }
     // pull/trireg は1ドライバでも解決経路が必要（Zの置換・値の保持）。supplyは定数ネットなので対象外。
+    let tran_nets: indexmap::IndexSet<u32> = ctx
+        .tran_switches
+        .iter()
+        .flat_map(|t| [t.a.0, t.b.0])
+        .collect();
     net_drivers.retain(|net, v| match ctx.net_resolve.get(net) {
         Some(NetResolve::Supply0 | NetResolve::Supply1) => false,
         Some(NetResolve::Trireg) => true,
-        _ => ctx.net_pulls.contains_key(net) || v.len() >= 2,
+        _ => ctx.net_pulls.contains_key(net) || tran_nets.contains(net) || v.len() >= 2,
     });
 
     // 既定(strong)以外の強度のドライバ、または既定以外のpull強度を持つネットは強度つき解決にする
@@ -416,6 +425,8 @@ pub fn elaborate(
         cont_sensitivity,
         net_drivers,
         strength_nets,
+        tran_switches: ctx.tran_switches,
+        tran_nets,
         net_resolve: ctx.net_resolve,
         net_pulls: ctx.net_pulls,
         mem_sensitivity,
@@ -477,12 +488,68 @@ fn elab_assign(
             .push((lo, w, up, assign.strength.0));
         return Ok(());
     }
+    if let Some(tran) = &assign.tran {
+        return elab_tran(ctx, scope, assign, tran);
+    }
     let lval = lower_lvalue(ctx, scope, &assign.lval)?;
     let expr_id = lower_expr(ctx, scope, &assign.expr)?;
     ctx.conts.push(ContAssign {
         lval,
         expr: expr_id,
         strength: assign.strength,
+    });
+    Ok(())
+}
+
+/// 双方向スイッチを登録する。導通条件は1bitの隠しネットへの連続代入で受け、変化時にsimが
+/// 接続成分を再解決できるようにする（`cont_sensitivity` を再利用）。
+fn elab_tran(
+    ctx: &mut ElabCtx,
+    scope: ScopeId,
+    assign: &rverilog_hir::ContinuousAssign,
+    tran: &rverilog_hir::TranInfo,
+) -> Result<(), ElabError> {
+    let HirLValue::Net(a_name) = &assign.lval else {
+        return Err(ElabError::UnsupportedConstruct(
+            "bidirectional switch terminal must be a whole net".into(),
+        ));
+    };
+    let net_of = |ctx: &ElabCtx, name: &SmolStr| {
+        ctx.resolve_net(scope, name.as_str())
+            .ok_or_else(|| ElabError::UnresolvedName(name.to_string()))
+    };
+    let a = net_of(ctx, a_name)?;
+    let b = net_of(ctx, &tran.other)?;
+    for id in [a, b] {
+        if !matches!(ctx.nets[id.0 as usize].kind, NetKind::Wire) {
+            return Err(ElabError::UnsupportedConstruct(
+                "bidirectional switch terminal must be a net".into(),
+            ));
+        }
+    }
+    if ctx.nets[a.0 as usize].width != ctx.nets[b.0 as usize].width {
+        return Err(ElabError::UnsupportedConstruct(
+            "bidirectional switch terminals of different widths".into(),
+        ));
+    }
+    let en = ctx.alloc_net(NetInfo {
+        width: 1,
+        kind: NetKind::Wire,
+        scope,
+        name: SmolStr::from("$tran_en"),
+        is_signed: false,
+    });
+    let expr_id = lower_expr(ctx, scope, &assign.expr)?;
+    ctx.conts.push(ContAssign {
+        lval: LValue::Net(en),
+        expr: expr_id,
+        strength: assign.strength,
+    });
+    ctx.tran_switches.push(TranSwitch {
+        a,
+        b,
+        en,
+        invert: tran.invert,
     });
     Ok(())
 }

@@ -1034,6 +1034,10 @@ impl Interpreter {
             _ => val.resize(w),
         };
         self.driver_vals.insert(driver, drv);
+        if self.design.tran_nets.contains(&net_id.0) {
+            self.recompute_tran(net_id);
+            return;
+        }
         let kind = self.design.net_resolve.get(&net_id.0).copied();
         let strength_aware = self.design.strength_nets.contains(&net_id.0)
             && !matches!(kind, Some(NetResolve::Wand | NetResolve::Wor));
@@ -1076,8 +1080,14 @@ impl Interpreter {
                 resolved = resolved.pull_z_range(lo, pw, one);
             }
         }
+        self.commit_net_value(net_id, resolved);
+    }
+
+    /// 解決済みの値をネットへ反映する。trireg は全ドライバZのビットに直前の値を保持し、
+    /// 値が変化したときのみVCD記録とsensitivity通知を行う。
+    fn commit_net_value(&mut self, net_id: NetId, mut resolved: LogicVal) {
         let old = self.net_values.get(&net_id).cloned();
-        if kind == Some(NetResolve::Trireg) {
+        if self.design.net_resolve.get(&net_id.0).copied() == Some(NetResolve::Trireg) {
             if let Some(prev) = &old {
                 resolved = resolved.keep_on_z(prev);
             }
@@ -1086,6 +1096,124 @@ impl Interpreter {
             self.net_values.insert(net_id, resolved.clone());
             self.vcd_record_net_change(net_id, &resolved);
             self.trigger_sensitivity(&LValue::Net(net_id), old.as_ref(), &resolved);
+        }
+    }
+
+    /// tranの導通条件ネットが変化したら、そのスイッチの接続成分を再解決する。
+    fn on_tran_enable_change(&mut self, lval: &LValue) {
+        let LValue::Net(id) = lval else { return };
+        let targets: Vec<NetId> = self
+            .design
+            .tran_switches
+            .iter()
+            .filter(|sw| sw.en == *id)
+            .flat_map(|sw| [sw.a, sw.b])
+            .collect();
+        // 導通が変わると接続成分が分割/併合されるため、両端それぞれの成分を再解決する
+        for n in targets {
+            self.recompute_tran(n);
+        }
+    }
+
+    /// tranスイッチの導通状態 `(確実に導通, 導通しうる)`。導通条件（bit0）がX/Zなら後者のみ真。
+    fn tran_conduction(&self, sw: &TranSwitch) -> (bool, bool) {
+        let v = self.net_values.get(&sw.en);
+        let (a, b) = v
+            .map(|v| (v.pad_to_width(1) & 1, v.pad_to_width_b(1) & 1))
+            .unwrap_or((0, 1));
+        let unknown = b == 1;
+        let on = !unknown && (a == 1) != sw.invert;
+        (on, on || unknown)
+    }
+
+    /// `start` からtranで接続されるネットの集合。`maybe` なら導通しうるスイッチも辿る。
+    fn tran_component(&self, start: u32, maybe: bool) -> Vec<u32> {
+        let mut comp = vec![start];
+        let mut i = 0;
+        while i < comp.len() {
+            let cur = comp[i];
+            i += 1;
+            for sw in &self.design.tran_switches {
+                let (def, may) = self.tran_conduction(sw);
+                if !(if maybe { may } else { def }) {
+                    continue;
+                }
+                let next = if sw.a.0 == cur {
+                    sw.b.0
+                } else if sw.b.0 == cur {
+                    sw.a.0
+                } else {
+                    continue;
+                };
+                if !comp.contains(&next) {
+                    comp.push(next);
+                }
+            }
+        }
+        comp
+    }
+
+    /// 接続されたネット群を1つのネットとして解決する（全ネットのドライバとpullを合成）。
+    fn resolve_tran_group(&self, nets: &[u32]) -> LogicVal {
+        let w = self.design.get_net(NetId(nets[0])).width;
+        let z = LogicVal::z_of_width(w);
+        let kind = self.design.net_resolve.get(&nets[0]).copied();
+        let strength_aware = nets.iter().any(|n| self.design.strength_nets.contains(n))
+            && !matches!(kind, Some(NetResolve::Wand | NetResolve::Wor));
+        let mut drivers: Vec<(LogicVal, (u8, u8))> = Vec::new();
+        // (pull値, 強度, (lo, 幅, 1/0))
+        type Pull = (LogicVal, (u8, u8), (u32, u32, bool));
+        let mut pulls: Vec<Pull> = Vec::new();
+        for n in nets {
+            for d in self.design.net_drivers.get(n).into_iter().flatten() {
+                if let Some(v) = self.driver_vals.get(d) {
+                    drivers.push((v.clone(), self.design.conts[d.0 as usize].strength));
+                }
+            }
+            for &(lo, pw, one, level) in self.design.net_pulls.get(n).into_iter().flatten() {
+                let v = z.insert_bits(lo, pw, &LogicVal::all_bits(pw, one));
+                pulls.push((v, (level, level), (lo, pw, one)));
+            }
+        }
+        if strength_aware {
+            let ds: Vec<(&LogicVal, (u8, u8))> = drivers
+                .iter()
+                .map(|(v, st)| (v, *st))
+                .chain(pulls.iter().map(|(v, st, _)| (v, *st)))
+                .collect();
+            return LogicVal::resolve_strength(w, &ds);
+        }
+        let mut resolved = z;
+        for (v, _) in &drivers {
+            resolved = match kind {
+                Some(NetResolve::Wand) => resolved.resolve_wand(v),
+                Some(NetResolve::Wor) => resolved.resolve_wor(v),
+                _ => resolved.resolve(v),
+            };
+        }
+        for (_, _, (lo, pw, one)) in &pulls {
+            resolved = resolved.pull_z_range(*lo, *pw, *one);
+        }
+        resolved
+    }
+
+    /// `net_id` を含むtran接続成分を再解決して各ネットへ反映する。確実に導通する接続だけで
+    /// 解決した値と、導通しうる接続（導通条件がX/Z）も含めて解決した値がビットで食い違う場合はXにする。
+    fn recompute_tran(&mut self, net_id: NetId) {
+        let maybe_group = self.tran_component(net_id.0, true);
+        let maybe_val = self.resolve_tran_group(&maybe_group);
+        let mut done: Vec<u32> = Vec::new();
+        for &m in &maybe_group {
+            if done.contains(&m) {
+                continue;
+            }
+            let def_group = self.tran_component(m, false);
+            let def_val = self.resolve_tran_group(&def_group);
+            let val = def_val.merge_unknown(&maybe_val);
+            for &n in &def_group {
+                done.push(n);
+                self.commit_net_value(NetId(n), val.clone());
+            }
         }
     }
 
@@ -1101,6 +1229,7 @@ impl Interpreter {
             if let Some(new) = new {
                 if old.as_ref() != Some(&new) {
                     self.trigger_sensitivity(lval, old.as_ref(), &new);
+                    self.on_tran_enable_change(lval);
                 }
             }
             return;

@@ -1,3 +1,4 @@
+pub use crate::design::TranInfo;
 pub use crate::design::{
     AlwaysConstruct, BinOp, ContinuousAssign, EdgeType, Expr, HirModule, InitialConstruct,
     ModuleInstance, NetDecl, ParamOverride, PortConnection, PortDecl, PortDirection, RegDecl,

@@ -59,6 +59,10 @@ pub struct ElaboratedDesign {
     /// 既定(strong)以外の強度のドライバ/pullを持つネット。simはこれらを強度つき解決
     /// （`LogicVal::resolve_strength`）で更新し、それ以外は強度なしの高速パスを使う。
     pub strength_nets: indexmap::IndexSet<u32>,
+    /// 双方向スイッチ（tran/tranif）の一覧。
+    pub tran_switches: Vec<TranSwitch>,
+    /// tranで接続されるネット。simはこれらを接続成分ごとに解決する（`write_multi_driver`）。
+    pub tran_nets: indexmap::IndexSet<u32>,
     /// mem_id.0 → [cont_id] 連続代入のsensitivity逆引きテーブル（cont_idはdesign.contsのインデックス）
     pub mem_sensitivity: IndexMap<u32, Vec<u32>>,
     /// exprs[i] → そのexprがsigned文脈で評価されるか（比較/除算/剰余/算術シフトの符号選択に使用）
@@ -311,4 +315,14 @@ pub struct Scope {
     pub parent: Option<ScopeId>,
     pub name: SmolStr,
     pub module_name: SmolStr,
+}
+
+/// 双方向スイッチ。`a` と `b` は同幅の全体ネット。導通条件は `en` ネット（1bit、導通条件の式を
+/// 連続代入で受ける隠しネット）のbit0で、`invert` なら0で導通（tranif0）。
+#[derive(Debug, Clone)]
+pub struct TranSwitch {
+    pub a: NetId,
+    pub b: NetId,
+    pub en: NetId,
+    pub invert: bool,
 }

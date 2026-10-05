@@ -449,3 +449,12 @@ fn compare_fifo_sync() {
         ],
     );
 }
+
+#[test]
+fn compare_tran_switches() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/tran_switches/dut.v")],
+    );
+}

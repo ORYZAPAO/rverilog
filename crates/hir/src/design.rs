@@ -197,8 +197,17 @@ pub struct ContinuousAssign {
     /// `pullup`/`pulldown` 由来の弱いドライバ。`expr` の定数（1/0）が引く方向を表し、
     /// elabは連続代入ではなくネットのpull指定として扱う。
     pub weak: bool,
+    /// 双方向スイッチ（tran/tranif）。`lval`（全体ネット）と `other` を導通条件 `expr` で接続する。
+    pub tran: Option<TranInfo>,
     /// 駆動強度（`assign (strong1, weak0) ...` 等）。pullup/pulldownでは引く強さ。
     pub strength: DriveStrength,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranInfo {
+    pub other: SmolStr,
+    /// tranif0/rtranif0（enが0で導通）
+    pub invert: bool,
 }
 
 #[derive(Debug, Clone)]
