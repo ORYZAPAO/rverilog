@@ -528,6 +528,19 @@ fn test_reduction_ops() {
 }
 
 #[test]
+fn test_x_propagation() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/x_propagation/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("x_propagation");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_ansi_port_comma_direction() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/ansi_port_comma_direction/dut.v")];

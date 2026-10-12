@@ -305,24 +305,28 @@ impl LogicVal {
     // ── equality / comparison ─────────────────────────────────────────────────
 
     pub fn eq(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
-        }
         let w = self.width().max(rhs.width());
         let n = num_chunks(w);
+        let mut has_unknown = false;
         for i in 0..n {
             let m = chunk_mask(w, i);
-            if (self.get_chunk(i) & m) != (rhs.get_chunk(i) & m) {
+            let la = self.get_chunk(i) & m;
+            let lb = self.get_chunk_b(i) & m;
+            let ra = rhs.get_chunk(i) & m;
+            let rb = rhs.get_chunk_b(i) & m;
+            if ((la ^ ra) & !(lb | rb) & m) != 0 {
                 return LogicVal::ZERO;
             }
+            has_unknown |= (lb | rb) != 0;
         }
-        LogicVal::ONE
+        if has_unknown {
+            LogicVal::X
+        } else {
+            LogicVal::ONE
+        }
     }
 
     pub fn ne(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
-        }
         match self.eq(rhs) {
             LogicVal::ONE => LogicVal::ZERO,
             LogicVal::ZERO => LogicVal::ONE,
@@ -432,10 +436,10 @@ impl LogicVal {
     // ── arithmetic ────────────────────────────────────────────────────────────
 
     pub fn add(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
-        }
         let w = self.width().max(rhs.width());
+        if !self.is_known() || !rhs.is_known() {
+            return LogicVal::x_of_width(w);
+        }
         let n = num_chunks(w);
         let mut a: Vec<u64> = Vec::with_capacity(n);
         let mut carry = 0u64;
@@ -453,10 +457,10 @@ impl LogicVal {
     }
 
     pub fn sub(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
-        }
         let w = self.width().max(rhs.width());
+        if !self.is_known() || !rhs.is_known() {
+            return LogicVal::x_of_width(w);
+        }
         let n = num_chunks(w);
         let mut a: Vec<u64> = Vec::with_capacity(n);
         let mut borrow = 0u64;
@@ -855,10 +859,10 @@ impl LogicVal {
         if self.is_zero() || rhs.is_zero() {
             return LogicVal::ZERO;
         }
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+        if self.is_true() && rhs.is_true() {
+            return LogicVal::ONE;
         }
-        LogicVal::ONE
+        LogicVal::X
     }
 
     pub fn log_or(&self, rhs: &LogicVal) -> LogicVal {
@@ -872,13 +876,13 @@ impl LogicVal {
     }
 
     pub fn log_not(&self) -> LogicVal {
-        if !self.is_known() {
-            return LogicVal::X;
+        if self.is_true() {
+            return LogicVal::ZERO;
         }
         if self.is_zero() {
             LogicVal::ONE
         } else {
-            LogicVal::ZERO
+            LogicVal::X
         }
     }
 
@@ -912,11 +916,11 @@ impl LogicVal {
     // ── shift operators ───────────────────────────────────────────────────────
 
     pub fn shl(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+        let w = self.width();
+        if !rhs.is_known() {
+            return LogicVal::x_of_width(w);
         }
         let shift = rhs.pad_to_width(32) as u32;
-        let w = self.width();
         if shift >= w {
             return Self::from_chunks(w, &[0], &[0]);
         }
@@ -924,6 +928,7 @@ impl LogicVal {
         let chunk_shift = (shift / 64) as usize;
         let bit_shift = shift % 64;
         let mut a = vec![0u64; n];
+        let mut b = vec![0u64; n];
         for (i, value) in a.iter_mut().enumerate().skip(chunk_shift) {
             let src = i - chunk_shift;
             let m = chunk_mask(w, i);
@@ -935,15 +940,26 @@ impl LogicVal {
             };
             *value = (lo | hi) & m;
         }
-        Self::from_chunks(w, &a, &vec![0u64; n])
+        for (i, value) in b.iter_mut().enumerate().skip(chunk_shift) {
+            let src = i - chunk_shift;
+            let m = chunk_mask(w, i);
+            let lo = self.get_chunk_b(src) << bit_shift;
+            let hi = if bit_shift > 0 && src > 0 {
+                self.get_chunk_b(src - 1) >> (64 - bit_shift)
+            } else {
+                0
+            };
+            *value = (lo | hi) & m;
+        }
+        Self::from_chunks(w, &a, &b)
     }
 
     pub fn shr(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+        let w = self.width();
+        if !rhs.is_known() {
+            return LogicVal::x_of_width(w);
         }
         let shift = rhs.pad_to_width(32) as u32;
-        let w = self.width();
         if shift >= w {
             return Self::from_chunks(w, &[0], &[0]);
         }
@@ -951,6 +967,7 @@ impl LogicVal {
         let chunk_shift = (shift / 64) as usize;
         let bit_shift = shift % 64;
         let mut a = vec![0u64; n];
+        let mut b = vec![0u64; n];
         for (i, value) in a.iter_mut().enumerate().take(n - chunk_shift) {
             let src = i + chunk_shift;
             let sm = chunk_mask(w, src);
@@ -963,7 +980,19 @@ impl LogicVal {
             };
             *value = lo | hi;
         }
-        Self::from_chunks(w, &a, &vec![0u64; n])
+        for (i, value) in b.iter_mut().enumerate().take(n - chunk_shift) {
+            let src = i + chunk_shift;
+            let sm = chunk_mask(w, src);
+            let lo = (self.get_chunk_b(src) & sm) >> bit_shift;
+            let hi = if bit_shift > 0 && src + 1 < n {
+                let sm2 = chunk_mask(w, src + 1);
+                (self.get_chunk_b(src + 1) & sm2) << (64 - bit_shift)
+            } else {
+                0
+            };
+            *value = lo | hi;
+        }
+        Self::from_chunks(w, &a, &b)
     }
 
     pub fn ashl(&self, rhs: &LogicVal) -> Self {
@@ -1098,25 +1127,39 @@ impl LogicVal {
     }
 
     pub fn ashr(&self, rhs: &LogicVal) -> LogicVal {
-        if !self.is_known() || !rhs.is_known() {
-            return LogicVal::X;
+        let w = self.width();
+        if !rhs.is_known() {
+            return LogicVal::x_of_width(w);
         }
         let shift = rhs.pad_to_width(32) as u32;
-        let w = self.width();
         let n = num_chunks(w);
-        let sign = self.sign_bit();
-        if sign == 0 {
-            return self.shr(rhs);
-        }
-        // Fill with 1s from MSB
+        let (sign_a, sign_b) = self.bit_ab(w - 1);
         if shift >= w {
-            let fill = top_mask(w);
-            let mut a = vec![u64::MAX; n];
-            *a.last_mut().unwrap() &= fill;
-            return Self::from_chunks(w, &a, &vec![0u64; n]);
+            let a = vec![if sign_a == 1 { u64::MAX } else { 0 }; n];
+            let b = vec![if sign_b == 1 { u64::MAX } else { 0 }; n];
+            return Self::from_chunks(w, &a, &b);
         }
-        let mut result = self.shr(rhs);
-        // OR in sign-extension bits above (w - shift)
+        let chunk_shift = (shift / 64) as usize;
+        let bit_shift = shift % 64;
+        let mut a = vec![0u64; n];
+        let mut b = vec![0u64; n];
+        for i in 0..n - chunk_shift {
+            let src = i + chunk_shift;
+            let sm = chunk_mask(w, src);
+            let lo_a = (self.get_chunk(src) & sm) >> bit_shift;
+            let lo_b = (self.get_chunk_b(src) & sm) >> bit_shift;
+            let (hi_a, hi_b) = if bit_shift > 0 && src + 1 < n {
+                let sm2 = chunk_mask(w, src + 1);
+                (
+                    (self.get_chunk(src + 1) & sm2) << (64 - bit_shift),
+                    (self.get_chunk_b(src + 1) & sm2) << (64 - bit_shift),
+                )
+            } else {
+                (0, 0)
+            };
+            a[i] = lo_a | hi_a;
+            b[i] = lo_b | hi_b;
+        }
         let fill_from = w - shift;
         let fc = (fill_from / 64) as usize;
         let fb = fill_from % 64;
@@ -1131,52 +1174,54 @@ impl LogicVal {
             } else {
                 u64::MAX
             };
-            let cur = result.get_chunk(i);
-            let new_val = (cur | fill_mask) & m;
-            match &mut result {
-                LogicVal::Small { a, .. } => {
-                    if i == 0 {
-                        *a = new_val;
-                    }
-                }
-                LogicVal::Large { a, .. } => {
-                    if let Some(v) = a.get_mut(i) {
-                        *v = new_val;
-                    }
-                }
+            if sign_a == 1 {
+                a[i] |= fill_mask & m;
+            }
+            if sign_b == 1 {
+                b[i] |= fill_mask & m;
             }
         }
-        result
+        Self::from_chunks(w, &a, &b)
     }
 
     // ── reduction operators ───────────────────────────────────────────────────
 
     pub fn reduce_and(&self) -> LogicVal {
-        if !self.is_known() {
-            return LogicVal::X;
-        }
         let n = num_chunks(self.width());
+        let mut has_unknown = false;
         for i in 0..n {
             let m = chunk_mask(self.width(), i);
-            if self.get_chunk(i) & m != m {
+            let a = self.get_chunk(i) & m;
+            let b = self.get_chunk_b(i) & m;
+            if (!a & !b & m) != 0 {
                 return LogicVal::ZERO;
             }
+            has_unknown |= b != 0;
         }
-        LogicVal::ONE
+        if has_unknown {
+            LogicVal::X
+        } else {
+            LogicVal::ONE
+        }
     }
 
     pub fn reduce_or(&self) -> LogicVal {
-        if !self.is_known() {
-            return LogicVal::X;
-        }
         let n = num_chunks(self.width());
+        let mut has_unknown = false;
         for i in 0..n {
             let m = chunk_mask(self.width(), i);
-            if self.get_chunk(i) & m != 0 {
+            let a = self.get_chunk(i) & m;
+            let b = self.get_chunk_b(i) & m;
+            if (a & !b) != 0 {
                 return LogicVal::ONE;
             }
+            has_unknown |= b != 0;
         }
-        LogicVal::ZERO
+        if has_unknown {
+            LogicVal::X
+        } else {
+            LogicVal::ZERO
+        }
     }
 
     pub fn reduce_xor(&self) -> LogicVal {
@@ -1598,6 +1643,73 @@ mod tests {
         let c = LogicVal::from_chunks(128, &[0xDEAD, 0xCAFE], &[0, 0]);
         assert_eq!(a.eq(&b), LogicVal::ONE);
         assert_eq!(a.eq(&c), LogicVal::ZERO);
+    }
+
+    #[test]
+    fn test_x_propagation_ieee_rules() {
+        let x = LogicVal::new(4, 0b1100, 0b0100);
+        let z = LogicVal::new(4, 0b0000, 0b0001);
+
+        // 既知ビットの不一致はX/Zより優先して比較結果を確定する。
+        assert_eq!(x.eq(&LogicVal::new(4, 0b0100, 0)), LogicVal::ZERO);
+        assert_eq!(x.ne(&LogicVal::new(4, 0b0100, 0)), LogicVal::ONE);
+        assert_eq!(x.eq(&LogicVal::new(4, 0b1100, 0)), LogicVal::X);
+
+        // 算術の不定結果は演算幅全体をXにする。
+        assert_eq!(x.add(&LogicVal::new(8, 1, 0)), LogicVal::x_of_width(8));
+        assert_eq!(x.sub(&LogicVal::new(8, 1, 0)), LogicVal::x_of_width(8));
+
+        // シフト量が既知なら、被シフト値のX/Zはビット単位で移動する。
+        let value = LogicVal::new(4, 0b1000, 0b0011); // 1, 0, X, Z
+        let one = LogicVal::new(4, 1, 0);
+        assert_eq!(value.shl(&one), LogicVal::new(4, 0b0000, 0b0110));
+        assert_eq!(value.shr(&one), LogicVal::new(4, 0b0100, 0b0001));
+        assert_eq!(value.ashl(&one), LogicVal::new(4, 0b0000, 0b0110));
+        assert_eq!(value.ashr(&one), LogicVal::new(4, 0b1100, 0b0001));
+        assert_eq!(value.shl(&z), LogicVal::x_of_width(4));
+        assert_eq!(
+            LogicVal::new(4, 0b0100, 0b1000).ashr(&one),
+            LogicVal::new(4, 0b0010, 0b1100)
+        );
+        assert_eq!(
+            LogicVal::new(4, 0b0100, 0b1000).ashr(&one).bit_ab(3),
+            (0, 1)
+        );
+
+        assert_eq!(x.log_not(), LogicVal::ZERO);
+        assert_eq!(LogicVal::new(4, 0, 0b0100).log_not(), LogicVal::X);
+        assert_eq!(x.log_and(&LogicVal::ONE), LogicVal::ONE);
+        assert_eq!(
+            LogicVal::new(4, 0, 0b0100).log_and(&LogicVal::ONE),
+            LogicVal::X
+        );
+
+        assert_eq!(
+            LogicVal::new(4, 0b0011, 0b0100).reduce_and(),
+            LogicVal::ZERO
+        );
+        assert_eq!(LogicVal::new(4, 0b1000, 0b0100).reduce_or(), LogicVal::ONE);
+        assert_eq!(
+            LogicVal::new(4, 0b0011, 0b0100).reduce_nand(),
+            LogicVal::ONE
+        );
+        assert_eq!(
+            LogicVal::new(4, 0b1000, 0b0100).reduce_nor(),
+            LogicVal::ZERO
+        );
+    }
+
+    #[test]
+    fn test_x_propagation_large_values() {
+        let x = LogicVal::from_chunks(128, &[0, 0], &[0, 1]);
+        assert_eq!(x.add(&LogicVal::new(1, 1, 0)), LogicVal::x_of_width(128));
+        assert_eq!(x.shl(&LogicVal::new(1, 1, 0)).bit_ab(65), (0, 1));
+        assert_eq!(x.shr(&LogicVal::new(1, 1, 0)).bit_ab(63), (0, 1));
+        assert_eq!(x.reduce_and(), LogicVal::ZERO);
+        assert_eq!(
+            LogicVal::from_chunks(128, &[0, 1], &[0, 0]).reduce_or(),
+            LogicVal::ONE
+        );
     }
 
     #[test]

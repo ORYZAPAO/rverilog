@@ -3453,3 +3453,23 @@ fmt/clippy警告なし、`cargo test --workspace`全通過。
 ### Next
 
 - A8の残なし
+
+## 2026-10-12 A6: X伝搬のIEEE 1364準拠化
+
+ブランチ`feat/x-propagation`。実装はCodex、レビューと独立検証は私。
+
+### What was done
+
+- iverilog実測でIEEEから外れていた箇所だけを修正（`<`系・乗除算・`||`・`===`・`?:`・ビット演算は一致済みのため対象外）
+- `logicval.rs`: `eq`/`ne`は既知ビットの不一致で0/1を確定。`add`/`sub`とシフト量X/Zのシフトは`x_of_width`で演算幅全体をX（従来は1bit Xが代入でゼロ拡張され上位が0になっていた）
+- シフト: 既知のシフト量では被シフト値のX/Zをビット単位で移動、`>>>`はMSBがX/Zなら埋めもX/Z
+- `!`/`&&`は既知の1を含む値を真として確定、リダクション`&`/`|`/`~&`/`~|`は既知の0/1で確定（`^`系は据え置き）
+- Small/Large両対応。テスト: 単体2件、`x_propagation`（iverilogとbit-exact）
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32_smoke含む）、`tb_counter4`・`tb_fifo_sync` exit 0
+
+### Next
+
+- 次の候補: C節（`$stop`/`$strobe`等）、F節（`%s`）

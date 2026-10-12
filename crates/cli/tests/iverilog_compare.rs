@@ -385,6 +385,15 @@ fn compare_reduction_ops() {
 }
 
 #[test]
+fn compare_x_propagation() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/x_propagation/dut.v")],
+    );
+}
+
+#[test]
 fn compare_ansi_port_comma_direction() {
     let root = workspace_root();
     compare_case(

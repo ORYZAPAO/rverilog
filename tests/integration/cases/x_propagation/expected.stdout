@@ -1,0 +1,13 @@
+eq=0 ne=1 eqx=x
+add=xxxxxxxx
+sub=xxxxxxxx
+shl=0xz0 shr=010x ashl=0xz0
+ashr=110x
+ashr_x=xx10
+ashr_z=zz10
+shift_x=xxxx
+not=0 not_x=x and=1 and_x=x
+reduce=0110
+wide_add=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx wide_shr=0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+wide_and=0
+$finish at time 0
