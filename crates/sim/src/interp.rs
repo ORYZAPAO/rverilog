@@ -50,6 +50,8 @@ pub struct Interpreter {
     active: Vec<ProcState>,
     future: BinaryHeap<Reverse<(u64, u32)>>,
     future_procs: HashMap<u32, ProcState>,
+    /// 未来時刻に反映する連続代入イベント（seq → (cont_id, value, generation)）。
+    future_conts: HashMap<u32, (u32, LogicVal, u64)>,
     event_waiters: Vec<(Sensitivity, ProcState)>,
     nba_queue: Vec<(LValue, LogicVal, bool)>,
     finished: bool,
@@ -74,6 +76,8 @@ pub struct Interpreter {
     cont_queued: Vec<bool>,
     /// 多重ドライバネットの各連続代入の現在のドライバ値（cont_id → ネット幅の値、駆動外はZ）。
     driver_vals: HashMap<(u32, u32), LogicVal>,
+    /// 各遅延連続代入の世代。新しい値または取消ごとに増やし、古い予約を無効化する。
+    cont_gens: Vec<u64>,
 }
 
 impl Interpreter {
@@ -108,6 +112,7 @@ impl Interpreter {
             active: Vec::new(),
             future: BinaryHeap::new(),
             future_procs: HashMap::new(),
+            future_conts: HashMap::new(),
             event_waiters: Vec::new(),
             nba_queue: Vec::new(),
             finished: false,
@@ -124,6 +129,7 @@ impl Interpreter {
             cont_dirty: VecDeque::new(),
             cont_queued: vec![false; cont_len],
             driver_vals: HashMap::new(),
+            cont_gens: vec![0; cont_len],
         }
     }
 
@@ -201,6 +207,7 @@ impl Interpreter {
                     self.active.push(p);
                     moved_inactive = true;
                 }
+                self.apply_future_cont(seq);
             }
             if moved_inactive {
                 continue 'outer;
@@ -238,6 +245,7 @@ impl Interpreter {
             if let Some(p) = self.future_procs.remove(&seq) {
                 self.active.push(p);
             }
+            self.apply_future_cont(seq);
             // Drain same-time events
             while let Some(&Reverse((t2, _))) = self.future.peek() {
                 if t2 != self.now {
@@ -247,6 +255,7 @@ impl Interpreter {
                 if let Some(p) = self.future_procs.remove(&s2) {
                     self.active.push(p);
                 }
+                self.apply_future_cont(s2);
             }
         }
         self.vcd_finish();
@@ -1013,6 +1022,25 @@ impl Interpreter {
         }
     }
 
+    /// 解決ネット上の1ドライバ分の値を、ネット全幅の値へ正規化する。
+    fn multi_driver_value(
+        &self,
+        net_id: NetId,
+        lval: &LValue,
+        val: LogicVal,
+        signed: bool,
+    ) -> LogicVal {
+        let w = self.design.get_net(net_id).width;
+        let z = LogicVal::z_of_width(w);
+        match lval {
+            LValue::BitSelect(_, bit) => z.insert_bits(*bit, 1, &val),
+            LValue::PartSelect(_, hi, lo) => z.insert_bits(*lo, hi - lo + 1, &val),
+            _ if val.width() == w => val,
+            _ if signed => val.extend_sign(w),
+            _ => val.resize(w),
+        }
+    }
+
     /// 解決対象ネットへの連続代入: ドライバ `(cont_id, part_idx)` の値を更新し、全ドライバを
     /// ネット型の規則（wire: Z中立・不一致X、wand/wor: 支配値）で解決する。続けてpull指定でZを
     /// 0/1へ置き換え、trireg は全ドライバZのビットに直前の値を保持して、ネット値を更新する。
@@ -1026,13 +1054,7 @@ impl Interpreter {
     ) {
         let w = self.design.get_net(net_id).width;
         let z = LogicVal::z_of_width(w);
-        let drv = match lval {
-            LValue::BitSelect(_, bit) => z.insert_bits(*bit, 1, &val),
-            LValue::PartSelect(_, hi, lo) => z.insert_bits(*lo, hi - lo + 1, &val),
-            _ if val.width() == w => val,
-            _ if signed => val.extend_sign(w),
-            _ => val.resize(w),
-        };
+        let drv = self.multi_driver_value(net_id, lval, val, signed);
         self.driver_vals.insert(driver, drv);
         if self.design.tran_nets.contains(&net_id.0) {
             self.recompute_tran(net_id);
@@ -1465,8 +1487,60 @@ impl Interpreter {
             let cont = self.design.conts[cont_id as usize].clone();
             let signed = self.design.expr_signed[cont.expr.0 as usize];
             let val = self.eval_expr(cont.expr);
-            self.write_cont(cont_id, &cont.lval, val, signed);
+            if cont.delay == 0 {
+                self.write_cont(cont_id, &cont.lval, val, signed);
+                continue;
+            }
+
+            let unchanged = self.cont_driver_matches(cont_id, &cont.lval, &val, signed);
+            self.cont_gens[cont_id as usize] += 1;
+            let generation = self.cont_gens[cont_id as usize];
+            if unchanged {
+                // 現在の駆動値へ戻ったので、以前に予約した変化は慣性遅延として吸収する。
+                continue;
+            }
+            self.seq += 1;
+            self.future.push(Reverse((self.now + cont.delay, self.seq)));
+            self.future_conts
+                .insert(self.seq, (cont_id, val, generation));
         }
+    }
+
+    /// 遅延連続代入の新しい値が現在の駆動値と同じか調べる。解決ネットでは各ドライバ値を使い、
+    /// 単一ドライバではlvalueの現在値を使う。
+    fn cont_driver_matches(
+        &mut self,
+        cont_id: u32,
+        lval: &LValue,
+        val: &LogicVal,
+        signed: bool,
+    ) -> bool {
+        let parts = lval.flatten_parts();
+        if parts.len() == 1 {
+            if let Some(net_id) = self.multi_driven_target(parts[0]) {
+                let candidate = self.multi_driver_value(net_id, parts[0], val.clone(), signed);
+                let current = self
+                    .driver_vals
+                    .get(&(cont_id, 0))
+                    .cloned()
+                    .unwrap_or_else(|| LogicVal::z_of_width(self.design.get_net(net_id).width));
+                return current == candidate;
+            }
+        }
+        self.get_lval_val(lval).as_ref() == Some(val)
+    }
+
+    /// 予約された遅延連続代入を、世代が一致するときだけ反映する。
+    fn apply_future_cont(&mut self, seq: u32) {
+        let Some((cont_id, val, generation)) = self.future_conts.remove(&seq) else {
+            return;
+        };
+        if self.cont_gens[cont_id as usize] != generation {
+            return;
+        }
+        let cont = self.design.conts[cont_id as usize].clone();
+        let signed = self.design.expr_signed[cont.expr.0 as usize];
+        self.write_cont(cont_id, &cont.lval, val, signed);
     }
 
     /// monitorリージョン: active/inactive/NBAが完全収束した後、時刻を進める前に

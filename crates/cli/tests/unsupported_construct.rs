@@ -54,6 +54,15 @@ fn test_specify_block_is_unsupported() {
 }
 
 #[test]
+fn test_multi_value_continuous_assign_delay_is_unsupported() {
+    assert_unsupported(
+        "continuous_assign_delay3",
+        "module top; wire a, y; assign #(1, 2) y = a; endmodule",
+        "continuous assignment delay form",
+    );
+}
+
+#[test]
 fn test_udp_instantiation_is_unsupported() {
     let result = parse_source(
         "udp",
