@@ -1,0 +1,6 @@
+6 a=0 b=0 en=0 delayed=0 declared=0 zero=0 bus=z
+10 a=0 b=0 en=0 delayed=0 declared=0 zero=0 bus=z
+17 a=1 b=1 en=1 delayed=1 declared=1 zero=1 bus=1
+19 a=1 b=0 en=0 delayed=1 declared=1 zero=1 bus=1
+22 a=1 b=0 en=0 delayed=1 declared=0 zero=1 bus=z
+$finish at time 22

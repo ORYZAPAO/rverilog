@@ -554,6 +554,19 @@ fn test_net_decl_assignment() {
 }
 
 #[test]
+fn test_assign_delay() {
+    let root = workspace_root();
+    let files = vec![root.join("tests/integration/cases/assign_delay/dut.v")];
+    let got = run_sim("dut", &files);
+    let expected = expected_stdout("assign_delay");
+    assert_eq!(
+        got, expected,
+        "\n--- expected ---\n{}\n--- got ---\n{}",
+        expected, got
+    );
+}
+
+#[test]
 fn test_else_if_chain() {
     let root = workspace_root();
     let files = vec![root.join("tests/integration/cases/else_if_chain/dut.v")];

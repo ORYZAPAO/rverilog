@@ -198,6 +198,8 @@ pub struct MemDecl {
 pub struct ContinuousAssign {
     pub lval: LValue,
     pub expr: Expr,
+    /// 連続代入の慣性遅延。単位はシミュレーション時刻のtick。
+    pub delay: u64,
     /// `pullup`/`pulldown` 由来の弱いドライバ。`expr` の定数（1/0）が引く方向を表し、
     /// elabは連続代入ではなくネットのpull指定として扱う。
     pub weak: bool,

@@ -1422,6 +1422,7 @@ fn lower_net_decl(
             _ => STRENGTH_STRONG,
         };
         let charge_strength = charge_strength(&nt.nodes.1);
+        let delay = lower_delay3(tree, nt.nodes.4.as_ref())?;
         for assignment in nt.nodes.5.nodes.0.contents() {
             if let Some(name) = get_id(tree, RefNode::NetIdentifier(&assignment.nodes.0)) {
                 nets.push(NetDecl {
@@ -1438,6 +1439,7 @@ fn lower_net_decl(
                     assigns.push(ContinuousAssign {
                         lval: LValue::Net(name),
                         expr: lower_expression(tree, expr)?,
+                        delay,
                         weak: false,
                         tran: None,
                         strength: decl_strength,
@@ -1658,6 +1660,7 @@ fn lower_continuous_assign(
         // ListOfNetAssignments: List<Symbol, NetAssignment>
         // NetAssignment: (NetLvalue, Symbol, Expression)
         let strength = opt_drive_strength(&n.nodes.1);
+        let delay = lower_delay3(tree, n.nodes.2.as_ref())?;
         for na_node in unwrap_all_net_assignments(RefNode::ContinuousAssignNet(n)) {
             if let RefNode::NetAssignment(na) = na_node {
                 let lval = lower_net_lvalue(tree, RefNode::NetLvalue(&na.nodes.0))?;
@@ -1665,6 +1668,7 @@ fn lower_continuous_assign(
                 out.push(ContinuousAssign {
                     lval,
                     expr,
+                    delay,
                     weak: false,
                     tran: None,
                     strength,
@@ -1673,6 +1677,26 @@ fn lower_continuous_assign(
         }
     }
     Ok(out)
+}
+
+/// 連続代入とネット宣言の遅延は、単一の符号なし整数リテラルだけを受け付ける。
+/// rise/fall/turnoff、実数、パラメータ参照を黙って無視しないよう、他の形式は明示的に拒否する。
+fn lower_delay3(
+    tree: &SyntaxTree,
+    delay: Option<&sv_parser::Delay3>,
+) -> Result<u64, FrontendError> {
+    let Some(delay) = delay else {
+        return Ok(0);
+    };
+    let sv_parser::Delay3::Single(single) = delay else {
+        return Err(unsupported("continuous assignment delay form"));
+    };
+    let sv_parser::DelayValue::UnsignedNumber(number) = &single.nodes.1 else {
+        return Err(unsupported("continuous assignment delay value"));
+    };
+    tree.get_str_trim(number)
+        .and_then(|text| text.parse::<u64>().ok())
+        .ok_or_else(|| unsupported("continuous assignment delay integer"))
 }
 
 // ── gate primitives (and/or/nand/nor/xor/xnor/buf/not) ─────────────────────────
@@ -1689,6 +1713,7 @@ fn switch_assign(lval: LValue, data: Expr, en: Expr, active_low: bool) -> Contin
     ContinuousAssign {
         lval,
         expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
+        delay: 0,
         weak: false,
         tran: None,
         strength: STRENGTH_STRONG,
@@ -1715,6 +1740,7 @@ fn tran_assign(
     Ok(ContinuousAssign {
         lval: lval.clone(),
         expr: en.unwrap_or(Expr::Const(LogicVal::ONE)),
+        delay: 0,
         weak: false,
         tran: Some(TranInfo {
             other: other.clone(),
@@ -1767,6 +1793,7 @@ fn lower_gate_inst(
                 out.push(ContinuousAssign {
                     lval,
                     expr,
+                    delay: 0,
                     weak: false,
                     tran: None,
                     strength,
@@ -1796,6 +1823,7 @@ fn lower_gate_inst(
                         out.push(ContinuousAssign {
                             lval,
                             expr: in_expr.clone(),
+                            delay: 0,
                             weak: false,
                             tran: None,
                             strength,
@@ -1828,6 +1856,7 @@ fn lower_gate_inst(
                 out.push(ContinuousAssign {
                     lval,
                     expr: Expr::Cond(Box::new(en), Box::new(t), Box::new(f)),
+                    delay: 0,
                     weak: false,
                     tran: None,
                     strength,
@@ -1852,6 +1881,7 @@ fn lower_gate_inst(
                 out.push(ContinuousAssign {
                     lval,
                     expr: Expr::Const(lv(up as u64, 1)),
+                    delay: 0,
                     weak: true,
                     tran: None,
                     strength: pull_strength(gi),
