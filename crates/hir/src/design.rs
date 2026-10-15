@@ -38,6 +38,7 @@ pub enum SysFuncKind {
     STime,
     Signed,
     Unsigned,
+    Fopen,
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +410,18 @@ pub enum SysTask {
     WriteB,
     WriteH,
     WriteO,
+    FDisplay,
+    FWrite,
+    FDisplayB,
+    FDisplayH,
+    FDisplayO,
+    FWriteB,
+    FWriteH,
+    FWriteO,
+    FStrobe,
+    FMonitor,
+    FClose,
+    FFlush,
     Monitor,
     MonitorOn,
     MonitorOff,

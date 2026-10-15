@@ -135,7 +135,7 @@ impl<'a> ElabCtx<'a> {
             | Expr::Repeat(..)
             | Expr::MemRead(..) => false,
             Expr::StringLit(_) => false,
-            Expr::Random(_) | Expr::Time | Expr::STime => false,
+            Expr::Random(_) | Expr::Time | Expr::STime | Expr::Fopen(_, _) => false,
             Expr::CallResult(_, ret_net) => self.nets[ret_net.0 as usize].is_signed,
             Expr::Bin(op, l, r) => {
                 let ls = self.expr_signed[l.0 as usize];
@@ -1286,6 +1286,19 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
         }
         HirExpr::SysFunc(SysFuncKind::Time, _) => Expr::Time,
         HirExpr::SysFunc(SysFuncKind::STime, _) => Expr::STime,
+        HirExpr::SysFunc(SysFuncKind::Fopen, args) => {
+            if !(1..=2).contains(&args.len())
+                || !args.iter().all(|a| matches!(a, HirExpr::StringLit(_)))
+            {
+                return Err(ElabError::UnsupportedConstruct(
+                    "$fopen requires one or two string literal arguments".into(),
+                ));
+            }
+            Expr::Fopen(
+                lower_expr(ctx, scope, &args[0])?,
+                args.get(1).map(|a| lower_expr(ctx, scope, a)).transpose()?,
+            )
+        }
         // $signed/$unsigned: inner のトップ Expr を複製し signedness を明示して再登録する
         // （MIR に cast ノードは追加しない。幅は inner と同じ = self-determined）
         HirExpr::SysFunc(kind @ (SysFuncKind::Signed | SysFuncKind::Unsigned), args) => {
@@ -1753,6 +1766,7 @@ fn collect_sensitivity_expr(
         }
         Expr::Random(Some(index)) => collect_sensitivity_expr(ctx, *index, nets, mems),
         Expr::Random(None) => true,
+        Expr::Fopen(_, _) => true,
         // 関数呼び出しは、lowering済みの引数セットアップ文と関数本体を辿る。
         // 返り値ネット自体は呼び出し内で書かれる左辺なので感度に含めない。
         Expr::CallResult(stmts, _) => stmts
@@ -1809,7 +1823,7 @@ fn self_width(ctx: &ElabCtx, id: ExprId) -> u32 {
         Expr::MemRead(m, _) => ctx.memories[m.0 as usize].elem_width,
         Expr::CallResult(_, n) => ctx.nets[n.0 as usize].width,
         Expr::Empty => 0,
-        Expr::Random(_) | Expr::STime => 32,
+        Expr::Random(_) | Expr::STime | Expr::Fopen(_, _) => 32,
         Expr::Time => 64,
     }
 }
@@ -2140,6 +2154,18 @@ fn lower_systask(t: &HirSysTask) -> SysTask {
         HirSysTask::WriteB => SysTask::WriteB,
         HirSysTask::WriteH => SysTask::WriteH,
         HirSysTask::WriteO => SysTask::WriteO,
+        HirSysTask::FDisplay => SysTask::FDisplay,
+        HirSysTask::FWrite => SysTask::FWrite,
+        HirSysTask::FDisplayB => SysTask::FDisplayB,
+        HirSysTask::FDisplayH => SysTask::FDisplayH,
+        HirSysTask::FDisplayO => SysTask::FDisplayO,
+        HirSysTask::FWriteB => SysTask::FWriteB,
+        HirSysTask::FWriteH => SysTask::FWriteH,
+        HirSysTask::FWriteO => SysTask::FWriteO,
+        HirSysTask::FStrobe => SysTask::FStrobe,
+        HirSysTask::FMonitor => SysTask::FMonitor,
+        HirSysTask::FClose => SysTask::FClose,
+        HirSysTask::FFlush => SysTask::FFlush,
         HirSysTask::Monitor => SysTask::Monitor,
         HirSysTask::MonitorOn => SysTask::MonitorOn,
         HirSysTask::MonitorOff => SysTask::MonitorOff,

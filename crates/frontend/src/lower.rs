@@ -2454,6 +2454,18 @@ fn lower_system_task(
         "$writeb" => SysTask::WriteB,
         "$writeh" => SysTask::WriteH,
         "$writeo" => SysTask::WriteO,
+        "$fdisplay" => SysTask::FDisplay,
+        "$fwrite" => SysTask::FWrite,
+        "$fdisplayb" => SysTask::FDisplayB,
+        "$fdisplayh" => SysTask::FDisplayH,
+        "$fdisplayo" => SysTask::FDisplayO,
+        "$fwriteb" => SysTask::FWriteB,
+        "$fwriteh" => SysTask::FWriteH,
+        "$fwriteo" => SysTask::FWriteO,
+        "$fstrobe" => SysTask::FStrobe,
+        "$fmonitor" => SysTask::FMonitor,
+        "$fclose" => SysTask::FClose,
+        "$fflush" => SysTask::FFlush,
         "$monitor" => SysTask::Monitor,
         "$monitoron" => SysTask::MonitorOn,
         "$monitoroff" => SysTask::MonitorOff,
@@ -2888,6 +2900,15 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
                     }
                     "$time" => Ok(Expr::SysFunc(SysFuncKind::Time, Vec::new())),
                     "$stime" => Ok(Expr::SysFunc(SysFuncKind::STime, Vec::new())),
+                    "$fopen" => {
+                        let args = collect_syscall_args(tree, sys)?;
+                        if !(1..=2).contains(&args.len()) {
+                            return Err(FrontendError::ParseError(
+                                "$fopen requires 1 or 2 arguments".into(),
+                            ));
+                        }
+                        Ok(Expr::SysFunc(SysFuncKind::Fopen, args))
+                    }
                     n => Err(unsupported(&format!("system function {} in expression", n))),
                 }
             }

@@ -535,3 +535,12 @@ fn compare_monitor_onoff() {
         &[root.join("tests/integration/cases/monitor_onoff/dut.v")],
     );
 }
+
+#[test]
+fn compare_fileio_stdout() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/fileio_stdout/dut.v")],
+    );
+}

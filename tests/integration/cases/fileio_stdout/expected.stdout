@@ -1,0 +1,5 @@
+display
+fdisplay
+write-display
+strobe 0
+$finish at time 2

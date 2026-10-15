@@ -490,13 +490,14 @@ frontend lowering 段でサブセット外として弾かれる・無言スキ�
 | `interface`/`modport`/`class`/`package`/`import` | ❌ 非対応 | Context 節で明示的に対象外 |
 | assertion（`assert`/`property`/`sequence`） | ❌ 非対応 | 同上 |
 | `unique`/`priority` case、`final` block | ❌ 非対応 | 分岐なし |
-| `$signed`/`$unsigned`/`$stop`/`$strobe`/ファイル I/O | △ 一部対応 | `$signed`/`$unsigned`/`$stop`/`$strobe`は対応済み。ファイル I/O は未対応 |
+| `$signed`/`$unsigned`/`$stop`/`$strobe`/ファイル I/O | △ 一部対応 | `$fopen`（書込み）、`$fclose`/`$fflush`、`$fdisplay`/`$fwrite`、`$fstrobe`/`$fmonitor`は対応済み。読み込み系は未対応 |
 
 実装済みシステムタスクは `SysTask` 列挙 (`crates/mir/src/ir.rs`) と
 `crates/sim/src/interp.rs::exec_syscall` の実装ベースで
 `$display`/`$write`/`$displayb`/`$displayh`/`$displayo`/`$writeb`/`$writeh`/`$writeo`/
 `$monitor`/`$monitoron`/`$monitoroff`/`$finish`/`$stop`/`$strobe`/`$time`/`$stime`/
-`$dumpfile`/`$dumpvars`/`$readmemh`/`$readmemb`/`$random`/`$clog2`（elaboration 時定数畳込みのみ）
+`$dumpfile`/`$dumpvars`/`$readmemh`/`$readmemb`/`$random`/`$clog2`（elaboration 時定数畳込みのみ）/
+`$fopen`/`$fclose`/`$fflush`/`$fdisplay`/`$fwrite`/`$fstrobe`/`$fmonitor`
 の11個のみ。
 
 ### Verilog-2001 サブセットとしての対応状況（本来の評価軸）
