@@ -503,6 +503,7 @@ fn elab_assign(
     ctx.conts.push(ContAssign {
         lval,
         expr: expr_id,
+        delay: assign.delay,
         strength: assign.strength,
     });
     Ok(())
@@ -550,6 +551,7 @@ fn elab_tran(
     ctx.conts.push(ContAssign {
         lval: LValue::Net(en),
         expr: expr_id,
+        delay: 0,
         strength: assign.strength,
     });
     ctx.tran_switches.push(TranSwitch {
@@ -929,6 +931,7 @@ fn elab_module(
                             ctx.conts.push(ContAssign {
                                 lval: parent_lval,
                                 expr: ce,
+                                delay: 0,
                                 strength: STRENGTH_STRONG,
                             });
                         }
@@ -938,6 +941,7 @@ fn elab_module(
                         ctx.conts.push(ContAssign {
                             lval: LValue::Net(child_id),
                             expr: parent_expr_id,
+                            delay: 0,
                             strength: STRENGTH_STRONG,
                         });
                     }
@@ -1109,6 +1113,7 @@ fn elab_generate_items(
                             ctx.conts.push(ContAssign {
                                 lval: parent_lval,
                                 expr: ce,
+                                delay: 0,
                                 strength: STRENGTH_STRONG,
                             });
                         }
@@ -1117,6 +1122,7 @@ fn elab_generate_items(
                         ctx.conts.push(ContAssign {
                             lval: LValue::Net(child_id),
                             expr: parent_expr_id,
+                            delay: 0,
                             strength: STRENGTH_STRONG,
                         });
                     }

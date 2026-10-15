@@ -183,6 +183,8 @@ pub const STRENGTH_MEDIUM: u8 = 2;
 pub struct ContAssign {
     pub lval: LValue,
     pub expr: ExprId,
+    /// 連続代入の慣性遅延。単位はシミュレーション時刻のtick。
+    pub delay: u64,
     /// 駆動強度（0側, 1側）。supply=7, strong=6, pull=5, weak=3, highz=0。既定は(6, 6)。
     pub strength: DriveStrength,
 }

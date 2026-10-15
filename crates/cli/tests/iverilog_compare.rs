@@ -412,6 +412,15 @@ fn compare_net_decl_assignment() {
 }
 
 #[test]
+fn compare_assign_delay() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/assign_delay/dut.v")],
+    );
+}
+
+#[test]
 fn compare_else_if_chain() {
     let root = workspace_root();
     compare_case(

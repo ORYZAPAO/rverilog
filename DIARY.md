@@ -3473,3 +3473,32 @@ fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32_smoke含�
 ### Next
 
 - 次の候補: C節（`$stop`/`$strobe`等）、F節（`%s`）
+
+## 2026-10-12 A9: 連続代入の遅延(慣性遅延)
+
+ブランチ`feat/assign-delay`。実装はCodex、レビューと独立検証は私。
+
+### What was done
+
+- frontend: `lower_delay3`で`assign #N`/`wire #N y = expr;`の単一整数遅延を読み、`#(r,f[,t])`・実数・パラメータ参照は`UnsupportedConstruct`
+- HIR/MIR: `ContinuousAssign`/`ContAssign`に`delay: u64`（ポート接続・tran・ゲートは0）
+- sim: delay>0のcontは`eval_conts`で現在のドライバ値と比較し、同値なら保留取消、異なれば世代を進めて`future_conts`に予約。時刻到達で世代一致のみ`write_cont`（慣性遅延）
+- テスト: `assign_delay`（iverilog bit-exact）、`#(1,2)`の負パステスト
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過、`counter4`・`fifo_sync` exit 0
+
+### Next
+
+- 残課題: ゲート遅延、rise/fall/turnoff、net遅延の完全仕様
+
+## 2026-10-15 PR #59 コンフリクト解消
+
+### What was done
+
+- `feat/x-propagation`へ`origin/master`をマージ。競合はDIARY.mdのみ（A6とA9の追記が衝突）で、両エントリを残して解消。Rustコードは自動マージ。
+
+### 検証
+
+fmt/clippy警告なし、`cargo test --workspace`全通過。
