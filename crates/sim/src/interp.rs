@@ -2,6 +2,8 @@ use rverilog_mir::*;
 use rverilog_vcd::VcdWriter;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 // Execution frame: (stmt_list, next_index, block_id of NamedBlock this frame represents, for `disable`)
@@ -60,6 +62,10 @@ pub struct Interpreter {
     vcd_path: Option<PathBuf>, // $dumpfileで設定
     vcd_active: bool,          // $dumpvarsで有効化
     output_buf: String,
+    /// モード付き`$fopen`が返すファイル記述子の出力先。
+    files: HashMap<u32, BufWriter<File>>,
+    /// モード無し`$fopen`が返すMCDビットに対応する出力先。
+    mcd_files: HashMap<u32, BufWriter<File>>,
     fork_seq: u32,
     /// fork ID → 未完了の分岐数
     fork_remaining: HashMap<u32, u32>,
@@ -75,7 +81,10 @@ pub struct Interpreter {
     /// 前回monitorが印字した際の監視対象値スナップショット（`args[1..]`の評価結果）。
     monitor_last: Option<Vec<LogicVal>>,
     /// `$strobe`は同一時刻の更新が収束した後に印字する。
-    strobe_queue: Vec<Vec<ExprId>>,
+    strobe_queue: Vec<(Option<ExprId>, Vec<ExprId>)>,
+    /// `$fmonitor` は `$monitor` と独立した一つの登録だけを持つ。
+    fmonitor_args: Option<(ExprId, Vec<ExprId>)>,
+    fmonitor_last: Option<Vec<LogicVal>>,
     cont_dirty: VecDeque<u32>,
     /// cont_dirtyへの重複enqueueを防ぐビットセット。
     cont_queued: Vec<bool>,
@@ -125,6 +134,8 @@ impl Interpreter {
             vcd_path: None,
             vcd_active: false,
             output_buf: String::new(),
+            files: HashMap::new(),
+            mcd_files: HashMap::new(),
             fork_seq: 0,
             fork_remaining: HashMap::new(),
             fork_waiters: HashMap::new(),
@@ -133,6 +144,8 @@ impl Interpreter {
             monitor_enabled: true,
             monitor_last: None,
             strobe_queue: Vec::new(),
+            fmonitor_args: None,
+            fmonitor_last: None,
             cont_dirty: VecDeque::new(),
             cont_queued: vec![false; cont_len],
             driver_vals: HashMap::new(),
@@ -268,6 +281,7 @@ impl Interpreter {
             }
         }
         self.vcd_finish();
+        self.flush_files();
     }
 
     fn exec_proc(&mut self, mut state: ProcState) {
@@ -511,14 +525,11 @@ impl Interpreter {
         match task {
             SysTask::Display => {
                 let s = self.format_args(args);
-                println!("{}", s);
-                self.output_buf.push_str(&s);
-                self.output_buf.push('\n');
+                self.emit_stdout(&s, true);
             }
             SysTask::Write => {
                 let s = self.format_args(args);
-                print!("{}", s);
-                self.output_buf.push_str(&s);
+                self.emit_stdout(&s, false);
             }
             SysTask::DisplayB => self.print_display(args, Some('b')),
             SysTask::DisplayH => self.print_display(args, Some('h')),
@@ -526,6 +537,14 @@ impl Interpreter {
             SysTask::WriteB => self.print_write(args, Some('b')),
             SysTask::WriteH => self.print_write(args, Some('h')),
             SysTask::WriteO => self.print_write(args, Some('o')),
+            SysTask::FDisplay => self.print_file(args, None, true, "$fdisplay"),
+            SysTask::FWrite => self.print_file(args, None, false, "$fwrite"),
+            SysTask::FDisplayB => self.print_file(args, Some('b'), true, "$fdisplayb"),
+            SysTask::FDisplayH => self.print_file(args, Some('h'), true, "$fdisplayh"),
+            SysTask::FDisplayO => self.print_file(args, Some('o'), true, "$fdisplayo"),
+            SysTask::FWriteB => self.print_file(args, Some('b'), false, "$fwriteb"),
+            SysTask::FWriteH => self.print_file(args, Some('h'), false, "$fwriteh"),
+            SysTask::FWriteO => self.print_file(args, Some('o'), false, "$fwriteo"),
             SysTask::Monitor => {
                 // IEEE 1364: $monitorはシミュレーション全体で1つだけアクティブ。
                 // 新しい呼び出しが前の登録を置き換える。ここでは登録のみ行い、
@@ -547,7 +566,25 @@ impl Interpreter {
             SysTask::Stop => {
                 self.finished = true;
             }
-            SysTask::Strobe => self.strobe_queue.push(args.to_vec()),
+            SysTask::Strobe => self.strobe_queue.push((None, args.to_vec())),
+            SysTask::FStrobe => {
+                if let Some((&fd, rest)) = args.split_first() {
+                    self.strobe_queue.push((Some(fd), rest.to_vec()));
+                }
+            }
+            SysTask::FMonitor => {
+                if let Some((&fd, rest)) = args.split_first() {
+                    self.fmonitor_args = Some((fd, rest.to_vec()));
+                    self.fmonitor_last = None;
+                }
+            }
+            SysTask::FClose => {
+                if let Some(&fd) = args.first() {
+                    let target = self.eval_expr(fd).pad_to_width(32) as u32;
+                    self.close_file(target);
+                }
+            }
+            SysTask::FFlush => self.flush_files(),
             SysTask::Time => {} // used as expression only
             SysTask::DumpFile => {
                 // $dumpfile("path") — store path for $dumpvars to activate
@@ -577,15 +614,130 @@ impl Interpreter {
 
     fn print_display(&mut self, args: &[ExprId], radix: Option<char>) {
         let s = self.format_args_radix(args, radix);
-        println!("{}", s);
-        self.output_buf.push_str(&s);
-        self.output_buf.push('\n');
+        self.emit_stdout(&s, true);
     }
 
     fn print_write(&mut self, args: &[ExprId], radix: Option<char>) {
         let s = self.format_args_radix(args, radix);
-        print!("{}", s);
-        self.output_buf.push_str(&s);
+        self.emit_stdout(&s, false);
+    }
+
+    fn print_file(&mut self, args: &[ExprId], radix: Option<char>, newline: bool, task: &str) {
+        let Some((&fd, rest)) = args.split_first() else {
+            return;
+        };
+        let target = self.eval_expr(fd).pad_to_width(32) as u32;
+        let s = self.format_args_radix(rest, radix);
+        self.emit(target, &s, newline, task);
+    }
+
+    /// stdoutへは従来の表示と取得用バッファを常に同時に更新する。
+    fn emit_stdout(&mut self, s: &str, newline: bool) {
+        if newline {
+            println!("{}", s);
+            self.output_buf.push_str(s);
+            self.output_buf.push('\n');
+        } else {
+            print!("{}", s);
+            self.output_buf.push_str(s);
+        }
+    }
+
+    /// fd/MCDの出力先へ書き込む。無効な記述子はstdoutへ警告し、停止しない。
+    fn emit(&mut self, target: u32, s: &str, newline: bool, task: &str) {
+        if target & 0x8000_0000 != 0 {
+            match target {
+                0x8000_0000 => return,
+                0x8000_0001 => return self.emit_stdout(s, newline),
+                0x8000_0002 => {
+                    if newline {
+                        eprintln!("{}", s);
+                    } else {
+                        eprint!("{}", s);
+                    }
+                    return;
+                }
+                _ => {
+                    if let Some(file) = self.files.get_mut(&target) {
+                        let _ = file.write_all(s.as_bytes());
+                        if newline {
+                            let _ = file.write_all(b"\n");
+                        }
+                        return;
+                    }
+                }
+            }
+        } else {
+            // MCD 0 は iverilog と同様に黙って破棄する。
+            if target == 0 {
+                return;
+            }
+            // 未オープンのビットを1つでも含む場合は、iverilog と同様に
+            // 有効なビットにも書かず、警告のみ出す。
+            let all_open = (1..32).all(|bit| {
+                let mask = 1u32 << bit;
+                target & mask == 0 || self.mcd_files.contains_key(&mask)
+            });
+            if all_open {
+                if target & 1 != 0 {
+                    self.emit_stdout(s, newline);
+                }
+                for bit in 1..32 {
+                    let mask = 1u32 << bit;
+                    if target & mask != 0 {
+                        if let Some(file) = self.mcd_files.get_mut(&mask) {
+                            let _ = file.write_all(s.as_bytes());
+                            if newline {
+                                let _ = file.write_all(b"\n");
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            self.emit_stdout(
+                &format!("WARNING: invalid MCD (0x{target:x}) given to {task}()."),
+                true,
+            );
+            return;
+        }
+        self.emit_stdout(
+            &format!("WARNING: invalid file descriptor (0x{target:x}) given to {task}()."),
+            true,
+        );
+    }
+
+    fn close_file(&mut self, target: u32) {
+        if let Some(mut file) = self.files.remove(&target) {
+            let _ = file.flush();
+            return;
+        }
+        if target.count_ones() == 1 {
+            if let Some(mut file) = self.mcd_files.remove(&target) {
+                let _ = file.flush();
+            }
+        }
+    }
+
+    fn flush_files(&mut self) {
+        for file in self.files.values_mut() {
+            let _ = file.flush();
+        }
+        for file in self.mcd_files.values_mut() {
+            let _ = file.flush();
+        }
+    }
+
+    /// 遅延出力時にclose済みの出力先を黙って抑止するための判定。
+    fn output_target_is_open(&self, target: u32) -> bool {
+        if target & 0x8000_0000 != 0 {
+            return matches!(target, 0x8000_0000..=0x8000_0002) || self.files.contains_key(&target);
+        }
+        target & 1 != 0
+            || (1..32).any(|bit| {
+                let mask = 1u32 << bit;
+                target & mask != 0 && self.mcd_files.contains_key(&mask)
+            })
     }
 
     /// `$readmemh`/`$readmemb` でファイルからメモリ配列を初期化する。
@@ -743,6 +895,49 @@ impl Interpreter {
             Expr::Empty => LogicVal::new(0, 0, 0),
             Expr::Time => LogicVal::new(64, self.now, 0),
             Expr::STime => LogicVal::new(32, self.now, 0),
+            Expr::Fopen(path_id, mode_id) => self.open_file(path_id, mode_id),
+        }
+    }
+
+    fn open_file(&mut self, path_id: ExprId, mode_id: Option<ExprId>) -> LogicVal {
+        let Expr::StringLit(path) = self.design.get_expr(path_id).clone() else {
+            return LogicVal::new(32, 0, 0);
+        };
+        let mode = mode_id.and_then(|id| match self.design.get_expr(id) {
+            Expr::StringLit(s) => Some(s.as_str()),
+            _ => None,
+        });
+        if path.is_empty() || mode.is_some_and(|m| m.starts_with('r')) {
+            if mode.is_some_and(|m| m.starts_with('r')) {
+                self.emit_stdout("WARNING: $fopen read mode is not supported.", true);
+            }
+            return LogicVal::new(32, 0, 0);
+        }
+        let mut options = OpenOptions::new();
+        options.write(true).create(true);
+        if mode.is_some_and(|m| m.starts_with('a')) {
+            options.append(true);
+        } else {
+            options.truncate(true);
+        }
+        let Ok(file) = options.open(path.as_str()) else {
+            return LogicVal::new(32, 0, 0);
+        };
+        if mode.is_none() {
+            let Some(bit) = (1..31).find(|&bit| !self.mcd_files.contains_key(&(1u32 << bit)))
+            else {
+                return LogicVal::new(32, 0, 0);
+            };
+            let fd = 1u32 << bit;
+            self.mcd_files.insert(fd, BufWriter::new(file));
+            LogicVal::new(32, fd as u64, 0)
+        } else {
+            let mut fd = 0x8000_0003u32;
+            while self.files.contains_key(&fd) {
+                fd = fd.wrapping_add(1);
+            }
+            self.files.insert(fd, BufWriter::new(file));
+            LogicVal::new(32, fd as u64, 0)
         }
     }
 
@@ -1603,31 +1798,45 @@ impl Interpreter {
         if !self.monitor_enabled {
             return;
         }
-        let Some(args) = self.monitor_args.clone() else {
-            return;
-        };
-        if args.is_empty() {
-            return;
+        if let Some(args) = self.monitor_args.clone().filter(|args| !args.is_empty()) {
+            let monitored: Vec<ExprId> = args[1..]
+                .iter()
+                .copied()
+                .filter(|&id| !matches!(self.design.get_expr(id), Expr::Time | Expr::STime))
+                .collect();
+            let vals: Vec<LogicVal> = monitored.into_iter().map(|id| self.eval_expr(id)).collect();
+            if self.monitor_last.as_ref() != Some(&vals) {
+                let s = self.format_args(&args);
+                self.emit_stdout(&s, true);
+                self.monitor_last = Some(vals);
+            }
         }
-        let monitored: Vec<ExprId> = args[1..]
-            .iter()
-            .copied()
-            .filter(|&id| !matches!(self.design.get_expr(id), Expr::Time | Expr::STime))
-            .collect();
-        let vals: Vec<LogicVal> = monitored.into_iter().map(|id| self.eval_expr(id)).collect();
-        if self.monitor_last.as_ref() != Some(&vals) {
-            let s = self.format_args(&args);
-            println!("{}", s);
-            self.output_buf.push_str(&s);
-            self.output_buf.push('\n');
-            self.monitor_last = Some(vals);
+        if let Some((fd, args)) = self.fmonitor_args.clone() {
+            let monitored: Vec<ExprId> = args[1..].to_vec();
+            let vals: Vec<LogicVal> = monitored.into_iter().map(|id| self.eval_expr(id)).collect();
+            if self.fmonitor_last.as_ref() != Some(&vals) {
+                let target = self.eval_expr(fd).pad_to_width(32) as u32;
+                let s = self.format_args(&args);
+                if self.output_target_is_open(target) {
+                    self.emit(target, &s, true, "$fmonitor");
+                }
+                self.fmonitor_last = Some(vals);
+            }
         }
     }
 
     fn flush_strobe(&mut self) {
         let queue = std::mem::take(&mut self.strobe_queue);
-        for args in queue {
-            self.print_display(&args, None);
+        for (fd, args) in queue {
+            if let Some(fd) = fd {
+                let target = self.eval_expr(fd).pad_to_width(32) as u32;
+                let s = self.format_args(&args);
+                if self.output_target_is_open(target) {
+                    self.emit(target, &s, true, "$fstrobe");
+                }
+            } else {
+                self.print_display(&args, None);
+            }
         }
     }
 

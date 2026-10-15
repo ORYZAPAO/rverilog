@@ -1,5 +1,23 @@
 mod common;
 use common::{expected_stdout, run_sim, workspace_root};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+fn fileio_path(label: &str, ext: &str) -> std::path::PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "rverilog_fileio_{}_{}_{}.{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+        label,
+        ext
+    ))
+}
+
+fn fileio_source(name: &str, source: String) -> std::path::PathBuf {
+    let path = fileio_path(name, "v");
+    std::fs::write(&path, source).expect("一時Verilogソースの作成");
+    path
+}
 
 #[test]
 fn test_counter4() {
@@ -763,4 +781,85 @@ fn test_monitor_onoff() {
         &[root.join("tests/integration/cases/monitor_onoff/dut.v")],
     );
     assert_eq!(got, expected_stdout("monitor_onoff"));
+}
+
+#[test]
+fn test_fileio_stdout() {
+    let root = workspace_root();
+    let got = run_sim(
+        "dut",
+        &[root.join("tests/integration/cases/fileio_stdout/dut.v")],
+    );
+    assert_eq!(got, expected_stdout("fileio_stdout"));
+}
+
+#[test]
+fn test_fileio_files_and_readmemh() {
+    let first = fileio_path("first", "txt");
+    let second = fileio_path("second", "txt");
+    let hex = fileio_path("hex", "txt");
+    let source = fileio_source(
+        "files",
+        format!(
+            "module dut; integer a,b,c; reg [7:0] mem [0:0]; initial begin a=$fopen(\"{}\"); b=$fopen(\"{}\"); $fdisplay(a|b, \"mcd\"); c=$fopen(\"{}\", \"w\"); $fwrite(c, \"0a\\n\"); $fflush(c); $readmemh(\"{}\", mem); $display(\"mem=%h\", mem[0]); $finish; end endmodule",
+            first.display(), second.display(), hex.display(), hex.display()
+        ),
+    );
+    let output = run_sim("dut", std::slice::from_ref(&source));
+    assert!(output.contains("mem=0a"));
+    assert_eq!(
+        std::fs::read_to_string(&first).expect("最初の出力ファイルを読む"),
+        "mcd\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&second).expect("二番目の出力ファイルを読む"),
+        "mcd\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&hex).expect("hex出力ファイルを読む"),
+        "0a\n"
+    );
+    std::fs::remove_file(source).expect("一時Verilogソースの削除");
+    std::fs::remove_file(first).expect("最初の出力ファイルの削除");
+    std::fs::remove_file(second).expect("二番目の出力ファイルの削除");
+    std::fs::remove_file(hex).expect("hex出力ファイルの削除");
+}
+
+#[test]
+fn test_fileio_descriptor_values_and_invalid_fd() {
+    let path = fileio_path("values", "txt");
+    let source = fileio_source(
+        "values",
+        format!(
+            "module dut; integer a,b,c,d; initial begin a=$fopen(\"{}\"); b=$fopen(\"{}\", \"w\"); c=$fopen(\"\"); $fclose(a); d=$fopen(\"{}\"); $display(\"%h %h %h %h\", a,b,c,d); $fdisplay(-1, \"bad\"); $finish; end endmodule",
+            path.display(), path.display(), path.display()
+        ),
+    );
+    let output = run_sim("dut", std::slice::from_ref(&source));
+    assert!(output.contains("00000002 80000003 00000000 00000002"));
+    assert!(output.contains("WARNING: invalid file descriptor (0xffffffff) given to $fdisplay()."));
+    std::fs::remove_file(source).expect("一時Verilogソースの削除");
+    std::fs::remove_file(path).expect("出力ファイルの削除");
+}
+
+/// 未オープンのMCDビットを含むマスクは、有効なビット(stdout含む)にも書かず警告のみ。
+#[test]
+fn test_fileio_mixed_invalid_mcd_writes_nothing() {
+    let path = fileio_path("mixedmcd", "txt");
+    let source = fileio_source(
+        "mixedmcd",
+        format!(
+            "module dut; integer a; initial begin a=$fopen(\"{}\"); $fdisplay(a|1|32'h40, \"x\"); $fdisplay(0, \"y\"); $finish; end endmodule",
+            path.display()
+        ),
+    );
+    let output = run_sim("dut", std::slice::from_ref(&source));
+    assert!(output.contains("WARNING: invalid MCD (0x43) given to $fdisplay()."));
+    assert!(!output.contains("x\n") && !output.contains("y\n"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("出力ファイルを読む"),
+        ""
+    );
+    std::fs::remove_file(source).expect("一時Verilogソースの削除");
+    std::fs::remove_file(path).expect("出力ファイルの削除");
 }

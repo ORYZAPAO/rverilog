@@ -3474,6 +3474,14 @@ fmt/clippy警告なし、`cargo test --workspace`全通過（picorv32_smoke含�
 
 - 次の候補: C節（`$stop`/`$strobe`等）、F節（`%s`）
 
+## 2026-10-15 C節 PR2: ファイルI/O
+
+### What was done
+
+- `$fopen`を関数として追加した。モード省略時はMCD（bit 1から）、モード指定時はfd（`0x80000003`から）を返し、close後は最小の空き番号を再利用する。`r`系モードは警告して0を返す。
+- `$fclose`/`$fflush`、`$fdisplay`/`$fwrite`とb/h/o派生、`$fstrobe`、`$fmonitor`を実装した。MCDのOR、stdout/stderrの予約fd、終了時の全ファイルflush、および無効記述子へのstdout警告を含む。
+- `fileio_stdout`をiverilogとのbit-exact比較へ追加し、ファイル出力・MCD・fd値・無効fd警告・`$readmemh`往復の回帰テストを追加した。
+
 ## 2026-10-12 A9: 連続代入の遅延(慣性遅延)
 
 ブランチ`feat/assign-delay`。実装はCodex、レビューと独立検証は私。

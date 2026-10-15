@@ -263,6 +263,8 @@ pub enum Expr {
     /// `$time`（64bit）と`$stime`（32bit）。
     Time,
     STime,
+    /// `$fopen(path[, mode])`。引数はelaboration時に文字列リテラルへ制限する。
+    Fopen(ExprId, Option<ExprId>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +320,18 @@ pub enum SysTask {
     WriteB,
     WriteH,
     WriteO,
+    FDisplay,
+    FWrite,
+    FDisplayB,
+    FDisplayH,
+    FDisplayO,
+    FWriteB,
+    FWriteH,
+    FWriteO,
+    FStrobe,
+    FMonitor,
+    FClose,
+    FFlush,
     Monitor,
     MonitorOn,
     MonitorOff,

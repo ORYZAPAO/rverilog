@@ -54,11 +54,11 @@ fn test_specify_block_is_unsupported() {
 }
 
 #[test]
-fn test_fopen_is_unsupported() {
+fn test_feof_is_unsupported() {
     assert_unsupported(
-        "fopen",
-        "module top; integer fd; initial fd = $fopen(\"out.txt\"); endmodule",
-        "system function $fopen",
+        "feof",
+        "module top; integer fd; initial fd = $feof(1); endmodule",
+        "system function $feof",
     );
 }
 
