@@ -1,7 +1,5 @@
 display
 fdisplay
 write-display
-monitor 0
 strobe 0
-monitor 1
 $finish at time 2

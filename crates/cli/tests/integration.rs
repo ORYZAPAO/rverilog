@@ -793,6 +793,17 @@ fn test_fileio_stdout() {
     assert_eq!(got, expected_stdout("fileio_stdout"));
 }
 
+/// `$fmonitor`は古いiverilog(CIのapt版)が未実装のため、iverilog比較は行わない。
+#[test]
+fn test_fileio_fmonitor() {
+    let root = workspace_root();
+    let got = run_sim(
+        "dut",
+        &[root.join("tests/integration/cases/fileio_fmonitor/dut.v")],
+    );
+    assert_eq!(got, expected_stdout("fileio_fmonitor"));
+}
+
 #[test]
 fn test_fileio_files_and_readmemh() {
     let first = fileio_path("first", "txt");
