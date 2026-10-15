@@ -2448,8 +2448,18 @@ fn lower_system_task(
     let task = match name_text {
         "$display" => SysTask::Display,
         "$write" => SysTask::Write,
+        "$displayb" => SysTask::DisplayB,
+        "$displayh" => SysTask::DisplayH,
+        "$displayo" => SysTask::DisplayO,
+        "$writeb" => SysTask::WriteB,
+        "$writeh" => SysTask::WriteH,
+        "$writeo" => SysTask::WriteO,
         "$monitor" => SysTask::Monitor,
+        "$monitoron" => SysTask::MonitorOn,
+        "$monitoroff" => SysTask::MonitorOff,
         "$finish" => SysTask::Finish,
+        "$stop" => SysTask::Stop,
+        "$strobe" => SysTask::Strobe,
         "$time" => SysTask::Time,
         "$dumpfile" => SysTask::DumpFile,
         "$dumpvars" => SysTask::DumpVars,
@@ -2458,21 +2468,25 @@ fn lower_system_task(
         n => return Err(unsupported(&format!("system task {}", n))),
     };
 
-    let args = collect_syscall_args(tree, sys);
+    let args = collect_syscall_args(tree, sys)?;
     Ok(Stmt::SysCall(task, args))
 }
 
-fn collect_syscall_args(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Vec<Expr> {
+fn collect_syscall_args(
+    tree: &SyntaxTree,
+    sys: &sv_parser::SystemTfCall,
+) -> Result<Vec<Expr>, FrontendError> {
     let mut args = Vec::new();
     match sys {
         sv_parser::SystemTfCall::ArgExpression(s) => {
             // nodes.1 is Paren<(List<Symbol, Option<Expression>>, ...)>
             // .nodes.1 is the inner tuple, .0 is the List
             let list = &s.nodes.1.nodes.1 .0;
-            for e in list.contents().into_iter().flatten() {
-                if let Ok(expr) = lower_expression(tree, e) {
-                    args.push(expr);
-                }
+            for e in list.contents() {
+                args.push(match e {
+                    Some(e) => lower_expression(tree, e)?,
+                    None => Expr::Empty,
+                });
             }
         }
         sv_parser::SystemTfCall::ArgOptionl(s) => {
@@ -2480,17 +2494,18 @@ fn collect_syscall_args(tree: &SyntaxTree, sys: &sv_parser::SystemTfCall) -> Vec
                 // Paren.nodes.1 is ListOfArguments
                 if let sv_parser::ListOfArguments::Ordered(o) = &paren.nodes.1 {
                     // ListOfArgumentsOrdered.nodes.0 is List<Symbol, Option<Expression>>
-                    for e in o.nodes.0.contents().into_iter().flatten() {
-                        if let Ok(expr) = lower_expression(tree, e) {
-                            args.push(expr);
-                        }
+                    for e in o.nodes.0.contents() {
+                        args.push(match e {
+                            Some(e) => lower_expression(tree, e)?,
+                            None => Expr::Empty,
+                        });
                     }
                 }
             }
         }
         _ => {}
     }
-    args
+    Ok(args)
 }
 
 fn lower_case(tree: &SyntaxTree, cs: &sv_parser::CaseStatement) -> Result<Stmt, FrontendError> {
@@ -2853,11 +2868,11 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
                 let name_text = system_tf_name(tree, sys);
                 match name_text {
                     "$random" => {
-                        let args = collect_syscall_args(tree, sys);
+                        let args = collect_syscall_args(tree, sys)?;
                         Ok(Expr::SysFunc(SysFuncKind::Random, args))
                     }
                     "$signed" | "$unsigned" => {
-                        let args = collect_syscall_args(tree, sys);
+                        let args = collect_syscall_args(tree, sys)?;
                         if args.len() != 1 {
                             return Err(FrontendError::ParseError(format!(
                                 "{} requires exactly 1 argument",
@@ -2871,6 +2886,8 @@ fn lower_primary(tree: &SyntaxTree, p: &sv_parser::Primary) -> Result<Expr, Fron
                         };
                         Ok(Expr::SysFunc(kind, args))
                     }
+                    "$time" => Ok(Expr::SysFunc(SysFuncKind::Time, Vec::new())),
+                    "$stime" => Ok(Expr::SysFunc(SysFuncKind::STime, Vec::new())),
                     n => Err(unsupported(&format!("system function {} in expression", n))),
                 }
             }

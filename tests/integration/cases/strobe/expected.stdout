@@ -1,0 +1,4 @@
+monitor 0 10
+strobe 0 10
+$finish at time 1
+last 1 10

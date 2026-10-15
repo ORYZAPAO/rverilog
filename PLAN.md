@@ -370,10 +370,9 @@ iverilog 出力比較 CI 導入済み）。
 
 ### C. システムタスク・関数の不足
 
-- 未実装: `$stop`、`$strobe`、`$fopen`/`$fclose`/`$fwrite` 等ファイル I/O、
-  `$value$plusargs`/`$test$plusargs`、`$realtime`、`$signed`/`$unsigned`、`$dumpoff`/`$dumpon`
-- 式の中の `$time` が未対応（`eval_expr` に SysFunc 分岐がない。`$clog2` は elaboration 時の
-  定数畳み込みでのみ動作）
+- 未実装: `$fopen`/`$fclose`/`$fwrite` 等ファイル I/O、
+  `$value$plusargs`/`$test$plusargs`、`$realtime`、`$dumpoff`/`$dumpon`
+- `$time`/`$stime`は式で使用可能。`$random` は iverilog と数値非互換（固定シード xorshift64*、bit-exact 一致は目標外）
 - `$random` は iverilog と数値非互換（固定シード xorshift64*、bit-exact 一致は目標外）
 
 ### D. 設計と実装の乖離・死コード
@@ -491,11 +490,12 @@ frontend lowering 段でサブセット外として弾かれる・無言スキ�
 | `interface`/`modport`/`class`/`package`/`import` | ❌ 非対応 | Context 節で明示的に対象外 |
 | assertion（`assert`/`property`/`sequence`） | ❌ 非対応 | 同上 |
 | `unique`/`priority` case、`final` block | ❌ 非対応 | 分岐なし |
-| `$signed`/`$unsigned`/`$stop`/`$strobe`/ファイル I/O | ❌ 非対応 | `SysTask` 列挙に存在せず |
+| `$signed`/`$unsigned`/`$stop`/`$strobe`/ファイル I/O | △ 一部対応 | `$signed`/`$unsigned`/`$stop`/`$strobe`は対応済み。ファイル I/O は未対応 |
 
 実装済みシステムタスクは `SysTask` 列挙 (`crates/mir/src/ir.rs`) と
 `crates/sim/src/interp.rs::exec_syscall` の実装ベースで
-`$display`/`$write`/`$monitor`（実体は `$display` と同一動作）/`$finish`/`$time`/
+`$display`/`$write`/`$displayb`/`$displayh`/`$displayo`/`$writeb`/`$writeh`/`$writeo`/
+`$monitor`/`$monitoron`/`$monitoroff`/`$finish`/`$stop`/`$strobe`/`$time`/`$stime`/
 `$dumpfile`/`$dumpvars`/`$readmemh`/`$readmemb`/`$random`/`$clog2`（elaboration 時定数畳込みのみ）
 の11個のみ。
 
