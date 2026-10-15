@@ -3502,3 +3502,16 @@ fmt/clippy警告なし、`cargo test --workspace`全通過、`counter4`・`fifo_
 ### 検証
 
 fmt/clippy警告なし、`cargo test --workspace`全通過。
+
+## 2026-10-15 C節 PR1: system task/function 拡張
+
+### What was done
+
+- `$time`/`$stime`を式としてloweringし、MIRの64bit/32bit時刻式で評価。`%t`/`%0t`も引数を1つ消費するよう修正した。
+- `$stop`、`$strobe`、`$displayb`/`$displayh`/`$displayo`、`$writeb`/`$writeh`/`$writeo`、`$monitoron`/`$monitoroff`を追加。`$strobe`は同時刻の更新収束後に、monitorの後で印字する。
+- system task引数のlowering失敗を握りつぶさず、空引数の位置も保持するようにした。
+- `time_expr`、`stop_task`、`strobe`、`display_radix`、`monitor_onoff`を追加し、iverilog比較へ登録。`$fopen`が未対応のままエラーになるテストも追加した。
+
+### 検証
+
+`cargo fmt --check`、`cargo clippy --workspace --all-targets`、`cargo test --workspace`を実行。

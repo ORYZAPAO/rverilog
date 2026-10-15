@@ -240,6 +240,8 @@ pub enum CaseKind {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
+    /// システムタスク引数リスト内の空スロット。
+    Empty,
     Const(LogicVal),
     Net(NetId),
     BitSel(NetId, ExprId),
@@ -258,6 +260,9 @@ pub enum Expr {
     CallResult(Vec<StmtId>, NetId),
     /// `$random`/`$random(seed)`。seed があれば評価して一度だけRNG状態を上書きする（読み取り専用、書き戻しなし）。
     Random(Option<ExprId>),
+    /// `$time`（64bit）と`$stime`（32bit）。
+    Time,
+    STime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,8 +312,18 @@ pub enum UnOp {
 pub enum SysTask {
     Display,
     Write,
+    DisplayB,
+    DisplayH,
+    DisplayO,
+    WriteB,
+    WriteH,
+    WriteO,
     Monitor,
+    MonitorOn,
+    MonitorOff,
     Finish,
+    Stop,
+    Strobe,
     Time,
     DumpFile,
     DumpVars,

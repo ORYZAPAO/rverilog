@@ -54,6 +54,15 @@ fn test_specify_block_is_unsupported() {
 }
 
 #[test]
+fn test_fopen_is_unsupported() {
+    assert_unsupported(
+        "fopen",
+        "module top; integer fd; initial fd = $fopen(\"out.txt\"); endmodule",
+        "system function $fopen",
+    );
+}
+
+#[test]
 fn test_multi_value_continuous_assign_delay_is_unsupported() {
     assert_unsupported(
         "continuous_assign_delay3",

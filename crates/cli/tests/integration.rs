@@ -717,3 +717,50 @@ fn test_strength_display() {
         expected, got
     );
 }
+
+#[test]
+fn test_time_expr() {
+    let root = workspace_root();
+    let got = run_sim(
+        "dut",
+        &[root.join("tests/integration/cases/time_expr/dut.v")],
+    );
+    assert_eq!(got, expected_stdout("time_expr"));
+}
+
+#[test]
+fn test_stop_task() {
+    let root = workspace_root();
+    let got = run_sim(
+        "dut",
+        &[root.join("tests/integration/cases/stop_task/dut.v")],
+    );
+    assert_eq!(got, expected_stdout("stop_task"));
+}
+
+#[test]
+fn test_strobe() {
+    let root = workspace_root();
+    let got = run_sim("dut", &[root.join("tests/integration/cases/strobe/dut.v")]);
+    assert_eq!(got, expected_stdout("strobe"));
+}
+
+#[test]
+fn test_display_radix() {
+    let root = workspace_root();
+    let got = run_sim(
+        "dut",
+        &[root.join("tests/integration/cases/display_radix/dut.v")],
+    );
+    assert_eq!(got, expected_stdout("display_radix"));
+}
+
+#[test]
+fn test_monitor_onoff() {
+    let root = workspace_root();
+    let got = run_sim(
+        "dut",
+        &[root.join("tests/integration/cases/monitor_onoff/dut.v")],
+    );
+    assert_eq!(got, expected_stdout("monitor_onoff"));
+}

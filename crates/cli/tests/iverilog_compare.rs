@@ -32,6 +32,7 @@ fn run_iverilog(files: &[PathBuf]) -> String {
     );
 
     let run = Command::new("vvp")
+        .arg("-n")
         .arg(&vvp_path)
         .output()
         .expect("failed to run vvp");
@@ -42,15 +43,13 @@ fn run_iverilog(files: &[PathBuf]) -> String {
 
 /// rverilogとiverilogでは`$finish`通知メッセージの文言が異なる
 /// （rverilog: "$finish at time N" / iverilog: ".../file:NN: $finish called at N (1s)"）ため、
-/// 末尾の$finish系1行は両者から取り除いてから比較する。
+/// `$strobe`は$finish後に印字されるため、$finish/$stop系の通知行は位置によらず取り除く。
 fn strip_finish_line(output: &str) -> String {
-    let mut lines: Vec<&str> = output.lines().collect();
-    if let Some(last) = lines.last() {
-        if last.contains("$finish") {
-            lines.pop();
-        }
-    }
-    lines.join("\n")
+    output
+        .lines()
+        .filter(|line| !line.contains("$finish") && !line.contains("$stop"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn compare_case(top: &str, files: &[PathBuf]) {
@@ -492,5 +491,47 @@ fn compare_strength_display() {
     compare_case(
         "dut",
         &[root.join("tests/integration/cases/strength_display/dut.v")],
+    );
+}
+
+#[test]
+fn compare_time_expr() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/time_expr/dut.v")],
+    );
+}
+
+#[test]
+fn compare_stop_task() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/stop_task/dut.v")],
+    );
+}
+
+#[test]
+fn compare_strobe() {
+    let root = workspace_root();
+    compare_case("dut", &[root.join("tests/integration/cases/strobe/dut.v")]);
+}
+
+#[test]
+fn compare_display_radix() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/display_radix/dut.v")],
+    );
+}
+
+#[test]
+fn compare_monitor_onoff() {
+    let root = workspace_root();
+    compare_case(
+        "dut",
+        &[root.join("tests/integration/cases/monitor_onoff/dut.v")],
     );
 }

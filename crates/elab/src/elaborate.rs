@@ -125,7 +125,7 @@ impl<'a> ElabCtx<'a> {
     fn compute_expr_signed(&self, expr: &Expr) -> bool {
         match expr {
             // signed リテラル（8'sh..）は未対応のため常に unsigned 扱い（既知の割り切り）
-            Expr::Const(_) => false,
+            Expr::Const(_) | Expr::Empty => false,
             Expr::Net(id) => self.nets[id.0 as usize].is_signed,
             // ビット選択/部分選択/連結/リピート/メモリ読み出しは self-determined unsigned（IEEE準拠）
             Expr::BitSel(..)
@@ -135,7 +135,7 @@ impl<'a> ElabCtx<'a> {
             | Expr::Repeat(..)
             | Expr::MemRead(..) => false,
             Expr::StringLit(_) => false,
-            Expr::Random(_) => false,
+            Expr::Random(_) | Expr::Time | Expr::STime => false,
             Expr::CallResult(_, ret_net) => self.nets[ret_net.0 as usize].is_signed,
             Expr::Bin(op, l, r) => {
                 let ls = self.expr_signed[l.0 as usize];
@@ -1196,6 +1196,7 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
         return Ok(ctx.alloc_expr_signed(Expr::Const(v.clone()), true));
     }
     let mir = match e {
+        HirExpr::Empty => Expr::Empty,
         HirExpr::Const(v) => Expr::Const(v.clone()),
         HirExpr::SignedConst(_) => unreachable!(),
         HirExpr::Net(name) => {
@@ -1283,6 +1284,8 @@ fn lower_expr(ctx: &mut ElabCtx, scope: ScopeId, e: &HirExpr) -> Result<ExprId, 
                 .transpose()?;
             Expr::Random(seed_id)
         }
+        HirExpr::SysFunc(SysFuncKind::Time, _) => Expr::Time,
+        HirExpr::SysFunc(SysFuncKind::STime, _) => Expr::STime,
         // $signed/$unsigned: inner のトップ Expr を複製し signedness を明示して再登録する
         // （MIR に cast ノードは追加しない。幅は inner と同じ = self-determined）
         HirExpr::SysFunc(kind @ (SysFuncKind::Signed | SysFuncKind::Unsigned), args) => {
@@ -1715,7 +1718,7 @@ fn collect_sensitivity_expr(
     mems: &mut std::collections::HashSet<MemId>,
 ) -> bool {
     match &ctx.exprs[expr_id.0 as usize] {
-        Expr::Const(_) | Expr::StringLit(_) => true,
+        Expr::Empty | Expr::Const(_) | Expr::StringLit(_) | Expr::Time | Expr::STime => true,
         Expr::Net(net)
         | Expr::BitSel(net, _)
         | Expr::PartSel(net, _, _)
@@ -1805,7 +1808,9 @@ fn self_width(ctx: &ElabCtx, id: ExprId) -> u32 {
         Expr::Cond(_, t, f) => self_width(ctx, *t).max(self_width(ctx, *f)),
         Expr::MemRead(m, _) => ctx.memories[m.0 as usize].elem_width,
         Expr::CallResult(_, n) => ctx.nets[n.0 as usize].width,
-        Expr::Random(_) => 32,
+        Expr::Empty => 0,
+        Expr::Random(_) | Expr::STime => 32,
+        Expr::Time => 64,
     }
 }
 
@@ -2129,8 +2134,18 @@ fn lower_systask(t: &HirSysTask) -> SysTask {
     match t {
         HirSysTask::Display => SysTask::Display,
         HirSysTask::Write => SysTask::Write,
+        HirSysTask::DisplayB => SysTask::DisplayB,
+        HirSysTask::DisplayH => SysTask::DisplayH,
+        HirSysTask::DisplayO => SysTask::DisplayO,
+        HirSysTask::WriteB => SysTask::WriteB,
+        HirSysTask::WriteH => SysTask::WriteH,
+        HirSysTask::WriteO => SysTask::WriteO,
         HirSysTask::Monitor => SysTask::Monitor,
+        HirSysTask::MonitorOn => SysTask::MonitorOn,
+        HirSysTask::MonitorOff => SysTask::MonitorOff,
         HirSysTask::Finish => SysTask::Finish,
+        HirSysTask::Stop => SysTask::Stop,
+        HirSysTask::Strobe => SysTask::Strobe,
         HirSysTask::Time => SysTask::Time,
         HirSysTask::DumpFile => SysTask::DumpFile,
         HirSysTask::DumpVars => SysTask::DumpVars,

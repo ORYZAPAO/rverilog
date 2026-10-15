@@ -36,6 +36,7 @@ enum StepResult {
     Delay(u64),
     Wait(Sensitivity),
     Finish,
+    Stop,
     /// `fork`文を実行した。引数はfork ID。全分岐の完了までこのプロセスを止める。
     ForkJoin(u32),
 }
@@ -69,8 +70,12 @@ pub struct Interpreter {
     /// `$monitor` の現在の登録（IEEE 1364: シミュレーション全体で1つだけアクティブ、
     /// 新しい呼び出しが前の登録を置き換える）。
     monitor_args: Option<Vec<ExprId>>,
+    /// `$monitoroff`中はmonitorリージョンの印字を抑止する。
+    monitor_enabled: bool,
     /// 前回monitorが印字した際の監視対象値スナップショット（`args[1..]`の評価結果）。
     monitor_last: Option<Vec<LogicVal>>,
+    /// `$strobe`は同一時刻の更新が収束した後に印字する。
+    strobe_queue: Vec<Vec<ExprId>>,
     cont_dirty: VecDeque<u32>,
     /// cont_dirtyへの重複enqueueを防ぐビットセット。
     cont_queued: Vec<bool>,
@@ -125,7 +130,9 @@ impl Interpreter {
             fork_waiters: HashMap::new(),
             rng_state: 0x2545_F491_4F6C_DD1D,
             monitor_args: None,
+            monitor_enabled: true,
             monitor_last: None,
+            strobe_queue: Vec::new(),
             cont_dirty: VecDeque::new(),
             cont_queued: vec![false; cont_len],
             driver_vals: HashMap::new(),
@@ -181,6 +188,7 @@ impl Interpreter {
                     for proc in procs {
                         self.exec_proc(proc);
                         if self.finished {
+                            self.flush_strobe();
                             break 'outer;
                         }
                     }
@@ -224,8 +232,9 @@ impl Interpreter {
                 continue 'outer;
             }
 
-            // MONITOR region: active/inactive/NBAが完全収束した時点で1回だけ評価
+            // strobe/monitorリージョン: active/inactive/NBAが完全収束した時点で評価する。
             self.flush_monitor();
+            self.flush_strobe();
 
             // Advance to next future event
             if self.future.is_empty() {
@@ -308,6 +317,14 @@ impl Interpreter {
                 }
                 StepResult::Finish => {
                     let msg = format!("$finish at time {}", self.now);
+                    println!("{}", msg);
+                    self.output_buf.push_str(&msg);
+                    self.output_buf.push('\n');
+                    self.finished = true;
+                    return;
+                }
+                StepResult::Stop => {
+                    let msg = format!("$stop at time {}", self.now);
                     println!("{}", msg);
                     self.output_buf.push_str(&msg);
                     self.output_buf.push('\n');
@@ -413,6 +430,9 @@ impl Interpreter {
             }
 
             Stmt::SysCall(task, args) => {
+                if matches!(&task, SysTask::Stop) {
+                    return StepResult::Stop;
+                }
                 self.exec_syscall(task, &args);
                 if self.finished {
                     return StepResult::Finish;
@@ -500,6 +520,12 @@ impl Interpreter {
                 print!("{}", s);
                 self.output_buf.push_str(&s);
             }
+            SysTask::DisplayB => self.print_display(args, Some('b')),
+            SysTask::DisplayH => self.print_display(args, Some('h')),
+            SysTask::DisplayO => self.print_display(args, Some('o')),
+            SysTask::WriteB => self.print_write(args, Some('b')),
+            SysTask::WriteH => self.print_write(args, Some('h')),
+            SysTask::WriteO => self.print_write(args, Some('o')),
             SysTask::Monitor => {
                 // IEEE 1364: $monitorはシミュレーション全体で1つだけアクティブ。
                 // 新しい呼び出しが前の登録を置き換える。ここでは登録のみ行い、
@@ -508,9 +534,20 @@ impl Interpreter {
                 self.monitor_args = Some(args.to_vec());
                 self.monitor_last = None;
             }
+            SysTask::MonitorOn => {
+                self.monitor_enabled = true;
+                self.monitor_last = None;
+            }
+            SysTask::MonitorOff => self.monitor_enabled = false,
             SysTask::Finish => {
                 self.finished = true;
             }
+            // 通常文のStopはexec_procで通知行つきで処理する。関数・タスク本体
+            // (同期実行経路)では$finishと同様に通知行なしで終了する。
+            SysTask::Stop => {
+                self.finished = true;
+            }
+            SysTask::Strobe => self.strobe_queue.push(args.to_vec()),
             SysTask::Time => {} // used as expression only
             SysTask::DumpFile => {
                 // $dumpfile("path") — store path for $dumpvars to activate
@@ -536,6 +573,19 @@ impl Interpreter {
             // ここには到達しない。
             SysTask::ReadMemH | SysTask::ReadMemB => {}
         }
+    }
+
+    fn print_display(&mut self, args: &[ExprId], radix: Option<char>) {
+        let s = self.format_args_radix(args, radix);
+        println!("{}", s);
+        self.output_buf.push_str(&s);
+        self.output_buf.push('\n');
+    }
+
+    fn print_write(&mut self, args: &[ExprId], radix: Option<char>) {
+        let s = self.format_args_radix(args, radix);
+        print!("{}", s);
+        self.output_buf.push_str(&s);
     }
 
     /// `$readmemh`/`$readmemb` でファイルからメモリ配列を初期化する。
@@ -690,6 +740,9 @@ impl Interpreter {
                 let v = self.next_rand_u32();
                 LogicVal::new(32, v as u64, 0)
             }
+            Expr::Empty => LogicVal::new(0, 0, 0),
+            Expr::Time => LogicVal::new(64, self.now, 0),
+            Expr::STime => LogicVal::new(32, self.now, 0),
         }
     }
 
@@ -1547,13 +1600,21 @@ impl Interpreter {
     /// 1回だけ呼ぶ。登録済みの$monitor引数を評価し、前回印字時から値が変化して
     /// いた場合（初回登録直後を含む）のみ印字する。
     fn flush_monitor(&mut self) {
+        if !self.monitor_enabled {
+            return;
+        }
         let Some(args) = self.monitor_args.clone() else {
             return;
         };
         if args.is_empty() {
             return;
         }
-        let vals: Vec<LogicVal> = args[1..].iter().map(|&id| self.eval_expr(id)).collect();
+        let monitored: Vec<ExprId> = args[1..]
+            .iter()
+            .copied()
+            .filter(|&id| !matches!(self.design.get_expr(id), Expr::Time | Expr::STime))
+            .collect();
+        let vals: Vec<LogicVal> = monitored.into_iter().map(|id| self.eval_expr(id)).collect();
         if self.monitor_last.as_ref() != Some(&vals) {
             let s = self.format_args(&args);
             println!("{}", s);
@@ -1563,18 +1624,50 @@ impl Interpreter {
         }
     }
 
+    fn flush_strobe(&mut self) {
+        let queue = std::mem::take(&mut self.strobe_queue);
+        for args in queue {
+            self.print_display(&args, None);
+        }
+    }
+
     fn format_args(&mut self, args: &[ExprId]) -> String {
+        self.format_args_radix(args, None)
+    }
+
+    fn format_args_radix(&mut self, args: &[ExprId], radix: Option<char>) -> String {
         if args.is_empty() {
             return String::new();
         }
         let first = self.design.get_expr(args[0]).clone();
         if let Expr::StringLit(fmt) = first {
+            if let Some(spec) = radix.filter(|_| !fmt.contains('%')) {
+                return args
+                    .iter()
+                    .map(|&id| match self.design.get_expr(id).clone() {
+                        Expr::StringLit(s) => s.to_string(),
+                        _ => natural_repr_wide(spec, &self.eval_expr(id), false),
+                    })
+                    .collect();
+            }
             let now = self.now;
             format_string(&fmt, &args[1..], self, now)
         } else {
             // No format string: space-separated values
-            args.iter()
-                .map(|&id| self.eval_expr(id).to_string())
+            let value_args: Vec<ExprId> = args
+                .iter()
+                .copied()
+                .filter(|&id| !matches!(self.design.get_expr(id), Expr::Empty))
+                .collect();
+            value_args
+                .iter()
+                .map(|&id| {
+                    let val = self.eval_expr(id);
+                    match radix {
+                        Some(spec) => natural_repr_wide(spec, &val, false),
+                        None => val.to_string(),
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         }
@@ -1749,7 +1842,6 @@ fn format_string(fmt: &str, args: &[ExprId], interp: &mut Interpreter, now: u64)
                 }
                 's' | 'S' => result.push_str(&val.to_string()),
                 't' | 'T' => {
-                    arg_idx -= 1;
                     result.push_str(&now.to_string());
                 }
                 '%' => {

@@ -34,6 +34,8 @@ pub enum NetResolve {
 pub enum SysFuncKind {
     Clog2,
     Random,
+    Time,
+    STime,
     Signed,
     Unsigned,
 }
@@ -313,6 +315,8 @@ pub enum CaseKind {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
+    /// システムタスク引数リスト内の空スロット（`$display(a,,b)`）。
+    Empty,
     Const(LogicVal),
     /// signed literal: 符号無しの10進即値（`-7`, `2` 等）、または `'s` 基数指定
     /// （`4'sd5` 等）。IEEE 1364-2001 4.8: これらは既定でsigned文脈になる。
@@ -399,8 +403,18 @@ pub enum EdgeType {
 pub enum SysTask {
     Display,
     Write,
+    DisplayB,
+    DisplayH,
+    DisplayO,
+    WriteB,
+    WriteH,
+    WriteO,
     Monitor,
+    MonitorOn,
+    MonitorOff,
     Finish,
+    Stop,
+    Strobe,
     Time,
     DumpFile,
     DumpVars,
